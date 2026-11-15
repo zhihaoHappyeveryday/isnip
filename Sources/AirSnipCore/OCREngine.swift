@@ -186,11 +186,14 @@ public enum LocalVisionOCR {
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
 
+        // `automaticallyDetectsLanguage = true` makes Vision compile a model set per candidate language on the
+        // first run of every new binary (measured ~52 s vs ~14 s with a fixed list), so "auto" uses a fixed,
+        // priority-ordered list instead. zh-Hans first covers Simplified/Traditional Chinese, Japanese and English;
+        // Korean text needs the explicit 한국어 option (a Hangul-first list would drop Chinese lines).
+        request.automaticallyDetectsLanguage = false
         if languagePreference == "auto" || languagePreference.isEmpty {
-            request.automaticallyDetectsLanguage = true
             request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
         } else {
-            request.automaticallyDetectsLanguage = false
             switch languagePreference {
             case "zh-Hans":
                 request.recognitionLanguages = ["zh-Hans", "en-US"]
@@ -206,7 +209,7 @@ public enum LocalVisionOCR {
     /// which was measured at 16–25 s. Running one tiny request in the background at launch moves that cost
     /// off the user's critical path so the first real screenshot OCR is fast.
     public static func prewarm(languagePreference: String = "auto") {
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .userInitiated).async {
             guard let image = makeWarmupImage() else { return }
             let request = VNRecognizeTextRequest { _, _ in }
             configure(request, languagePreference: languagePreference)
