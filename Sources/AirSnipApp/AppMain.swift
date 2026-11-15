@@ -79,6 +79,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     public func bootstrap() {
         setupStatusBarItem()
         hotkeyRegistrationErrors = hotkeyManager.apply(hotkeys: config.hotkeys)
+        LocalVisionOCR.prewarm(languagePreference: config.ocr.language)
 
         DistributedNotificationCenter.default().addObserver(
             self,

@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreText
 import Vision
 
 public struct OCRTextSegment: Equatable, Sendable {
@@ -180,6 +181,61 @@ public enum OCRLinesJoiner {
 }
 
 public enum LocalVisionOCR {
+    /// Shared request configuration so the real OCR path and the warm-up path load the exact same Vision models.
+    static func configure(_ request: VNRecognizeTextRequest, languagePreference: String) {
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+
+        if languagePreference == "auto" || languagePreference.isEmpty {
+            request.automaticallyDetectsLanguage = true
+            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
+        } else {
+            request.automaticallyDetectsLanguage = false
+            switch languagePreference {
+            case "zh-Hans":
+                request.recognitionLanguages = ["zh-Hans", "en-US"]
+            case "zh-Hant":
+                request.recognitionLanguages = ["zh-Hant", "en-US"]
+            default:
+                request.recognitionLanguages = [languagePreference, "en-US"]
+            }
+        }
+    }
+
+    /// Vision loads / compiles its recognition models on the first request after boot or cache eviction,
+    /// which was measured at 16–25 s. Running one tiny request in the background at launch moves that cost
+    /// off the user's critical path so the first real screenshot OCR is fast.
+    public static func prewarm(languagePreference: String = "auto") {
+        DispatchQueue.global(qos: .utility).async {
+            guard let image = makeWarmupImage() else { return }
+            let request = VNRecognizeTextRequest { _, _ in }
+            configure(request, languagePreference: languagePreference)
+            try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        }
+    }
+
+    private static func makeWarmupImage() -> CGImage? {
+        let width = 480, height = 96
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let attributed = NSAttributedString(
+            string: "截图识字 iSnip OCR 123",
+            attributes: [
+                .font: CTFontCreateWithName("PingFangSC-Regular" as CFString, 40, nil),
+                .foregroundColor: CGColor(gray: 0, alpha: 1)
+            ]
+        )
+        let line = CTLineCreateWithAttributedString(attributed)
+        ctx.textPosition = CGPoint(x: 16, y: 32)
+        CTLineDraw(line, ctx)
+        return ctx.makeImage()
+    }
+
     public static func recognize(cgImage: CGImage, languagePreference: String = "auto") throws -> String {
         let detailed = try recognizeDetailed(
             cgImage: cgImage,
@@ -219,23 +275,7 @@ public enum LocalVisionOCR {
                 collectedSegments.append(OCRTextSegment(left: left, top: top, bottom: bottom, words: [str]))
             }
         }
-        textRequest.recognitionLevel = .accurate
-        textRequest.usesLanguageCorrection = true
-
-        if languagePreference == "auto" || languagePreference.isEmpty {
-            textRequest.automaticallyDetectsLanguage = true
-            textRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
-        } else {
-            textRequest.automaticallyDetectsLanguage = false
-            switch languagePreference {
-            case "zh-Hans":
-                textRequest.recognitionLanguages = ["zh-Hans", "en-US"]
-            case "zh-Hant":
-                textRequest.recognitionLanguages = ["zh-Hant", "en-US"]
-            default:
-                textRequest.recognitionLanguages = [languagePreference, "en-US"]
-            }
-        }
+        configure(textRequest, languagePreference: languagePreference)
 
         var requests: [VNRequest] = [textRequest]
 
