@@ -226,13 +226,17 @@ public enum SmokeTestRunner {
                 }
             }
 
-            if let ocrImg = ocrCtx.makeImage() {
+            guard let ocrImg = ocrCtx.makeImage() else {
+                fputs("FAIL: Failed to create OCR fixture\n", stderr)
+                return false
+            }
+            for language in ["auto", "zh-Hans"] {
                 let detailed = try LocalVisionOCR.recognizeDetailed(
                     cgImage: ocrImg,
-                    languagePreference: "zh-Hans",
+                    languagePreference: language,
                     detectBarcodes: true
                 )
-                guard detailed.rawText.contains("iSnip") else {
+                guard detailed.rawText.contains("极速截图"), detailed.rawText.contains("iSnip") else {
                     fputs("FAIL: LocalVisionOCR output missing expected text: \(detailed.rawText)\n", stderr)
                     return false
                 }
@@ -273,6 +277,41 @@ public enum SmokeTestRunner {
                       let quickSaved2 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: &saveCfg, configSaveURL: cfgURL),
                       FileManager.default.fileExists(atPath: quickSaved2.path),
                       quickSaved1 != quickSaved2 else {
+                    return false
+                }
+
+                // Exercise the same asynchronous recognition and result panel used by F2 / clipboard OCR,
+                // not just the synchronous Vision engine. This test uses only the synthetic fixture above.
+                let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+                let ocrManager = OCRBubbleManager()
+                ocrManager.recognizeAndPresent(rawSelectionImage: ocrImg, anchorScreenPoint: nil, config: defaultCfg)
+                let ocrDeadline = Date().addingTimeInterval(60)
+                while ocrManager.isRecognizing && Date() < ocrDeadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                }
+                let ocrPanelOK = !ocrManager.isRecognizing && ocrManager.errorMessage == nil
+                    && ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip")
+                    && ocrManager.barcodes.contains("https://github.com/zzusec/isnip")
+                defer { ocrManager.dismiss() }
+                if let previewPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_OCR_PREVIEW_PNG"] {
+                    guard let view = NSApp.windows.first(where: { !existingWindows.contains($0.windowNumber) })?.contentView else {
+                        fputs("FAIL: OCR result panel missing for preview\n", stderr)
+                        return false
+                    }
+                    view.layoutSubtreeIfNeeded()
+                    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+                    view.cacheDisplay(in: view.bounds, to: rep)
+                    guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+                    do {
+                        try png.write(to: URL(fileURLWithPath: previewPath))
+                    } catch {
+                        fputs("FAIL: Could not save OCR panel preview: \(error)\n", stderr)
+                        return false
+                    }
+                }
+                ocrManager.dismiss()
+                guard ocrPanelOK else {
+                    fputs("FAIL: OCR result panel did not finish recognition successfully\n", stderr)
                     return false
                 }
 

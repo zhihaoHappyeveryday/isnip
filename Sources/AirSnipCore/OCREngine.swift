@@ -181,6 +181,80 @@ public enum OCRLinesJoiner {
 }
 
 public enum LocalVisionOCR {
+    /// Vision downsizes large images internally, losing small text in long screenshots and even throwing
+    /// VNErrorInvalidImage when the short edge collapses to two pixels. Keep native pixels in overlapping
+    /// tiles for long/oversized images; ordinary screenshots still use a single request.
+    static func recognitionTiles(width: Int, height: Int) -> [CGRect] {
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        if max(width, height) <= 4096 && max(width, height) <= min(width, height) * 4 {
+            return [bounds]
+        }
+        let tileSize = 2048
+        let overlap = 256
+        func starts(length: Int) -> [Int] {
+            guard length > tileSize else { return [0] }
+            var result = [0]
+            while let last = result.last, last + tileSize < length {
+                result.append(min(last + tileSize - overlap, length - tileSize))
+            }
+            return result
+        }
+        return starts(length: height).flatMap { y in
+            starts(length: width).map { x in
+                CGRect(x: x, y: y, width: min(tileSize, width - x), height: min(tileSize, height - y))
+            }
+        }
+    }
+
+    struct RecognizedLine {
+        let text: String
+        let bounds: CGRect
+        let confidence: Float
+        let tileIndex: Int
+    }
+
+    /// Horizontal seams can cut a line in half. Match words (or individual CJK characters) by their
+    /// actual boxes instead of treating overlapping partial lines as duplicates and losing their tails.
+    private static func textRanges(in text: String) -> [Range<String.Index>] {
+        var ranges: [Range<String.Index>] = []
+        var wordStart: String.Index?
+        for index in text.indices {
+            let character = text[index]
+            if character.isWhitespace || OCRLinesJoiner.isCJK(character) {
+                if let start = wordStart { ranges.append(start..<index) }
+                wordStart = nil
+                if !character.isWhitespace { ranges.append(index..<text.index(after: index)) }
+            } else if wordStart == nil {
+                wordStart = index
+            }
+        }
+        if let start = wordStart { ranges.append(start..<text.endIndex) }
+        return ranges
+    }
+
+    /// Bounding boxes can shift slightly between tiles. Hard ownership cutoffs can drop a line from BOTH
+    /// tiles at a seam. Merge spatial duplicates instead, keeping repeated text at different positions.
+    static func mergeTileLines(_ lines: [RecognizedLine]) -> [OCRTextSegment] {
+        var unique: [RecognizedLine] = []
+        for line in lines.sorted(by: {
+            if $0.confidence != $1.confidence { return $0.confidence > $1.confidence }
+            return $0.text.count > $1.text.count
+        }) {
+            let isDuplicate = unique.contains { other in
+                guard other.tileIndex != line.tileIndex else { return false }
+                let overlap = line.bounds.intersection(other.bounds)
+                guard !overlap.isNull else { return false }
+                let smallerArea = min(line.bounds.width * line.bounds.height, other.bounds.width * other.bounds.height)
+                return overlap.width * overlap.height > smallerArea * 0.5
+            }
+            if !isDuplicate { unique.append(line) }
+        }
+        return unique.map { line in
+            OCRTextSegment(left: Double(line.bounds.minX), top: Double(line.bounds.minY),
+                           bottom: Double(line.bounds.maxY), words: [line.text])
+        }
+    }
+
     /// Shared request configuration so the real OCR path and the warm-up path load the exact same Vision models.
     static func configure(_ request: VNRecognizeTextRequest, languagePreference: String) {
         request.recognitionLevel = .accurate
@@ -253,56 +327,84 @@ public enum LocalVisionOCR {
         languagePreference: String = "auto",
         detectBarcodes: Bool = true
     ) throws -> OCRRecognitionResult {
-        let width = Double(cgImage.width)
-        let height = Double(cgImage.height)
-
-        var collectedSegments: [OCRTextSegment] = []
-        var capturedError: Error?
-        var detectedPayloads: [String] = []
-
-        let textRequest = VNRecognizeTextRequest { req, err in
-            if let err {
-                capturedError = err
-                return
-            }
-            guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
-            for obs in observations {
-                guard let candidate = obs.topCandidates(1).first else { continue }
-                let str = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !str.isEmpty else { continue }
-                // Vision normalized bbox has origin at bottom-left (0..1)
-                let box = obs.boundingBox
-                let left = box.minX * width
-                let top = (1.0 - box.maxY) * height
-                let bottom = (1.0 - box.minY) * height
-                collectedSegments.append(OCRTextSegment(left: left, top: top, bottom: bottom, words: [str]))
-            }
+        // There cannot be legible text or a barcode in a one-/two-pixel-wide image. Vision throws
+        // VNErrorInvalidImage for these inputs; return the normal empty result instead.
+        guard cgImage.width > 2, cgImage.height > 2 else {
+            return OCRRecognitionResult(rawText: "", paragraphText: "")
         }
-        configure(textRequest, languagePreference: languagePreference)
 
-        var requests: [VNRequest] = [textRequest]
+        var lines: [RecognizedLine] = []
+        var detectedPayloads: [String] = []
+        let tiles = recognitionTiles(width: cgImage.width, height: cgImage.height)
+        let hasHorizontalSeams = tiles.contains { $0.minX > 0 }
 
-        if detectBarcodes {
-            let barcodeRequest = VNDetectBarcodesRequest { req, _ in
-                guard let results = req.results as? [VNBarcodeObservation] else { return }
-                for item in results {
-                    if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !payload.isEmpty,
-                       !detectedPayloads.contains(payload) {
-                        detectedPayloads.append(payload)
+        for (tileIndex, tile) in tiles.enumerated() {
+            // Release Vision's intermediate images after every tile, not after the entire longshot.
+            try autoreleasepool {
+                let image: CGImage
+                if tiles.count == 1 {
+                    image = cgImage
+                } else if let crop = cgImage.cropping(to: tile) {
+                    image = crop
+                } else {
+                    throw NSError(domain: VNErrorDomain, code: VNErrorCode.invalidImage.rawValue,
+                                  userInfo: [NSLocalizedDescriptionKey: "无法读取识别图片，请重新截图。"])
+                }
+
+                let handler = VNImageRequestHandler(cgImage: image, options: [:])
+                let textRequest = VNRecognizeTextRequest()
+                configure(textRequest, languagePreference: languagePreference)
+                try handler.perform([textRequest])
+
+                for observation in textRequest.results ?? [] {
+                    guard let candidate = observation.topCandidates(1).first else { continue }
+                    let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    func append(_ text: String, box: CGRect) {
+                        // Convert Vision's bottom-left normalized boxes back to source-image pixels.
+                        lines.append(RecognizedLine(
+                            text: text,
+                            bounds: CGRect(
+                                x: tile.minX + box.minX * CGFloat(image.width),
+                                y: tile.minY + (1 - box.maxY) * CGFloat(image.height),
+                                width: box.width * CGFloat(image.width),
+                                height: box.height * CGFloat(image.height)
+                            ),
+                            confidence: candidate.confidence,
+                            tileIndex: tileIndex
+                        ))
+                    }
+                    if hasHorizontalSeams {
+                        let fragments = textRanges(in: candidate.string).compactMap { range -> (String, CGRect)? in
+                            guard let box = try? candidate.boundingBox(for: range) else { return nil }
+                            return (String(candidate.string[range]), box.boundingBox)
+                        }
+                        if !fragments.isEmpty {
+                            for (fragment, box) in fragments { append(fragment, box: box) }
+                        } else {
+                            append(text, box: observation.boundingBox)
+                        }
+                    } else {
+                        append(text, box: observation.boundingBox)
+                    }
+                }
+
+                if detectBarcodes {
+                    // Barcode detection is optional: a failure must not discard successfully recognized text.
+                    let barcodeRequest = VNDetectBarcodesRequest()
+                    if (try? handler.perform([barcodeRequest])) != nil {
+                        for item in barcodeRequest.results ?? [] {
+                            if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               !payload.isEmpty, !detectedPayloads.contains(payload) {
+                                detectedPayloads.append(payload)
+                            }
+                        }
                     }
                 }
             }
-            requests.append(barcodeRequest)
         }
 
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform(requests)
-        if let capturedError {
-            throw capturedError
-        }
-
-        let rawText = OCRLinesJoiner.joinSegments(collectedSegments)
+        let rawText = OCRLinesJoiner.joinSegments(mergeTileLines(lines))
         let paragraphText = OCRLinesJoiner.mergeWrappedParagraphs(rawText)
         return OCRRecognitionResult(
             rawText: rawText,
