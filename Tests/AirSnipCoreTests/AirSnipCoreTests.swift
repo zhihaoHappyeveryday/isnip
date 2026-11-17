@@ -66,6 +66,42 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertTrue(cfg.hotkeyConflicts().isEmpty)
     }
 
+    func testTranslationConfigMigrationAndRoundtrip() throws {
+        let legacy = try JSONDecoder().decode(AirSnipConfig.self, from: Data("{}".utf8))
+        XCTAssertEqual(legacy.translation.targetLanguage, "zh-Hans")
+        XCTAssertFalse(legacy.translation.showSelectionButton)
+        XCTAssertEqual(legacy.hotkeys.translateSelection, HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.option]))
+        XCTAssertEqual(legacy.hotkeys.translateCapture, HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.option]))
+        XCTAssertTrue(legacy.hotkeyConflicts().isEmpty)
+
+        var config = legacy
+        config.translation = TranslationConfig(targetLanguage: "ja", showSelectionButton: true)
+        config.hotkeys.translateSelection = .unbound
+        let decoded = try JSONDecoder().decode(AirSnipConfig.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(decoded, config)
+        let partial = try JSONDecoder().decode(TranslationConfig.self, from: Data(#"{"targetLanguage":"invalid"}"#.utf8))
+        XCTAssertEqual(partial, TranslationConfig())
+    }
+
+    func testNewTranslationHotkeysPreserveExistingBindings() throws {
+        for (slot, keyCode, addedSlot) in [
+            ("screenshot", kVK_ANSI_D, "translateSelection"),
+            ("ocrCapture", kVK_ANSI_S, "translateCapture"),
+            ("translateCapture", kVK_ANSI_D, "translateSelection"),
+            ("translateSelection", kVK_ANSI_S, "translateCapture"),
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "hotkeys": [slot: ["keyCode": keyCode, "modifiers": HotkeyModifiers.option.rawValue]],
+            ])
+            let config = try JSONDecoder().decode(AirSnipConfig.self, from: data)
+            XCTAssertTrue(config.hotkeyConflicts().isEmpty, slot)
+            XCTAssertTrue(addedSlot == "translateSelection" ? config.hotkeys.translateSelection.isUnbound : config.hotkeys.translateCapture.isUnbound)
+        }
+        var config = AirSnipConfig()
+        config.hotkeys.translateCapture = config.hotkeys.translateSelection
+        XCTAssertEqual(config.hotkeyConflicts().count, 1)
+    }
+
     func testAnnotationDocumentUndoRedoDeleteCurveAndCorner() {
         let doc = AnnotationDocument()
         let style = AnnotationStyle(color: ColorPalette.defaultSwatches[1], lineWidth: 4)

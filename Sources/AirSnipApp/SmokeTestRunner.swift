@@ -3,9 +3,139 @@ import CoreGraphics
 import CoreImage
 import ImageIO
 import SwiftUI
+import Translation
 import AirSnipCore
 
 public enum SmokeTestRunner {
+    @MainActor
+    public static func runTranslationChecks() -> Bool {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        guard #available(macOS 15.0, *) else {
+            print("[translation] SKIP: 系统翻译需要 macOS 15+")
+            return true
+        }
+        let clipboardCount = NSPasteboard.general.changeCount
+        let previousWindows = Set(app.windows.map(\.windowNumber))
+        let manager = OCRBubbleManager()
+        defer { manager.dismiss() }
+        var config = AirSnipConfig()
+        config.translation.targetLanguage = "en"
+        manager.presentSelectedText("Hello world", anchorScreenPoint: nil, config: config)
+        let deadline = Date().addingTimeInterval(20)
+        while manager.isTranslating && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard manager.translatedText == "Hello world", !manager.isTranslating,
+              NSPasteboard.general.changeCount == clipboardCount else {
+            fputs("FAIL: Same-language translation or clipboard preservation failed\n", stderr)
+            return false
+        }
+        manager.text = "A new selection"
+        guard manager.translatedText.isEmpty, manager.translationRequest == nil else {
+            fputs("FAIL: Editing source text retained a stale translation\n", stderr)
+            return false
+        }
+        manager.requestTranslation()
+        let previousRequestID = manager.translationRequest?.id
+        manager.translationTargetLanguage = "zh-Hans"
+        guard let newRequestID = manager.translationRequest?.id, newRequestID != previousRequestID else {
+            fputs("FAIL: Target language change did not replace the translation request\n", stderr)
+            return false
+        }
+        manager.dismiss()
+        guard manager.translationRequest == nil, !manager.isTranslating else {
+            fputs("FAIL: Dismissing the panel retained an active translation\n", stderr)
+            return false
+        }
+        print("[translation] PASS: 同语言、原文编辑、目标切换、关闭取消和剪贴板保护")
+
+        let fixture = NSImage(size: NSSize(width: 640, height: 140), flipped: false) { rect in
+            NSColor.white.setFill()
+            rect.fill()
+            ("Hello world" as NSString).draw(at: NSPoint(x: 24, y: 50), withAttributes: [
+                .font: NSFont.systemFont(ofSize: 36),
+                .foregroundColor: NSColor.black,
+            ])
+            return true
+        }
+        guard let image = fixture.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return false }
+        config.ocr.language = "en-US"
+        manager.recognizeAndPresent(rawSelectionImage: image, anchorScreenPoint: nil, config: config, translateOnCompletion: true)
+        let ocrDeadline = Date().addingTimeInterval(30)
+        while (manager.isRecognizing || manager.isTranslating) && Date() < ocrDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard !manager.isRecognizing, !manager.isTranslating,
+              manager.errorMessage == nil, manager.translationError == nil,
+              manager.text.contains("Hello world"),
+              manager.translatedText == manager.text.trimmingCharacters(in: .whitespacesAndNewlines),
+              NSPasteboard.general.changeCount == clipboardCount else {
+            fputs("FAIL: OCR translation: recognizing=\(manager.isRecognizing), translating=\(manager.isTranslating), text=\(manager.text.debugDescription), result=\(manager.translatedText.debugDescription), error=\(manager.errorMessage ?? manager.translationError ?? "none")\n", stderr)
+            return false
+        }
+        print("[translation] PASS: 截图 OCR 后自动进入翻译流程（同语言）")
+        manager.dismiss()
+
+        var languageStatus: LanguageAvailability.Status?
+        let availabilityTask = Task { @MainActor in
+            languageStatus = await LanguageAvailability().status(from: Locale.Language(identifier: "en"), to: Locale.Language(identifier: "zh-Hans"))
+        }
+        let languageDeadline = Date().addingTimeInterval(15)
+        while languageStatus == nil && Date() < languageDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        availabilityTask.cancel()
+        guard let languageStatus else {
+            fputs("FAIL: Language availability check timed out\n", stderr)
+            return false
+        }
+        // ponytail: 自检仅使用已安装语言包，下载由用户首次翻译时通过系统弹窗确认。
+        if languageStatus == .installed {
+            config.translation.targetLanguage = "zh-Hans"
+            manager.presentSelectedText("Hello world", anchorScreenPoint: nil, config: config)
+            let translationDeadline = Date().addingTimeInterval(30)
+            while manager.isTranslating && Date() < translationDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            guard !manager.isTranslating, manager.translationError == nil,
+                  !manager.translatedText.isEmpty, manager.translatedText != manager.text else {
+                fputs("FAIL: Apple Translation: \(manager.translationError ?? "no result")\n", stderr)
+                return false
+            }
+            print("[translation] PASS: 系统英译中：\(manager.translatedText)")
+        } else {
+            config.translation.targetLanguage = "en"
+            manager.presentSelectedText("Hello world", anchorScreenPoint: nil, config: config)
+            let sameLanguageDeadline = Date().addingTimeInterval(10)
+            while manager.isTranslating && Date() < sameLanguageDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            print("[translation] SKIP: 英译中语言包未安装，首次翻译需按系统提示下载")
+        }
+        if let preview = ProcessInfo.processInfo.environment["ISNIP_TRANSLATION_PREVIEW_PNG"] {
+            guard let panel = app.windows.first(where: { !previousWindows.contains($0.windowNumber) }),
+                  let view = panel.contentView else { return false }
+            for (name, size, appearance) in [
+                ("", NSSize(width: 480, height: 540), NSAppearance.Name.aqua),
+                ("-compact-dark", NSSize(width: 420, height: 420), NSAppearance.Name.darkAqua),
+            ] {
+                panel.appearance = NSAppearance(named: appearance)
+                panel.setContentSize(size)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+                view.layoutSubtreeIfNeeded()
+                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+                let url = URL(fileURLWithPath: preview).deletingPathExtension()
+                do { try png.write(to: URL(fileURLWithPath: url.path + name + ".png")) }
+                catch { fputs("FAIL: Translation preview: \(error)\n", stderr); return false }
+            }
+        }
+        print("[translation] PASS")
+        return true
+    }
+
     public static func run() -> Bool {
         do {
             print("[smoke] 1/7 验证配置往返、无损压缩默认开启与 24 项工具栏可见性...")

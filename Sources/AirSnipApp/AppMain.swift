@@ -18,6 +18,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
     private var isCapturingSnapshots = false
+    private let selectionTranslation = SelectionTranslationController()
+    private var selectionSourceApplication: NSRunningApplication?
     private let configURL: URL
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
@@ -56,6 +58,17 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 $0.ocr.mergeLineBreaks = mergeBreaks
             }
         }
+        ocrBubbleManager.onTranslationTargetChanged = { [weak self] language in
+            self?.updateConfig { $0.translation.targetLanguage = language }
+        }
+        selectionTranslation.canShowButton = { [weak self] in
+            guard let self else { return false }
+            return self.activeCaptureSession == nil && self.activeLongshotSession == nil && !self.isCapturingSnapshots
+        }
+        selectionTranslation.onTranslate = { [weak self] text, anchor in
+            guard let self else { return }
+            self.ocrBubbleManager.presentSelectedText(text, anchorScreenPoint: anchor, config: self.config)
+        }
 
         hotkeyManager.onTrigger = { [weak self] action in
             guard let self else { return }
@@ -68,6 +81,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 self.triggerDirectLongshotCapture()
             case .ocrCapture:
                 self.triggerDirectOCRCapture()
+            case .translateSelection:
+                self.triggerSelectionTranslation()
+            case .translateCapture:
+                self.triggerOCRTranslation()
             case .pin:
                 self.triggerGlobalPinFromClipboard()
             case .pinBorderToggle:
@@ -79,6 +96,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     public func bootstrap() {
         setupStatusBarItem()
         hotkeyRegistrationErrors = hotkeyManager.apply(hotkeys: config.hotkeys)
+        if #available(macOS 15.0, *) {
+            selectionTranslation.setEnabled(config.translation.showSelectionButton)
+        }
         LocalVisionOCR.prewarm(languagePreference: config.ocr.language)
 
         DistributedNotificationCenter.default().addObserver(
@@ -123,10 +143,15 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func updateConfig(_ mutate: (inout AirSnipConfig) -> Void) {
         let oldHotkeys = config.hotkeys
+        let oldSelectionButton = config.translation.showSelectionButton
         mutate(&config)
         try? config.save(to: configURL)
         if config.hotkeys != oldHotkeys {
             hotkeyRegistrationErrors = hotkeyManager.apply(hotkeys: config.hotkeys)
+        }
+        if config.translation.showSelectionButton != oldSelectionButton, #available(macOS 15.0, *) {
+            if config.translation.showSelectionButton { SelectedTextService.requestAccess() }
+            selectionTranslation.setEnabled(config.translation.showSelectionButton)
         }
     }
 
@@ -147,6 +172,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         populateStatusMenu(menu)
+    }
+
+    public func menuWillOpen(_ menu: NSMenu) {
+        selectionSourceApplication = NSWorkspace.shared.frontmostApplication
     }
 
     private func menuIcon(_ symbolName: String) -> NSImage? {
@@ -237,6 +266,18 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         ocrCapItem.target = self
         menu.addItem(ocrCapItem)
 
+        let selectionItem = NSMenuItem(title: "划词翻译", action: #selector(menuTranslateSelection), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.translateSelection, to: selectionItem, baseTitle: "划词翻译")
+        selectionItem.image = menuIcon("character.bubble")
+        selectionItem.target = self
+        menu.addItem(selectionItem)
+
+        let translateCaptureItem = NSMenuItem(title: "截图翻译", action: #selector(menuTranslateCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.translateCapture, to: translateCaptureItem, baseTitle: "截图翻译")
+        translateCaptureItem.image = menuIcon("character.viewfinder")
+        translateCaptureItem.target = self
+        menu.addItem(translateCaptureItem)
+
         let pinItem = NSMenuItem(title: "剪贴板贴图", action: #selector(menuPinClipboard), keyEquivalent: "")
         applyMenuShortcut(config.hotkeys.pin, to: pinItem, baseTitle: "剪贴板贴图")
         pinItem.image = menuIcon("pin")
@@ -293,6 +334,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     }
     @objc private func menuDirectOCRCapture() {
         startScreenCaptureOverlay(mode: .directOCRCapture, fromMenu: true)
+    }
+    @objc private func menuTranslateSelection() {
+        triggerSelectionTranslation(from: selectionSourceApplication)
+    }
+    @objc private func menuTranslateCapture() {
+        triggerOCRTranslation(fromMenu: true)
     }
     @objc private func menuPinClipboard() { triggerGlobalPinFromClipboard() }
     @objc private func menuOCRClipboard() { triggerOCRFromClipboard() }
@@ -370,6 +417,33 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         startScreenCaptureOverlay(mode: .directOCRCapture)
     }
 
+    public func triggerSelectionTranslation(from application: NSRunningApplication? = nil) {
+        guard translationAvailable(), activeCaptureSession == nil, activeLongshotSession == nil else { return }
+        do {
+            guard let app = application ?? NSWorkspace.shared.frontmostApplication else {
+                throw SelectedTextService.SelectionError.noSelection
+            }
+            let text = try SelectedTextService.readSelection(processID: app.processIdentifier)
+            ocrBubbleManager.presentSelectedText(text, anchorScreenPoint: NSEvent.mouseLocation, config: config)
+        } catch SelectedTextService.SelectionError.permissionRequired {
+            SelectedTextService.requestAccess()
+            ToastHUD.show("请开启 iSnip 的辅助功能权限", symbol: "hand.raised", tint: .systemOrange, duration: 3)
+        } catch {
+            ToastHUD.show("未读取到选中文字，可使用截图翻译", symbol: "text.viewfinder", tint: .systemOrange, duration: 3)
+        }
+    }
+
+    public func triggerOCRTranslation(fromMenu: Bool = false) {
+        guard translationAvailable() else { return }
+        startScreenCaptureOverlay(mode: .directOCRCapture, fromMenu: fromMenu, translateOCR: true)
+    }
+
+    private func translationAvailable() -> Bool {
+        if #available(macOS 15.0, *) { return true }
+        ToastHUD.show("系统翻译需要 macOS 15 或更新版本", symbol: "info.circle", tint: .systemOrange, duration: 3)
+        return false
+    }
+
     private func cleanupStaleCaptureSessionIfNeeded() {
         if let existing = activeCaptureSession, !existing.hasVisibleWindows {
             existing.cancelSession()
@@ -377,7 +451,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         }
     }
 
-    private func startScreenCaptureOverlay(mode: CaptureSessionCoordinator.SessionMode, fromMenu: Bool = false) {
+    private func startScreenCaptureOverlay(mode: CaptureSessionCoordinator.SessionMode, fromMenu: Bool = false, translateOCR: Bool = false) {
         guard activeLongshotSession == nil, !isCapturingSnapshots else { return }
 
         if let existing = activeCaptureSession {
@@ -400,7 +474,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             do {
                 let snapshots = try await ScreenCaptureService.captureAllDisplays()
                 guard !snapshots.isEmpty else { return }
-                let coordinator = self.makeSessionCoordinator(mode: mode)
+                let coordinator = self.makeSessionCoordinator(mode: mode, translateOCR: translateOCR)
                 self.activeCaptureSession = coordinator
                 coordinator.startWithSnapshots(snapshots)
             } catch {
@@ -466,7 +540,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.startStandaloneImageEdit(cgImage: image, backingScale: scale, screen: screen)
     }
 
-    private func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode) -> CaptureSessionCoordinator {
+    private func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
 
         coordinator.onConfigMutated = { [weak self] updated in
@@ -512,7 +586,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             self.ocrBubbleManager.recognizeAndPresent(
                 rawSelectionImage: rawImg,
                 anchorScreenPoint: anchor,
-                config: self.config
+                config: self.config,
+                translateOnCompletion: translateOCR
             )
         }
         coordinator.onStartLongshot = { [weak self] screen, vpRect, initBuf, forceAutoScroll in
@@ -625,6 +700,10 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
 @main
 public enum AirSnipMain {
     public static func main() {
+        if CommandLine.arguments.contains("--translation-self-test") {
+            let ok = MainActor.assumeIsolated { SmokeTestRunner.runTranslationChecks() }
+            exit(ok ? 0 : 1)
+        }
         if CommandLine.arguments.contains("--smoke-test") {
             let ok = SmokeTestRunner.run()
             exit(ok ? 0 : 1)

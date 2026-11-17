@@ -462,6 +462,8 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
     public var windowCapture: HotkeyBinding
     public var longshotCapture: HotkeyBinding
     public var ocrCapture: HotkeyBinding
+    public var translateSelection: HotkeyBinding
+    public var translateCapture: HotkeyBinding
     public var pin: HotkeyBinding
     public var pinBorderToggle: HotkeyBinding
     public var recapture: HotkeyBinding
@@ -473,6 +475,8 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
         windowCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F5, modifiers: []),
         longshotCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F4, modifiers: []),
         ocrCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F2, modifiers: []),
+        translateSelection: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.option]),
+        translateCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.option]),
         pin: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: []),
         pinBorderToggle: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: [.control]),
         recapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F1, modifiers: [.shift]),
@@ -483,6 +487,8 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
         self.windowCapture = windowCapture
         self.longshotCapture = longshotCapture
         self.ocrCapture = ocrCapture
+        self.translateSelection = translateSelection
+        self.translateCapture = translateCapture
         self.pin = pin
         self.pinBorderToggle = pinBorderToggle
         self.recapture = recapture
@@ -491,7 +497,8 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case screenshot, windowCapture, longshotCapture, ocrCapture, pin, pinBorderToggle, recapture, longshot, ocr
+        case screenshot, windowCapture, longshotCapture, ocrCapture, translateSelection, translateCapture
+        case pin, pinBorderToggle, recapture, longshot, ocr
     }
 
     public init(from decoder: Decoder) throws {
@@ -517,6 +524,14 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
             let existingGlobals = [ss, self.longshotCapture, oc, pn, pb]
             self.windowCapture = existingGlobals.contains(defaults.windowCapture) ? .unbound : defaults.windowCapture
         }
+        // Preserve old custom bindings when adding the translation shortcuts.
+        let existingGlobals = [ss, oc, pn, pb, self.longshotCapture, self.windowCapture]
+        let decodedCapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .translateCapture)
+        let decodedSelection = try c.decodeIfPresent(HotkeyBinding.self, forKey: .translateSelection)
+        self.translateSelection = decodedSelection
+            ?? ((existingGlobals + [decodedCapture ?? .unbound]).contains(defaults.translateSelection) ? .unbound : defaults.translateSelection)
+        self.translateCapture = decodedCapture
+            ?? ((existingGlobals + [self.translateSelection]).contains(defaults.translateCapture) ? .unbound : defaults.translateCapture)
         self.recapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .recapture) ?? defaults.recapture
         self.longshot = try c.decodeIfPresent(HotkeyBinding.self, forKey: .longshot) ?? defaults.longshot
         self.ocr = try c.decodeIfPresent(HotkeyBinding.self, forKey: .ocr) ?? defaults.ocr
@@ -746,6 +761,31 @@ public struct OcrConfig: Codable, Equatable, Sendable {
     ]
 }
 
+public struct TranslationConfig: Codable, Equatable, Sendable {
+    public var targetLanguage: String
+    public var showSelectionButton: Bool
+
+    public static let languageOptions: [(tag: String, label: String)] = [
+        ("zh-Hans", "简体中文"), ("en", "English"), ("ja", "日本語"),
+        ("ko", "한국어"), ("fr", "Français"), ("de", "Deutsch"), ("es", "Español"),
+    ]
+
+    public init(targetLanguage: String = "zh-Hans", showSelectionButton: Bool = false) {
+        self.targetLanguage = Self.languageOptions.contains { $0.tag == targetLanguage } ? targetLanguage : "zh-Hans"
+        self.showSelectionButton = showSelectionButton
+    }
+
+    private enum CodingKeys: String, CodingKey { case targetLanguage, showSelectionButton }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            targetLanguage: try c.decodeIfPresent(String.self, forKey: .targetLanguage) ?? "zh-Hans",
+            showSelectionButton: try c.decodeIfPresent(Bool.self, forKey: .showSelectionButton) ?? false
+        )
+    }
+}
+
 public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var autoStart: Bool
     public var theme: ThemeSetting
@@ -785,6 +825,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var autoCheckUpdate: Bool
     public var skippedVersion: String?
     public var ocr: OcrConfig
+    public var translation: TranslationConfig
 
     public init(
         autoStart: Bool = false,
@@ -824,7 +865,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         longshotScrollSpeed: LongshotScrollSpeed = .normal,
         autoCheckUpdate: Bool = true,
         skippedVersion: String? = nil,
-        ocr: OcrConfig = OcrConfig()
+        ocr: OcrConfig = OcrConfig(),
+        translation: TranslationConfig = TranslationConfig()
     ) {
         self.autoStart = autoStart
         self.theme = theme
@@ -864,6 +906,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.autoCheckUpdate = autoCheckUpdate
         self.skippedVersion = skippedVersion
         self.ocr = ocr
+        self.translation = translation
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -875,7 +918,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory, askBeforeSave
         case smartPngCompression, pngCompressionQuality, compressClipboardPng
         case longshotMaxHeight, longshotAutoScroll, longshotScrollSpeed
-        case autoCheckUpdate, skippedVersion, ocr
+        case autoCheckUpdate, skippedVersion, ocr, translation
     }
 
     public init(from decoder: Decoder) throws {
@@ -931,6 +974,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.autoCheckUpdate = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdate) ?? d.autoCheckUpdate
         self.skippedVersion = try c.decodeIfPresent(String.self, forKey: .skippedVersion)
         self.ocr = try c.decodeIfPresent(OcrConfig.self, forKey: .ocr) ?? d.ocr
+        self.translation = try c.decodeIfPresent(TranslationConfig.self, forKey: .translation) ?? d.translation
     }
 
     public static func defaultConfigFileURL() -> URL {
@@ -989,6 +1033,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
             ("窗体截图", hotkeys.windowCapture),
             ("页面长截图", hotkeys.longshotCapture),
             ("截图识字", hotkeys.ocrCapture),
+            ("划词翻译", hotkeys.translateSelection),
+            ("截图翻译", hotkeys.translateCapture),
             ("贴图", hotkeys.pin),
             ("贴图边框", hotkeys.pinBorderToggle),
         ]

@@ -37,6 +37,11 @@
 - **端侧离线 Vision OCR 与二维码识别（`F2` / `T`）**
   - 支持直接框选识字、截图内识字、贴图按 `T` 识字、长截图整图提取及剪贴板 / 本地图片文件识别。
   - 支持多语种实时切换（自动 / 简中 / 繁中 / English / 日本語 / 한국어）、段落软换行智能合并及二维码链接一键打开，**全程本地离线推理，绝不上传云端**。
+- **划词翻译与 OCR 翻译（macOS 15+）**
+  - 在其他应用中选中文字，按 `⌥D` 打开原文与译文浮窗；可在「设置 → OCR 与翻译」开启「划词后显示翻译按钮」，划选或双击取词后点击翻译。
+  - 按 `⌥S` 框选屏幕，识别完成后自动翻译；普通 OCR、贴图识字、长截图识字和图片识字结果也可点击「翻译」。
+  - 使用 Apple Translation，无需 API Key；首次使用可能提示下载语言包。默认译为简体中文，可切换目标语言、手动指定原文语言、修改原文后重新翻译和复制译文。
+  - 划词需要辅助功能权限；仅读取应用公开的选中文字，不模拟复制或改写剪贴板。不支持取词的应用（包括远程桌面画面）请使用截图翻译。原有截图、OCR 功能仍支持 macOS 14。
 
 ## 下载与安装
 
@@ -70,6 +75,7 @@ sh scripts/install-local.sh --no-pull
 | **全局** | `F5` | 独立窗体截图（`⌥`+点击切换阴影，`Tab` 切换叠放窗口） |
 | **全局** | `F4` | 页面长截图（框选或点选窗口后自动翻页拼接） |
 | **全局** | `F2` | 直接框选截图 OCR 识字 |
+| **全局** | `⌥D` / `⌥S` | 翻译选中文字 / 框选 OCR 后自动翻译（macOS 15+） |
 | **全局** | `F3` / `⌃F3` | 从剪贴板置顶贴图 / 切换全部贴图边框 |
 | **选区与输出** | `Enter` / 双击选区 | 复制截图到剪贴板并完成 |
 | **选区与输出** | `⌘S` / `⇧⌘S` | 静默保存到默认目录 / 弹出「另存为…」 |
@@ -107,6 +113,9 @@ sh scripts/test-app-smoke.sh
 swift test
 python3 scripts/test-release-policy.py
 
+# 翻译自检：只使用已安装的语言包，不自动下载；可选输出测试浮窗截图
+dist/iSnip.app/Contents/MacOS/iSnip --translation-self-test
+
 # 3. 打包并安装到本机 /Applications/iSnip.app
 sh scripts/install-local.sh --no-pull
 ```
@@ -114,4 +123,6 @@ sh scripts/install-local.sh --no-pull
 ## 隐私与开源许可
 
 - **零联网采集**：截图、标注、图像压缩、OCR 文字与二维码识别均 100% 在本机离线完成（仅在启用「自动检查更新」时访问 GitHub Releases API 查询最新版本号）。
+- **系统翻译**：使用 macOS Translation 框架；首次下载语言包需要联网，语言支持由系统提供。划词按钮默认关闭，开启后只在用户选择文字时尝试读取选区。
+- **实现参考**：[Easydict](https://github.com/tisfeng/Easydict) 的辅助功能取词、Vision OCR 与 Apple Translation 方案；iSnip 直接使用系统框架，未引入 Easydict 的依赖或多服务架构。
 - **开源协议**：本项目源码遵循 [GPL-3.0-only](LICENSE) 许可证；应用包内嵌命令行工具遵循各自开源协议（`pngquant` GPL-3.0、`oxipng` MIT）。

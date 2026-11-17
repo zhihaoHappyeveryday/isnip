@@ -839,6 +839,8 @@ public final class GlobalHotkeyManager {
         case ocrCapture = 4
         case longshotCapture = 5
         case windowCapture = 6
+        case translateSelection = 7
+        case translateCapture = 8
     }
 
     private static let globalSignature = OSType(0x4153_4E50)    // 'ASNP'
@@ -943,6 +945,8 @@ public final class GlobalHotkeyManager {
             (.windowCapture, "窗体截图", hotkeys.windowCapture),
             (.longshotCapture, "页面长截图", hotkeys.longshotCapture),
             (.ocrCapture, "截图识字", hotkeys.ocrCapture),
+            (.translateSelection, "划词翻译", hotkeys.translateSelection),
+            (.translateCapture, "截图翻译", hotkeys.translateCapture),
             (.pin, "贴图", hotkeys.pin),
             (.pinBorderToggle, "贴图边框", hotkeys.pinBorderToggle),
         ]

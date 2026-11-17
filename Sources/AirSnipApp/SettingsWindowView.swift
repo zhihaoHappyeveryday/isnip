@@ -77,7 +77,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
         case .toolbar: return "工具栏"
         case .hotkeys: return "快捷键"
         case .editor: return "标注"
-        case .ocr: return "OCR"
+        case .ocr: return "OCR 与翻译"
         case .about: return "关于"
         }
     }
@@ -904,6 +904,14 @@ private struct HotkeysSettingsPane: View {
                     app.updateConfig { $0.hotkeys.ocrCapture = b }
                 }
                 SettingsRowDivider()
+                HotkeyRow(title: "划词翻译", slotID: "global.translateSelection", binding: app.config.hotkeys.translateSelection, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.translateSelection = b }
+                }
+                SettingsRowDivider()
+                HotkeyRow(title: "截图翻译", slotID: "global.translateCapture", binding: app.config.hotkeys.translateCapture, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.translateCapture = b }
+                }
+                SettingsRowDivider()
                 HotkeyRow(title: "剪贴板贴图", slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.pin = b }
                 }
@@ -1265,7 +1273,7 @@ private struct OCRSettingsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("OCR")
+            SettingsPageHeader("OCR 与翻译")
 
             SettingsSectionCard("识别") {
                 SettingsControlRow(title: "识别语言") {
@@ -1340,6 +1348,52 @@ private struct OCRSettingsPane: View {
                     Spacer()
                 }
                 .padding(14)
+            }
+
+            SettingsSectionCard("翻译") {
+                SettingsControlRow(title: "目标语言") {
+                    Picker("目标语言", selection: Binding(
+                        get: { app.config.translation.targetLanguage },
+                        set: { language in app.updateConfig { $0.translation.targetLanguage = language } }
+                    )) {
+                        ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
+                            Text(option.label).tag(option.tag)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 136)
+                }
+                SettingsRowDivider()
+                SettingsSwitchRow(
+                    title: "划词后显示翻译按钮",
+                    isOn: Binding(
+                        get: { app.config.translation.showSelectionButton },
+                        set: { enabled in app.updateConfig { $0.translation.showSelectionButton = enabled } }
+                    )
+                )
+                SettingsRowDivider()
+                HStack {
+                    Button {
+                        app.settingsController?.hide()
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 180_000_000)
+                            app.triggerOCRTranslation()
+                        }
+                    } label: {
+                        Label("截图翻译", systemImage: "character.viewfinder")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Spacer()
+                    Text("\(app.config.hotkeys.translateSelection.displayString) 划词翻译 · \(app.config.hotkeys.translateCapture.displayString) 截图翻译")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.primary)
+                }
+                .padding(14)
+                Text("使用 macOS 15+ 系统翻译，无需 API Key。首次使用可能需要下载语言包；划词取词需要辅助功能权限，不支持取词的应用可用截图翻译。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding([.horizontal, .bottom], 14)
             }
         }
     }
