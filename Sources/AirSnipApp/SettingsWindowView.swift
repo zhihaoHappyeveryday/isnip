@@ -1372,7 +1372,7 @@ private struct OCRSettingsPane: View {
                     )
                 )
                 SettingsRowDivider()
-                HStack {
+                HStack(spacing: 12) {
                     Button {
                         app.settingsController?.hide()
                         Task { @MainActor in
@@ -1384,12 +1384,15 @@ private struct OCRSettingsPane: View {
                     }
                     .buttonStyle(.borderedProminent)
                     Spacer()
-                    Text("\(app.config.hotkeys.translateSelection.displayString) 划词翻译 · \(app.config.hotkeys.translateCapture.displayString) 截图翻译")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("划词翻译  \(app.config.hotkeys.translateSelection.displayString)")
+                        Text("截图翻译  \(app.config.hotkeys.translateCapture.displayString)")
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
                 }
                 .padding(14)
-                Text("使用 macOS 15+ 系统翻译，无需 API Key。首次使用可能需要下载语言包；划词取词需要辅助功能权限，不支持取词的应用可用截图翻译。")
+                Text("划词取词需要辅助功能权限。远程桌面或无法取词的应用，请用「截图翻译」。\n使用 macOS 15+ 系统翻译，无需 API Key；首次使用可能需要下载语言包。")
                     .font(.system(size: 12))
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -31,24 +31,59 @@ public enum SmokeTestRunner {
             fputs("FAIL: Same-language translation or clipboard preservation failed\n", stderr)
             return false
         }
+        guard let panel = app.windows.first(where: { !previousWindows.contains($0.windowNumber) }),
+              panel.frame.height < 420,
+              !(panel.firstResponder is NSTextView) else {
+            fputs("FAIL: Short selection should open compactly without focusing the source editor\n", stderr)
+            return false
+        }
+        for screen in [
+            NSRect(x: 0, y: 0, width: 1440, height: 900),
+            NSRect(x: -1920, y: 180, width: 1920, height: 1080),
+            NSRect(x: 1440, y: -900, width: 1280, height: 800),
+        ] {
+            for anchor in [
+                NSPoint(x: screen.minX, y: screen.minY),
+                NSPoint(x: screen.maxX, y: screen.maxY),
+                NSPoint(x: screen.midX, y: screen.midY),
+            ] {
+                let frame = OCRBubbleManager.panelFrame(size: NSSize(width: 440, height: 560), near: anchor, visibleFrame: screen)
+                guard screen.insetBy(dx: 12, dy: 12).contains(frame), !frame.contains(anchor) else {
+                    fputs("FAIL: Translation panel obscures anchor or escapes visible screen\n", stderr)
+                    return false
+                }
+            }
+        }
+        panel.setContentSize(NSSize(width: 400, height: 350))
+        let resizedFrame = panel.frame
         manager.text = "A new selection"
         guard manager.translatedText.isEmpty, manager.translationRequest == nil else {
             fputs("FAIL: Editing source text retained a stale translation\n", stderr)
             return false
         }
-        manager.requestTranslation()
-        let previousRequestID = manager.translationRequest?.id
-        manager.translationTargetLanguage = "zh-Hans"
-        guard let newRequestID = manager.translationRequest?.id, newRequestID != previousRequestID else {
-            fputs("FAIL: Target language change did not replace the translation request\n", stderr)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        guard let translateKey = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+            context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+            isARepeat: false, keyCode: 36
+        ), panel.performKeyEquivalent(with: translateKey), manager.translationRequest != nil else {
+            fputs("FAIL: Command-Return did not request translation\n", stderr)
             return false
         }
-        manager.dismiss()
+        let previousRequestID = manager.translationRequest?.id
+        manager.translationTargetLanguage = "zh-Hans"
+        guard let newRequestID = manager.translationRequest?.id, newRequestID != previousRequestID,
+              panel.frame == resizedFrame else {
+            fputs("FAIL: Retranslating must replace the request and preserve the resized window\n", stderr)
+            return false
+        }
+        panel.cancelOperation(nil)
         guard manager.translationRequest == nil, !manager.isTranslating else {
             fputs("FAIL: Dismissing the panel retained an active translation\n", stderr)
             return false
         }
-        print("[translation] PASS: 同语言、原文编辑、目标切换、关闭取消和剪贴板保护")
+        print("[translation] PASS: 紧凑窗口、焦点、屏幕边界、重译保留尺寸、⌘Enter、原文编辑、目标切换、Esc 关闭和剪贴板保护")
 
         let fixture = NSImage(size: NSSize(width: 640, height: 140), flipped: false) { rect in
             NSColor.white.setFill()
@@ -94,6 +129,8 @@ public enum SmokeTestRunner {
         if languageStatus == .installed {
             config.translation.targetLanguage = "zh-Hans"
             manager.presentSelectedText("Hello world", anchorScreenPoint: nil, config: config)
+            // 极短原文可能触发系统语言选择弹窗；无人值守自检明确指定英语。
+            manager.translationSourceLanguage = "en"
             let translationDeadline = Date().addingTimeInterval(30)
             while manager.isTranslating && Date() < translationDeadline {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.02))
@@ -114,12 +151,8 @@ public enum SmokeTestRunner {
             print("[translation] SKIP: 英译中语言包未安装，首次翻译需按系统提示下载")
         }
         if let preview = ProcessInfo.processInfo.environment["ISNIP_TRANSLATION_PREVIEW_PNG"] {
-            guard let panel = app.windows.first(where: { !previousWindows.contains($0.windowNumber) }),
-                  let view = panel.contentView else { return false }
-            for (name, size, appearance) in [
-                ("", NSSize(width: 480, height: 540), NSAppearance.Name.aqua),
-                ("-compact-dark", NSSize(width: 420, height: 420), NSAppearance.Name.darkAqua),
-            ] {
+            guard let view = panel.contentView else { return false }
+            func capture(_ name: String, size: NSSize, appearance: NSAppearance.Name) -> Bool {
                 panel.appearance = NSAppearance(named: appearance)
                 panel.setContentSize(size)
                 RunLoop.current.run(until: Date().addingTimeInterval(0.15))
@@ -130,7 +163,37 @@ public enum SmokeTestRunner {
                 let url = URL(fileURLWithPath: preview).deletingPathExtension()
                 do { try png.write(to: URL(fileURLWithPath: url.path + name + ".png")) }
                 catch { fputs("FAIL: Translation preview: \(error)\n", stderr); return false }
+                return true
             }
+            guard capture("", size: NSSize(width: 440, height: 370), appearance: .aqua),
+                  capture("-compact-dark", size: NSSize(width: 400, height: 350), appearance: .darkAqua) else { return false }
+            config.translation.targetLanguage = "en"
+            let longText = Array(repeating: "Select text in any supported app, then press Option-D to translate it. You can edit the source and press Command-Return to translate again.", count: 12).joined(separator: "\n\n")
+            manager.presentSelectedText(longText, anchorScreenPoint: nil, config: config)
+            let longDeadline = Date().addingTimeInterval(10)
+            while manager.isTranslating && Date() < longDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            guard manager.translatedText == longText,
+                  capture("-long", size: NSSize(width: 440, height: 560), appearance: .aqua),
+                  capture("-long-compact-dark", size: NSSize(width: 400, height: 350), appearance: .darkAqua) else { return false }
+            manager.text = "Edited source text. Press Command-Return to update the translation."
+            guard capture("-edited", size: NSSize(width: 440, height: 370), appearance: .aqua) else { return false }
+            manager.text = ""
+            guard capture("-empty", size: NSSize(width: 400, height: 350), appearance: .darkAqua) else { return false }
+            manager.recognizeAndPresent(rawSelectionImage: image, anchorScreenPoint: nil, config: config, translateOnCompletion: true)
+            let previewDeadline = Date().addingTimeInterval(30)
+            while (manager.isRecognizing || manager.isTranslating) && Date() < previewDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            guard capture("-ocr", size: NSSize(width: 440, height: 420), appearance: .aqua) else { return false }
+            // 固定的识别等待状态仅用于检查布局，不伪造翻译输出。
+            manager.text = ""
+            manager.isRecognizing = true
+            guard capture("-recognizing", size: NSSize(width: 400, height: 350), appearance: .darkAqua) else { return false }
+            manager.isRecognizing = false
+            manager.errorMessage = "未识别到文字"
+            guard capture("-ocr-error", size: NSSize(width: 440, height: 420), appearance: .aqua) else { return false }
         }
         print("[translation] PASS")
         return true

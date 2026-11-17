@@ -25,7 +25,10 @@ private final class KeyableBubblePanel: NSPanel {
 public final class OCRBubbleManager: ObservableObject {
     @Published public var text: String = "" {
         didSet {
-            if oldValue != text { clearTranslation() }
+            if oldValue != text {
+                copiedFeedback = false
+                clearTranslation()
+            }
         }
     }
     @Published public var barcodes: [String] = []
@@ -58,6 +61,7 @@ public final class OCRBubbleManager: ObservableObject {
         }
     }
     @Published public var copiedFeedback: Bool = false
+    @Published public private(set) var copiedTranslationFeedback = false
     @Published private(set) var translationRequest: TextTranslationRequest?
     @Published public private(set) var isTranslationVisible = false
     @Published public private(set) var isTranslating = false
@@ -84,6 +88,7 @@ public final class OCRBubbleManager: ObservableObject {
 
     private var panel: KeyableBubblePanel?
     private var recognitionTask: Task<Void, Never>?
+    private var copyFeedbackTask: Task<Void, Never>?
     public var onConfigChanged: ((_ language: String, _ autoCopy: Bool, _ mergeLineBreaks: Bool) -> Void)?
     public var onTranslationTargetChanged: ((String) -> Void)?
 
@@ -109,7 +114,9 @@ public final class OCRBubbleManager: ObservableObject {
         clearTranslation()
 
         self.sourceImage = rawSelectionImage
+        self.text = ""
         self.copiedFeedback = false
+        self.copiedTranslationFeedback = false
         ensurePanel(near: anchorScreenPoint, theme: config.theme)
         startRecognition(on: rawSelectionImage)
     }
@@ -125,6 +132,7 @@ public final class OCRBubbleManager: ObservableObject {
         errorMessage = nil
         barcodes = []
         copiedFeedback = false
+        copiedTranslationFeedback = false
         text = selectedText
         isTranslationVisible = true
         ensurePanel(near: anchorScreenPoint, theme: config.theme)
@@ -218,21 +226,24 @@ public final class OCRBubbleManager: ObservableObject {
     private func clearTranslation() {
         translationRequest = nil
         translatedText = ""
+        copiedTranslationFeedback = false
         translationError = nil
         isTranslating = false
     }
 
     public func requestTranslation() {
+        let wasVisible = isTranslationVisible
         clearTranslation()
         isTranslationVisible = true
-        panel?.minSize = NSSize(width: 420, height: 420)
-        if let panel, panel.frame.width < 420 || panel.frame.height < 520 {
+        if sourceImage != nil { translateAfterRecognition = true }
+        panel?.minSize = NSSize(width: 400, height: 350)
+        if !wasVisible, let panel {
             var frame = panel.frame
             let bounds = (panel.screen ?? NSScreen.main)?.visibleFrame ?? frame
-            frame.size.width = max(420, frame.width)
-            frame.size.height = min(540, bounds.height - 24)
+            frame.size.width = max(400, frame.width)
+            frame.size.height = min(max(frame.height, preferredPanelHeight), bounds.height - 24)
             frame.origin.x = max(bounds.minX + 12, min(frame.origin.x, bounds.maxX - frame.width - 12))
-            frame.origin.y = max(bounds.minY + 12, panel.frame.maxY - frame.height)
+            frame.origin.y = max(bounds.minY + 12, min(panel.frame.maxY - frame.height, bounds.maxY - frame.height - 12))
             panel.setFrame(frame, display: true)
         }
         guard #available(macOS 15.0, *) else {
@@ -282,51 +293,78 @@ public final class OCRBubbleManager: ObservableObject {
     public func copyTranslation() {
         guard !translatedText.isEmpty else { return }
         OutputService.copyStringToClipboard(translatedText)
-        ToastHUD.show("已复制译文")
+        triggerCopiedFeedback(translation: true)
     }
 
-    private func triggerCopiedFeedback() {
-        copiedFeedback = true
-        Task { @MainActor [weak self] in
+    private func triggerCopiedFeedback(translation: Bool = false) {
+        copyFeedbackTask?.cancel()
+        copiedFeedback = !translation
+        copiedTranslationFeedback = translation
+        copyFeedbackTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
             self?.copiedFeedback = false
+            self?.copiedTranslationFeedback = false
         }
     }
 
     public func dismiss() {
         recognitionTask?.cancel()
+        copyFeedbackTask?.cancel()
+        copiedFeedback = false
+        copiedTranslationFeedback = false
         clearTranslation()
         panel?.orderOut(nil)
     }
 
+    var preferredPanelHeight: CGFloat {
+        guard isTranslationVisible else { return 350 }
+        let measured = (text as NSString).boundingRect(
+            with: NSSize(width: 392, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: NSFont.systemFont(ofSize: 15)]
+        ).height
+        return min(560, max(370, measured * 2 + 282))
+    }
+
+    // ponytail: 在鼠标旁放置并限制到可见屏幕；不引入独立的窗口布局系统。
+    static func panelFrame(size: NSSize, near anchor: NSPoint?, visibleFrame: NSRect) -> NSRect {
+        let bounds = visibleFrame.insetBy(dx: 12, dy: 12)
+        let size = NSSize(width: min(size.width, bounds.width), height: min(size.height, bounds.height))
+        var origin = NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2)
+        if let anchor {
+            origin.x = anchor.x + 16
+            if origin.x + size.width > bounds.maxX { origin.x = anchor.x - size.width - 16 }
+            origin.y = anchor.y - size.height - 16
+            if origin.y < bounds.minY { origin.y = anchor.y + 16 }
+        }
+        origin.x = max(bounds.minX, min(origin.x, bounds.maxX - size.width))
+        origin.y = max(bounds.minY, min(origin.y, bounds.maxY - size.height))
+        return NSRect(origin: origin, size: size)
+    }
+
     private func ensurePanel(near anchor: NSPoint?, theme: ThemeSetting) {
-        let width: CGFloat = 480
-        let height: CGFloat = isTranslationVisible ? 540 : 350
         let screen = anchor.flatMap { point in NSScreen.screens.first { $0.frame.contains(point) } }
             ?? NSScreen.main ?? NSScreen.screens.first
         let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-
-        let origin: NSPoint
-        if let anchor {
-            let x = max(vis.minX + 12, min(vis.maxX - width - 12, anchor.x - width * 0.5))
-            let y = max(vis.minY + 12, min(vis.maxY - height - 12, anchor.y - height * 0.5))
-            origin = NSPoint(x: x, y: y)
-        } else {
-            origin = NSPoint(x: vis.midX - width * 0.5, y: vis.midY - height * 0.5)
-        }
+        let frame = Self.panelFrame(
+            size: NSSize(width: isTranslationVisible ? 440 : 480, height: preferredPanelHeight),
+            near: anchor, visibleFrame: vis
+        )
 
         if let existing = panel {
-            existing.minSize = NSSize(width: isTranslationVisible ? 420 : 380, height: isTranslationVisible ? 420 : 250)
+            existing.minSize = NSSize(width: isTranslationVisible ? 400 : 380, height: isTranslationVisible ? 350 : 250)
             applyTheme(theme, to: existing)
-            existing.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
+            existing.setFrame(frame, display: true)
             NSApp.activate(ignoringOtherApps: true)
             existing.orderFrontRegardless()
             existing.makeKeyAndOrderFront(nil)
+            if isTranslationVisible { existing.makeFirstResponder(nil) }
             return
         }
 
         let newPanel = KeyableBubblePanel(
-            contentRect: NSRect(origin: origin, size: NSSize(width: width, height: height)),
+            contentRect: frame,
             styleMask: [.titled, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
@@ -340,17 +378,19 @@ public final class OCRBubbleManager: ObservableObject {
         newPanel.standardWindowButton(.zoomButton)?.isHidden = true
         newPanel.isMovableByWindowBackground = true
         newPanel.level = isPinnedOnTop ? .floating : .normal
-        newPanel.minSize = NSSize(width: isTranslationVisible ? 420 : 380, height: isTranslationVisible ? 420 : 250)
+        newPanel.minSize = NSSize(width: isTranslationVisible ? 400 : 380, height: isTranslationVisible ? 350 : 250)
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         newPanel.onEscape = { [weak self] in self?.dismiss() }
         applyTheme(theme, to: newPanel)
 
         newPanel.contentView = NSHostingView(rootView: OCRBubbleCardView(manager: self))
+        newPanel.setFrame(frame, display: false)
         self.panel = newPanel
 
         NSApp.activate(ignoringOtherApps: true)
         newPanel.orderFrontRegardless()
         newPanel.makeKeyAndOrderFront(nil)
+        if isTranslationVisible { newPanel.makeFirstResponder(nil) }
     }
 
     private func applyTheme(_ theme: ThemeSetting, to win: NSWindow) {
@@ -376,7 +416,7 @@ private struct OCRBubbleCardView: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             // Top bar
             HStack(spacing: 8) {
                 Image(systemName: manager.sourceImage == nil ? "character.bubble" : "text.viewfinder")
@@ -407,7 +447,7 @@ private struct OCRBubbleCardView: View {
                     Image(systemName: manager.isPinnedOnTop ? "pin.fill" : "pin.slash")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(manager.isPinnedOnTop ? Color.accentColor : Color.secondary)
-                        .frame(width: 24, height: 24)
+                        .frame(width: 28, height: 28)
                         .background(
                             RoundedRectangle(cornerRadius: 5)
                                 .fill(manager.isPinnedOnTop ? Color.accentColor.opacity(0.14) : Color.clear)
@@ -423,7 +463,7 @@ private struct OCRBubbleCardView: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
+                        .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
                 .help("关闭 (Esc)")
@@ -461,29 +501,49 @@ private struct OCRBubbleCardView: View {
                 }
             }
 
+            if manager.isTranslationVisible {
+                languageBar
+                HStack(spacing: 8) {
+                    Text("原文")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    if manager.sourceImage != nil {
+                        Toggle("合并换行", isOn: $manager.mergeLineBreaks)
+                            .toggleStyle(.checkbox)
+                            .controlSize(.small)
+                    }
+                    Button(manager.copiedFeedback ? "已复制" : "复制原文") {
+                        manager.copyCurrentText()
+                    }
+                    .controlSize(.small)
+                    .disabled(manager.text.isEmpty || manager.isRecognizing)
+                }
+            }
+
             // Editable native text area
             ZStack {
                 if manager.isRecognizing {
-                    VStack(spacing: 8) {
+                    HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
                         Text("识别中…")
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let err = manager.errorMessage {
-                    VStack(spacing: 8) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.secondary)
-                        Text(err)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                        Button("重试") {
-                            manager.rerunRecognitionIfPossible()
+                    ScrollView {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 18))
+                            Text(err)
+                                .font(.system(size: 13))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button("重试") {
+                                manager.rerunRecognitionIfPossible()
+                            }
+                            .controlSize(.small)
                         }
-                        .controlSize(.small)
+                        .padding(10)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -492,13 +552,15 @@ private struct OCRBubbleCardView: View {
                         .accessibilityLabel("原文")
                         .focused($editorFocused)
                         .scrollContentBackground(.hidden)
-                        .padding(6)
+                        .scrollIndicators(.visible)
+                        .help("可以编辑原文，按 ⌘Enter 重新翻译")
+                        .padding(8)
                         .onAppear {
-                            editorFocused = true
+                            editorFocused = !manager.isTranslationVisible
                         }
                 }
             }
-            .frame(minHeight: 80)
+            .frame(minHeight: manager.isTranslationVisible ? 54 : 80, maxHeight: manager.isTranslationVisible ? 116 : .infinity)
             .background(
                 RoundedRectangle(cornerRadius: 7)
                     .fill(Color(nsColor: .textBackgroundColor))
@@ -509,116 +571,134 @@ private struct OCRBubbleCardView: View {
             )
 
             if manager.isTranslationVisible {
+                Divider()
                 translationSection
             }
 
-            // Bottom bar
-            let copyDisabled = manager.text.isEmpty || manager.isRecognizing
-            HStack(spacing: 12) {
+            Divider()
+            let copyDisabled = manager.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manager.isRecognizing
+            HStack(spacing: 8) {
                 Button {
-                    manager.copyCurrentText()
+                    if manager.isTranslationVisible { manager.copyTranslation() }
+                    else { manager.copyCurrentText() }
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: manager.copiedFeedback ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(manager.copiedFeedback ? "已复制" : (manager.isTranslationVisible ? "复制原文" : "复制"))
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.accentColor)
-                    )
-                    .foregroundStyle(.white)
-                    .opacity(copyDisabled ? 0.45 : 1.0)
+                    let copied = manager.isTranslationVisible ? manager.copiedTranslationFeedback : manager.copiedFeedback
+                    Label(copied ? "已复制" : (manager.isTranslationVisible ? "复制译文" : "复制原文"),
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
+                .tint(.accentColor)
+                .controlSize(.regular)
                 .fixedSize(horizontal: true, vertical: false)
-                .disabled(copyDisabled)
-
-                Button("翻译") { manager.requestTranslation() }
-                    .controlSize(.small)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(copyDisabled)
-                    .help("翻译原文 (⌘Enter)")
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                .disabled(manager.isTranslationVisible ? (manager.translatedText.isEmpty || manager.isTranslating) : copyDisabled)
+                .help(manager.isTranslationVisible ? "复制完整译文 (⇧⌘C)" : "复制全部原文 (⇧⌘C)")
 
                 Spacer(minLength: 4)
 
-                if manager.sourceImage != nil {
+                if manager.sourceImage != nil && !manager.isTranslationVisible {
                     Toggle("合并换行", isOn: $manager.mergeLineBreaks)
                         .toggleStyle(.checkbox)
                         .controlSize(.small)
                         .font(.system(size: 12))
                         .fixedSize(horizontal: true, vertical: false)
                 }
+
+                Button(manager.translatedText.isEmpty ? "翻译" : "重新翻译") {
+                    editorFocused = false
+                    manager.requestTranslation()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(copyDisabled || manager.isTranslating)
+                .help("翻译原文 (⌘Enter)")
             }
         }
-        .padding(14)
+        .padding(16)
         .background(.regularMaterial)
+        .ignoresSafeArea(.container, edges: .top)
+        .onChange(of: manager.isTranslationVisible) { _, visible in
+            if visible { editorFocused = false }
+        }
+    }
+
+    private var languageBar: some View {
+        HStack(spacing: 10) {
+            Picker("原文语言", selection: $manager.translationSourceLanguage) {
+                Text("自动检测").tag("auto")
+                ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
+                    Text(option.label).tag(option.tag)
+                }
+            }
+            .help("原文语言")
+            Image(systemName: "arrow.right")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Picker("目标语言", selection: $manager.translationTargetLanguage) {
+                ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
+                    Text(option.label).tag(option.tag)
+                }
+            }
+            .help("目标语言")
+        }
+        .labelsHidden()
+        .controlSize(.regular)
     }
 
     private var translationSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Picker("原文语言", selection: $manager.translationSourceLanguage) {
-                    Text("自动检测").tag("auto")
-                    ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
-                .frame(width: 112)
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.secondary)
-                Picker("目标语言", selection: $manager.translationTargetLanguage) {
-                    ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
-                .frame(width: 112)
-                Spacer(minLength: 0)
-                Button("复制译文") { manager.copyTranslation() }
-                    .disabled(manager.translatedText.isEmpty || manager.isTranslating)
-            }
-            .labelsHidden()
-            .controlSize(.small)
-
-            ZStack {
+                Text("译文")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
                 if manager.isTranslating {
-                    VStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("翻译中…").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                } else if let error = manager.translationError {
-                    VStack(spacing: 8) {
-                        Text(error).font(.system(size: 12)).multilineTextAlignment(.center)
-                        Button("重试") { manager.requestTranslation() }.controlSize(.small)
-                    }
-                    .padding(12)
-                } else if !manager.translatedText.isEmpty {
-                    ScrollView {
+                    ProgressView().controlSize(.mini)
+                    Text("翻译中…").font(.system(size: 12))
+                }
+            }
+            ZStack(alignment: .topLeading) {
+                ScrollView {
+                    if let error = manager.translationError {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("暂时无法翻译", systemImage: "exclamationmark.triangle")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(error).font(.system(size: 13)).textSelection(.enabled)
+                            Button("重试") { manager.requestTranslation() }.controlSize(.small)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if !manager.translatedText.isEmpty {
                         Text(manager.translatedText)
-                            .font(.system(size: 14))
+                            .font(.system(size: 16))
+                            .lineSpacing(4)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
+                    } else {
+                        Text(translationHint)
+                            .font(.system(size: 13))
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .accessibilityLabel("译文")
-                } else {
-                    Text(manager.isRecognizing ? "识别完成后自动翻译" : "点击「翻译」更新译文")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
                 }
+                .scrollIndicators(.visible)
                 if #available(macOS 15.0, *), let request = manager.translationRequest {
                     AppleTranslationTaskView(manager: manager, request: request).id(request.id)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .frame(minHeight: 100)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: .textBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.14), lineWidth: 1))
+            .frame(minHeight: 54)
         }
+        .layoutPriority(1)
+    }
+
+    private var translationHint: String {
+        if manager.isTranslating { return "首次使用可能需要按系统提示下载语言包。" }
+        if manager.isRecognizing { return "识别完成后自动翻译" }
+        if manager.errorMessage != nil { return "请先重试文字识别，再翻译。" }
+        if manager.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "输入或粘贴原文后，点击「翻译」。"
+        }
+        return "原文已修改，点击「翻译」或按 ⌘Enter 更新译文。"
     }
 }
 
