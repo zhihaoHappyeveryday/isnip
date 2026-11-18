@@ -1,6 +1,63 @@
 import Foundation
 import Carbon
 
+public enum AppLanguage: String, Codable, CaseIterable, Sendable {
+    case system
+    case zhHans = "zh-Hans"
+    case en = "en"
+
+    public var isEnglish: Bool {
+        switch self {
+        case .zhHans:
+            return false
+        case .en:
+            return true
+        case .system:
+            let preferred = Locale.preferredLanguages.first?.lowercased() ?? "zh-hans"
+            return !preferred.hasPrefix("zh")
+        }
+    }
+
+    public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
+        switch self {
+        case .system:
+            return lang.isEnglish ? "System" : "跟随系统"
+        case .zhHans:
+            return "简体中文"
+        case .en:
+            return "English"
+        }
+    }
+}
+
+public enum L10n {
+    private static let lock = NSLock()
+    private static var _current: AppLanguage = .system
+
+    public static var current: AppLanguage {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _current
+        }
+        set {
+            lock.lock()
+            _current = newValue
+            lock.unlock()
+        }
+    }
+
+    @inline(__always)
+    public static func tr(_ zh: String, _ en: String, in lang: AppLanguage? = nil) -> String {
+        let resolved = lang ?? current
+        return resolved.isEnglish ? en : zh
+    }
+}
+
 public enum AnnotationTool: Int, Codable, CaseIterable, Sendable {
     case rect = 0
     case arrow = 1
@@ -18,33 +75,30 @@ public enum AnnotationTool: Int, Codable, CaseIterable, Sendable {
     ]
 
     public var displayName: String {
+        displayName(in: .zhHans)
+    }
+
+    public func displayName(in lang: AppLanguage) -> String {
         switch self {
-        case .rect: return "矩形"
-        case .arrow: return "箭头"
-        case .text: return "文本"
-        case .highlight: return "荧光笔"
-        case .blur: return "模糊"
-        case .glow: return "聚光灯"
-        case .number: return "序号"
-        case .line: return "直线"
-        case .ellipse: return "椭圆"
-        case .freehand: return "手绘"
+        case .rect: return lang.isEnglish ? "Rectangle" : "矩形"
+        case .arrow: return lang.isEnglish ? "Arrow" : "箭头"
+        case .text: return lang.isEnglish ? "Text" : "文本"
+        case .highlight: return lang.isEnglish ? "Highlighter" : "荧光笔"
+        case .blur: return lang.isEnglish ? "Blur" : "模糊"
+        case .glow: return lang.isEnglish ? "Spotlight" : "聚光灯"
+        case .number: return lang.isEnglish ? "Counter" : "序号"
+        case .line: return lang.isEnglish ? "Line" : "直线"
+        case .ellipse: return lang.isEnglish ? "Ellipse" : "椭圆"
+        case .freehand: return lang.isEnglish ? "Freehand" : "手绘"
         }
     }
 
     public var shortLabel: String {
-        switch self {
-        case .rect: return "矩形"
-        case .arrow: return "箭头"
-        case .text: return "文本"
-        case .highlight: return "荧光笔"
-        case .blur: return "模糊"
-        case .glow: return "聚光灯"
-        case .number: return "序号"
-        case .line: return "直线"
-        case .ellipse: return "椭圆"
-        case .freehand: return "手绘"
-        }
+        shortLabel(in: .zhHans)
+    }
+
+    public func shortLabel(in lang: AppLanguage) -> String {
+        displayName(in: lang)
     }
 
     public var sfSymbolName: String {
@@ -159,12 +213,16 @@ public enum ToolbarGroup: String, CaseIterable, Sendable {
     case file
 
     public var title: String {
+        title(in: .zhHans)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .tools: return "工具"
-        case .colors: return "颜色"
-        case .edit: return "编辑"
-        case .output: return "输出"
-        case .file: return "文件"
+        case .tools: return lang.isEnglish ? "Tools" : "工具"
+        case .colors: return lang.isEnglish ? "Colors" : "颜色"
+        case .edit: return lang.isEnglish ? "Edit" : "编辑"
+        case .output: return lang.isEnglish ? "Output" : "输出"
+        case .file: return lang.isEnglish ? "File" : "文件"
         }
     }
 
@@ -230,20 +288,24 @@ public enum ToolbarSlot: Equatable, Hashable, Sendable {
     }
 
     public var label: String {
+        label(in: .zhHans)
+    }
+
+    public func label(in lang: AppLanguage) -> String {
         switch self {
-        case .tool(let t): return t.shortLabel
+        case .tool(let t): return t.shortLabel(in: lang)
         case .color(let idx) where (0..<ColorPalette.swatchCount).contains(idx):
-            return "颜色\(idx + 1)"
-        case .color: return "颜色"
-        case .fill: return "填充"
-        case .undo: return "撤销"
-        case .redo: return "重做"
-        case .textRow: return "字体行"
-        case .pin: return "贴图"
-        case .longshot: return "长截图"
+            return lang.isEnglish ? "Color \(idx + 1)" : "颜色\(idx + 1)"
+        case .color: return lang.isEnglish ? "Color" : "颜色"
+        case .fill: return lang.isEnglish ? "Fill" : "填充"
+        case .undo: return lang.isEnglish ? "Undo" : "撤销"
+        case .redo: return lang.isEnglish ? "Redo" : "重做"
+        case .textRow: return lang.isEnglish ? "Font Bar" : "字体行"
+        case .pin: return lang.isEnglish ? "Pin" : "贴图"
+        case .longshot: return lang.isEnglish ? "Longshot" : "长截图"
         case .ocr: return "OCR"
-        case .copy: return "复制"
-        case .save: return "保存"
+        case .copy: return lang.isEnglish ? "Copy" : "复制"
+        case .save: return lang.isEnglish ? "Save" : "保存"
         }
     }
 
@@ -322,10 +384,14 @@ public enum MouseExtraButton: Int, Codable, Equatable, Hashable, Sendable {
     case side2 = 4
 
     public var displayName: String {
+        displayName(in: L10n.current)
+    }
+
+    public func displayName(in lang: AppLanguage) -> String {
         switch self {
-        case .middle: return "鼠标中键"
-        case .side1: return "鼠标侧键 1"
-        case .side2: return "鼠标侧键 2"
+        case .middle: return lang.isEnglish ? "Middle Click" : "鼠标中键"
+        case .side1: return lang.isEnglish ? "Mouse Button 4" : "鼠标侧键 1"
+        case .side2: return lang.isEnglish ? "Mouse Button 5" : "鼠标侧键 2"
         }
     }
 }
@@ -384,11 +450,15 @@ public struct HotkeyBinding: Codable, Equatable, Hashable, Sendable {
     }
 
     public var displayString: String {
+        displayString(in: L10n.current)
+    }
+
+    public func displayString(in lang: AppLanguage) -> String {
         if let mb = mouseButton {
-            return mb.displayName
+            return mb.displayName(in: lang)
         }
         guard let kc = keyCode else {
-            return "未设置"
+            return lang.isEnglish ? "Not Set" : "未设置"
         }
         return modifiers.displayPrefix + KeyCodeLabels.name(for: kc)
     }
@@ -471,10 +541,10 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
     public var ocr: HotkeyBinding
 
     public init(
-        screenshot: HotkeyBinding = HotkeyBinding(keyCode: kVK_F1, modifiers: []),
-        windowCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F5, modifiers: []),
-        longshotCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F4, modifiers: []),
-        ocrCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F2, modifiers: []),
+        screenshot: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_A, modifiers: [.control]),
+        windowCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.control]),
+        longshotCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.control]),
+        ocrCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_F, modifiers: [.control]),
         translateSelection: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.option]),
         translateCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.option]),
         pin: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: []),
@@ -544,10 +614,14 @@ public enum LongshotScrollSpeed: String, Codable, CaseIterable, Sendable {
     case fast = "fast"
 
     public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .slow: return "慢"
-        case .normal: return "标准"
-        case .fast: return "快"
+        case .slow: return lang.isEnglish ? "Slow" : "慢"
+        case .normal: return lang.isEnglish ? "Standard" : "标准"
+        case .fast: return lang.isEnglish ? "Fast" : "快"
         }
     }
 
@@ -609,10 +683,14 @@ public enum ThemeSetting: String, Codable, CaseIterable, Sendable {
     case dark
 
     public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .follow: return "跟随系统"
-        case .light: return "浅色"
-        case .dark: return "深色"
+        case .follow: return lang.isEnglish ? "System" : "跟随系统"
+        case .light: return lang.isEnglish ? "Light" : "浅色"
+        case .dark: return lang.isEnglish ? "Dark" : "深色"
         }
     }
 }
@@ -622,9 +700,13 @@ public enum PinPosition: String, Codable, CaseIterable, Sendable {
     case center
 
     public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .original: return "原位置"
-        case .center: return "屏幕居中"
+        case .original: return lang.isEnglish ? "Original" : "原位置"
+        case .center: return lang.isEnglish ? "Center" : "屏幕居中"
         }
     }
 }
@@ -635,10 +717,14 @@ public enum NameStyle: String, Codable, CaseIterable, Sendable {
     case date
 
     public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .datetime: return "日期时间"
-        case .timestamp: return "时间戳"
-        case .date: return "仅日期"
+        case .datetime: return lang.isEnglish ? "Date & Time" : "日期时间"
+        case .timestamp: return lang.isEnglish ? "Timestamp" : "时间戳"
+        case .date: return lang.isEnglish ? "Date Only" : "仅日期"
         }
     }
 
@@ -668,10 +754,14 @@ public enum PngCompressionQualityPreset: String, Codable, CaseIterable, Sendable
     case compact = "45-75"
 
     public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .visuallyLossless: return "视觉无损"
-        case .balanced: return "均衡"
-        case .compact: return "高压缩"
+        case .visuallyLossless: return lang.isEnglish ? "Lossless" : "视觉无损"
+        case .balanced: return lang.isEnglish ? "Balanced" : "均衡"
+        case .compact: return lang.isEnglish ? "Compact" : "高压缩"
         }
     }
 
@@ -695,8 +785,12 @@ public enum UiScaleSetting: String, Codable, CaseIterable, Sendable {
     case p150 = "150"
 
     public var title: String {
+        title(in: L10n.current)
+    }
+
+    public func title(in lang: AppLanguage) -> String {
         switch self {
-        case .auto: return "自动"
+        case .auto: return lang.isEnglish ? "Auto" : "自动"
         case .p100: return "100%"
         case .p125: return "125%"
         case .p150: return "150%"
@@ -751,6 +845,20 @@ public struct OcrConfig: Codable, Equatable, Sendable {
         ("ko-KR", "한국어"),
     ]
 
+    public static func supportedOptions(in lang: AppLanguage) -> [(tag: String, label: String)] {
+        if lang.isEnglish {
+            return [
+                ("auto", "Auto"),
+                ("zh-Hans", "Simplified Chinese"),
+                ("zh-Hant", "Traditional Chinese"),
+                ("en-US", "English"),
+                ("ja-JP", "日本語"),
+                ("ko-KR", "한국어"),
+            ]
+        }
+        return supportedOptions
+    }
+
     public static let compactOptions: [(tag: String, shortLabel: String)] = [
         ("auto", "自动"),
         ("zh-Hans", "简中"),
@@ -759,6 +867,20 @@ public struct OcrConfig: Codable, Equatable, Sendable {
         ("ja-JP", "日本語"),
         ("ko-KR", "한국어"),
     ]
+
+    public static func compactOptions(in lang: AppLanguage) -> [(tag: String, shortLabel: String)] {
+        if lang.isEnglish {
+            return [
+                ("auto", "Auto"),
+                ("zh-Hans", "ZH-Hans"),
+                ("zh-Hant", "ZH-Hant"),
+                ("en-US", "English"),
+                ("ja-JP", "日本語"),
+                ("ko-KR", "한국어"),
+            ]
+        }
+        return compactOptions
+    }
 }
 
 public struct TranslationConfig: Codable, Equatable, Sendable {
@@ -788,8 +910,10 @@ public struct TranslationConfig: Codable, Equatable, Sendable {
 
 public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var autoStart: Bool
+    public var language: AppLanguage
     public var theme: ThemeSetting
     public var hotkeys: HotkeyConfig
+    public var hotkeyDefaultsMigratedV2: Bool
     public var toolKeys: ToolKeysConfig
     public var pinPosition: PinPosition
     public var pinBorder: Bool
@@ -829,8 +953,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
 
     public init(
         autoStart: Bool = false,
+        language: AppLanguage = .system,
         theme: ThemeSetting = .follow,
         hotkeys: HotkeyConfig = HotkeyConfig(),
+        hotkeyDefaultsMigratedV2: Bool = true,
         toolKeys: ToolKeysConfig = ToolKeysConfig(),
         pinPosition: PinPosition = .original,
         pinBorder: Bool = true,
@@ -869,8 +995,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         translation: TranslationConfig = TranslationConfig()
     ) {
         self.autoStart = autoStart
+        self.language = language
         self.theme = theme
         self.hotkeys = hotkeys
+        self.hotkeyDefaultsMigratedV2 = hotkeyDefaultsMigratedV2
         self.toolKeys = toolKeys
         self.pinPosition = pinPosition
         self.pinBorder = pinBorder
@@ -910,7 +1038,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case autoStart, theme, hotkeys, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
+        case autoStart, language, theme, hotkeys, hotkeyDefaultsMigratedV2, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
         case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
         case styleDefaultsMigratedV2
@@ -925,8 +1053,49 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AirSnipConfig()
         self.autoStart = try c.decodeIfPresent(Bool.self, forKey: .autoStart) ?? d.autoStart
+        self.language = try c.decodeIfPresent(AppLanguage.self, forKey: .language) ?? d.language
         self.theme = try c.decodeIfPresent(ThemeSetting.self, forKey: .theme) ?? d.theme
-        self.hotkeys = try c.decodeIfPresent(HotkeyConfig.self, forKey: .hotkeys) ?? d.hotkeys
+        var decodedHotkeys = try c.decodeIfPresent(HotkeyConfig.self, forKey: .hotkeys) ?? d.hotkeys
+        let hkMigratedV2 = try c.decodeIfPresent(Bool.self, forKey: .hotkeyDefaultsMigratedV2) ?? false
+        if !hkMigratedV2 {
+            let legacyF1 = HotkeyBinding(keyCode: kVK_F1, modifiers: [])
+            let legacyF5 = HotkeyBinding(keyCode: kVK_F5, modifiers: [])
+            let legacyF4 = HotkeyBinding(keyCode: kVK_F4, modifiers: [])
+            let legacyF2 = HotkeyBinding(keyCode: kVK_F2, modifiers: [])
+            let newCtrlA = HotkeyBinding(keyCode: kVK_ANSI_A, modifiers: [.control])
+            let newCtrlS = HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.control])
+            let newCtrlD = HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.control])
+            let newCtrlF = HotkeyBinding(keyCode: kVK_ANSI_F, modifiers: [.control])
+
+            func others(_ excludeIdx: Int) -> [HotkeyBinding] {
+                let all = [
+                    decodedHotkeys.screenshot,
+                    decodedHotkeys.windowCapture,
+                    decodedHotkeys.longshotCapture,
+                    decodedHotkeys.ocrCapture,
+                    decodedHotkeys.translateSelection,
+                    decodedHotkeys.translateCapture,
+                    decodedHotkeys.pin,
+                    decodedHotkeys.pinBorderToggle,
+                ]
+                return all.enumerated().compactMap { idx, val in idx == excludeIdx ? nil : val }
+            }
+
+            if decodedHotkeys.screenshot == legacyF1 && !others(0).contains(newCtrlA) {
+                decodedHotkeys.screenshot = newCtrlA
+            }
+            if decodedHotkeys.windowCapture == legacyF5 && !others(1).contains(newCtrlS) {
+                decodedHotkeys.windowCapture = newCtrlS
+            }
+            if decodedHotkeys.longshotCapture == legacyF4 && !others(2).contains(newCtrlD) {
+                decodedHotkeys.longshotCapture = newCtrlD
+            }
+            if decodedHotkeys.ocrCapture == legacyF2 && !others(3).contains(newCtrlF) {
+                decodedHotkeys.ocrCapture = newCtrlF
+            }
+        }
+        self.hotkeys = decodedHotkeys
+        self.hotkeyDefaultsMigratedV2 = true
         self.toolKeys = try c.decodeIfPresent(ToolKeysConfig.self, forKey: .toolKeys) ?? d.toolKeys
         self.pinPosition = try c.decodeIfPresent(PinPosition.self, forKey: .pinPosition) ?? d.pinPosition
         self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
@@ -1010,13 +1179,15 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         sanitized.pinMaxCount = max(1, min(50, sanitized.pinMaxCount))
         sanitized.longshotMaxHeight = max(2000, min(100000, sanitized.longshotMaxHeight))
         if let rawObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           (rawObj["styleDefaultsMigratedV2"] as? Bool) != true {
+           ((rawObj["styleDefaultsMigratedV2"] as? Bool) != true || (rawObj["hotkeyDefaultsMigratedV2"] as? Bool) != true) {
             try? sanitized.save(to: url)
         }
+        L10n.current = sanitized.language
         return sanitized
     }
 
     public func save(to url: URL = Self.defaultConfigFileURL()) throws {
+        L10n.current = self.language
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
@@ -1026,38 +1197,49 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     }
 
     /// Detects duplicate bindings within global scope or within overlay scope.
-    public func hotkeyConflicts() -> [String] {
+    public func hotkeyConflicts(in lang: AppLanguage? = nil) -> [String] {
+        let l = lang ?? self.language
         var conflicts: [String] = []
         let globalList: [(String, HotkeyBinding)] = [
-            ("截图", hotkeys.screenshot),
-            ("窗体截图", hotkeys.windowCapture),
-            ("页面长截图", hotkeys.longshotCapture),
-            ("截图识字", hotkeys.ocrCapture),
-            ("划词翻译", hotkeys.translateSelection),
-            ("截图翻译", hotkeys.translateCapture),
-            ("贴图", hotkeys.pin),
-            ("贴图边框", hotkeys.pinBorderToggle),
+            (L10n.tr("截图", "Capture Area", in: l), hotkeys.screenshot),
+            (L10n.tr("窗体截图", "Capture Window", in: l), hotkeys.windowCapture),
+            (L10n.tr("页面长截图", "Scrolling Capture", in: l), hotkeys.longshotCapture),
+            (L10n.tr("截图识字", "Capture & OCR", in: l), hotkeys.ocrCapture),
+            (L10n.tr("划词翻译", "Translate Selection", in: l), hotkeys.translateSelection),
+            (L10n.tr("截图翻译", "Capture & Translate", in: l), hotkeys.translateCapture),
+            (L10n.tr("贴图", "Pin", in: l), hotkeys.pin),
+            (L10n.tr("贴图边框", "Pin Border", in: l), hotkeys.pinBorderToggle),
         ]
         for i in 0..<globalList.count {
             for j in (i + 1)..<globalList.count {
                 if !globalList[i].1.isUnbound && globalList[i].1 == globalList[j].1 {
-                    conflicts.append("\(globalList[i].0) 与 \(globalList[j].0) 冲突（\(globalList[i].1.displayString)）")
+                    let keyStr = globalList[i].1.displayString(in: l)
+                    if l.isEnglish {
+                        conflicts.append("\(globalList[i].0) conflicts with \(globalList[j].0) (\(keyStr))")
+                    } else {
+                        conflicts.append("\(globalList[i].0) 与 \(globalList[j].0) 冲突（\(keyStr)）")
+                    }
                 }
             }
         }
 
         var overlayList: [(String, HotkeyBinding)] = [
-            ("重新抓屏", hotkeys.recapture),
-            ("长截图", hotkeys.longshot),
+            (L10n.tr("重新抓屏", "Recapture", in: l), hotkeys.recapture),
+            (L10n.tr("长截图", "Longshot", in: l), hotkeys.longshot),
             ("OCR", hotkeys.ocr),
         ]
         for tool in AnnotationTool.allOrdered {
-            overlayList.append((tool.shortLabel, toolKeys.binding(for: tool)))
+            overlayList.append((tool.shortLabel(in: l), toolKeys.binding(for: tool)))
         }
         for i in 0..<overlayList.count {
             for j in (i + 1)..<overlayList.count {
                 if !overlayList[i].1.isUnbound && overlayList[i].1 == overlayList[j].1 {
-                    conflicts.append("\(overlayList[i].0) 与 \(overlayList[j].0) 冲突（\(overlayList[i].1.displayString)）")
+                    let keyStr = overlayList[i].1.displayString(in: l)
+                    if l.isEnglish {
+                        conflicts.append("\(overlayList[i].0) conflicts with \(overlayList[j].0) (\(keyStr))")
+                    } else {
+                        conflicts.append("\(overlayList[i].0) 与 \(overlayList[j].0) 冲突（\(keyStr)）")
+                    }
                 }
             }
         }

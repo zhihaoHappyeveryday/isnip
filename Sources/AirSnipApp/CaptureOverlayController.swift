@@ -1071,7 +1071,7 @@ final class OverlayCanvasView: NSView {
                     AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
                 }
 
-                let shadowTag = (iso.isWindowCapture && !iso.includeShadow) ? " · 无阴影" : ""
+                let shadowTag = (iso.isWindowCapture && !iso.includeShadow) ? L10n.tr(" · 无阴影", " · No Shadow") : ""
                 let pillText = iso.ownerName.isEmpty
                     ? "\(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
                     : "\(iso.ownerName) · \(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
@@ -1199,11 +1199,11 @@ final class OverlayCanvasView: NSView {
             }
 
             if windowPickerMode, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "点击窗口截图 · Space 切换框选")
+                drawCancelConfirmBanner(in: ctx, message: L10n.tr("点击窗口截图 · Space 切换框选", "Click a window to capture · Space for area"))
             } else if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "框选或点击窗口识字")
+                drawCancelConfirmBanner(in: ctx, message: L10n.tr("框选或点击窗口识字", "Select an area or click a window for OCR"))
             } else if coordinator?.isDirectLongshotCapture == true, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "框选区域或点击窗口长截图")
+                drawCancelConfirmBanner(in: ctx, message: L10n.tr("框选区域或点击窗口长截图", "Select an area or click a window for Longshot"))
             }
         }
 
@@ -1533,31 +1533,32 @@ final class OverlayCanvasView: NSView {
         // [□  ○  ╱  ↗  ✎  ▚  A  ①  ▣] | [📌  ↺  OCR] | [✕  ↕  ↓  ✓]
         var items: [BarButtonSpec] = []
 
+        let lang = cfg.language
         let orderedPrimaryTools: [AnnotationTool] = [
             .rect, .ellipse, .line, .arrow, .freehand, .blur, .text, .number, .glow
         ]
         for tool in orderedPrimaryTools where vis.isVisible(.tool(tool)) {
-            let keyText = cfg.toolKeys.binding(for: tool).isUnbound ? "" : " · \(cfg.toolKeys.binding(for: tool).displayString)"
+            let keyText = cfg.toolKeys.binding(for: tool).isUnbound ? "" : " · \(cfg.toolKeys.binding(for: tool).displayString(in: lang))"
             items.append(BarButtonSpec(
                 id: ToolbarSlot.tool(tool).key,
                 zone: 0,
                 glyph: glyph(for: tool),
                 selected: activeTool == tool,
                 enabled: true,
-                tooltip: "\(tool.displayName)\(keyText)",
+                tooltip: "\(tool.displayName(in: lang))\(keyText)",
                 action: { [weak self] in self?.selectTool(tool) }
             ))
         }
 
         if vis.isVisible(.pin), !(coordinator?.isInlinePinEdit ?? false) {
-            let pinKey = cfg.hotkeys.pin.isUnbound ? "" : " · \(cfg.hotkeys.pin.displayString)"
+            let pinKey = cfg.hotkeys.pin.isUnbound ? "" : " · \(cfg.hotkeys.pin.displayString(in: lang))"
             items.append(BarButtonSpec(
                 id: "output.pin",
                 zone: 1,
                 glyph: .pin,
                 selected: false,
                 enabled: true,
-                tooltip: "贴图\(pinKey)",
+                tooltip: L10n.tr("贴图\(pinKey)", "Pin\(pinKey)", in: lang),
                 action: { [weak self] in self?.triggerPinOutput() }
             ))
         }
@@ -1569,20 +1570,20 @@ final class OverlayCanvasView: NSView {
                 glyph: .undo,
                 selected: false,
                 enabled: document.canUndo,
-                tooltip: "撤销 · ⌘Z",
+                tooltip: L10n.tr("撤销 · ⌘Z", "Undo · ⌘Z", in: lang),
                 action: { [weak self] in self?.performUndo() }
             ))
         }
 
         if vis.isVisible(.ocr) {
-            let ocrKey = cfg.hotkeys.ocr.isUnbound ? "" : " · \(cfg.hotkeys.ocr.displayString)"
+            let ocrKey = cfg.hotkeys.ocr.isUnbound ? "" : " · \(cfg.hotkeys.ocr.displayString(in: lang))"
             items.append(BarButtonSpec(
                 id: "output.ocr",
                 zone: 1,
                 glyph: .ocr,
                 selected: false,
                 enabled: true,
-                tooltip: "识字\(ocrKey)",
+                tooltip: L10n.tr("识字\(ocrKey)", "OCR\(ocrKey)", in: lang),
                 action: { [weak self] in self?.triggerOCR() }
             ))
         }
@@ -1593,19 +1594,19 @@ final class OverlayCanvasView: NSView {
             glyph: .cancel,
             selected: false,
             enabled: true,
-            tooltip: "取消 · Esc",
+            tooltip: L10n.tr("取消 · Esc", "Cancel · Esc", in: lang),
             action: { [weak self] in self?.attemptCancel() }
         ))
 
         if vis.isVisible(.longshot), !selectionLocked {
-            let lsKey = cfg.hotkeys.longshot.isUnbound ? "" : " · \(cfg.hotkeys.longshot.displayString)"
+            let lsKey = cfg.hotkeys.longshot.isUnbound ? "" : " · \(cfg.hotkeys.longshot.displayString(in: lang))"
             items.append(BarButtonSpec(
                 id: "output.longshot",
                 zone: 2,
                 glyph: .longshot,
                 selected: false,
                 enabled: true,
-                tooltip: "长截图\(lsKey)",
+                tooltip: L10n.tr("长截图\(lsKey)", "Longshot\(lsKey)", in: lang),
                 action: { [weak self] in self?.triggerLongshot() }
             ))
         }
@@ -1617,7 +1618,7 @@ final class OverlayCanvasView: NSView {
                 glyph: .save,
                 selected: false,
                 enabled: true,
-                tooltip: "保存 · ⌘S",
+                tooltip: L10n.tr("保存 · ⌘S", "Save · ⌘S", in: lang),
                 action: { [weak self] in self?.triggerSaveOutput(forceDialog: NSEvent.modifierFlags.contains(.option)) }
             ))
         }
@@ -1629,7 +1630,7 @@ final class OverlayCanvasView: NSView {
                 glyph: .copy,
                 selected: false,
                 enabled: true,
-                tooltip: "完成 · Enter",
+                tooltip: L10n.tr("完成 · Enter", "Done · Enter", in: lang),
                 action: { [weak self] in self?.triggerCopyOutput() }
             ))
         }
@@ -2174,7 +2175,11 @@ final class OverlayCanvasView: NSView {
             break
 
         case .blur:
-            let presets: [(Double, CGFloat, String)] = [(8, 2.6, "轻"), (16, 4.1, "中"), (28, 5.7, "强")]
+            let presets: [(Double, CGFloat, String)] = [
+                (8, 2.6, L10n.tr("轻", "Light", in: cfg.language)),
+                (16, 4.1, L10n.tr("中", "Medium", in: cfg.language)),
+                (28, 5.7, L10n.tr("强", "Strong", in: cfg.language)),
+            ]
             let activeBlur: Double = {
                 if let obj = document.selectedObject, case .blur(_, _, let br, _) = obj.kind { return br }
                 return currentBlurRadius
@@ -2203,7 +2208,11 @@ final class OverlayCanvasView: NSView {
             }
 
         case .stroke(let showFill):
-            let presets: [(Double, CGFloat, String)] = [(2, 2.0, "细"), (4, 3.4, "中"), (8, 5.0, "粗")]
+            let presets: [(Double, CGFloat, String)] = [
+                (2, 2.0, L10n.tr("细", "Thin", in: cfg.language)),
+                (4, 3.4, L10n.tr("中", "Medium", in: cfg.language)),
+                (8, 5.0, L10n.tr("粗", "Thick", in: cfg.language)),
+            ]
             let activeWidth: Double = document.selectedObject?.style.lineWidth ?? currentLineWidth
             for (idx, preset) in presets.enumerated() {
                 let itemID = "stroke.preset.\(idx)"
@@ -2267,7 +2276,7 @@ final class OverlayCanvasView: NSView {
                 toolbarHitItems.append(ToolbarHitItem(
                     id: "edit.fill",
                     rect: fRect,
-                    tooltip: "填充",
+                    tooltip: L10n.tr("填充", "Fill", in: cfg.language),
                     action: { [weak self] in self?.toggleFill() },
                     doubleClickAction: nil
                 ))
@@ -2336,7 +2345,7 @@ final class OverlayCanvasView: NSView {
             toolbarHitItems.append(ToolbarHitItem(
                 id: "text.family",
                 rect: fontBtnRect,
-                tooltip: "字体",
+                tooltip: L10n.tr("字体", "Font", in: cfg.language),
                 action: { [weak self] in self?.popFontMenu(from: fontBtnRect) },
                 doubleClickAction: nil
             ))
@@ -2349,7 +2358,7 @@ final class OverlayCanvasView: NSView {
                 ctx.fillPath()
             }
             drawSymbol("bold", in: bRect, pointSize: 11.0 * uis, color: effectiveState.bold ? (dark ? .white : NSColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 1)) : textColor)
-            toolbarHitItems.append(ToolbarHitItem(id: "text.bold", rect: bRect, tooltip: "粗体", action: { [weak self] in self?.toggleBold() }, doubleClickAction: nil))
+            toolbarHitItems.append(ToolbarHitItem(id: "text.bold", rect: bRect, tooltip: L10n.tr("粗体", "Bold", in: cfg.language), action: { [weak self] in self?.toggleBold() }, doubleClickAction: nil))
 
             let iRect = CGRect(x: bRect.maxX + 2 * uis, y: rect.minY + 4 * uis, width: 24 * uis, height: height - 8 * uis)
             if effectiveState.italic || hoveredItemID == "text.italic" {
@@ -2358,7 +2367,7 @@ final class OverlayCanvasView: NSView {
                 ctx.fillPath()
             }
             drawSymbol("italic", in: iRect, pointSize: 11.0 * uis, color: effectiveState.italic ? (dark ? .white : NSColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 1)) : textColor)
-            toolbarHitItems.append(ToolbarHitItem(id: "text.italic", rect: iRect, tooltip: "斜体", action: { [weak self] in self?.toggleItalic() }, doubleClickAction: nil))
+            toolbarHitItems.append(ToolbarHitItem(id: "text.italic", rect: iRect, tooltip: L10n.tr("斜体", "Italic", in: cfg.language), action: { [weak self] in self?.toggleItalic() }, doubleClickAction: nil))
 
             // 3. Unified `- 24 +` stepper capsule
             let stepperRect = CGRect(x: iRect.maxX + 5 * uis, y: rect.minY + 4 * uis, width: 76 * uis, height: height - 8 * uis)
@@ -2395,8 +2404,8 @@ final class OverlayCanvasView: NSView {
                 withAttributes: numAttrs
             )
 
-            toolbarHitItems.append(ToolbarHitItem(id: "text.size.down", rect: minusRect, tooltip: "减小字号", action: { [weak self] in self?.stepFontSize(-2) }, doubleClickAction: nil))
-            toolbarHitItems.append(ToolbarHitItem(id: "text.size.up", rect: plusRect, tooltip: "增大字号", action: { [weak self] in self?.stepFontSize(2) }, doubleClickAction: nil))
+            toolbarHitItems.append(ToolbarHitItem(id: "text.size.down", rect: minusRect, tooltip: L10n.tr("减小字号", "Smaller Font", in: cfg.language), action: { [weak self] in self?.stepFontSize(-2) }, doubleClickAction: nil))
+            toolbarHitItems.append(ToolbarHitItem(id: "text.size.up", rect: plusRect, tooltip: L10n.tr("增大字号", "Larger Font", in: cfg.language), action: { [weak self] in self?.stepFontSize(2) }, doubleClickAction: nil))
 
             if !visibleSwatchIndices.isEmpty {
                 let sepX = pixelSnap(stepperRect.maxX + 6 * uis, lineWidth: 1.0)
@@ -2494,7 +2503,7 @@ final class OverlayCanvasView: NSView {
             toolbarHitItems.append(ToolbarHitItem(
                 id: itemID,
                 rect: itemRect,
-                tooltip: "双击自定义颜色",
+                tooltip: L10n.tr("双击自定义颜色", "Double-click to customize color", in: cfg.language),
                 action: { [weak self] in self?.selectColorSwatch(idx) },
                 doubleClickAction: { [weak self] in self?.openColorPicker(for: idx, anchorRect: itemRect) }
             ))
@@ -2848,7 +2857,7 @@ final class OverlayCanvasView: NSView {
                     tooltipTask = Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: 400_000_000)
                         guard !Task.isCancelled else { return }
-                        self?.activeTooltip = ("圆角", anchor)
+                        self?.activeTooltip = (L10n.tr("圆角", "Corner Radius"), anchor)
                         self?.needsDisplay = true
                     }
                 }
@@ -3371,7 +3380,7 @@ final class OverlayCanvasView: NSView {
                     return
                 } else {
                     selection = nil
-                    ToastHUD.show("选区过小，请框选页面滚动区域")
+                    ToastHUD.show(L10n.tr("选区过小，请框选页面滚动区域", "Selection too small — drag across the scrollable area"))
                 }
             }
             needsDisplay = true
@@ -3557,7 +3566,7 @@ final class OverlayCanvasView: NSView {
             let col = snapshot.rawBuffer.pixel(x: pxX, y: pxY)
             let copied = shift ? col.rgbString : col.hexString
             OutputService.copyStringToClipboard(copied)
-            ToastHUD.show("已复制 \(copied)")
+            ToastHUD.show(L10n.tr("已复制 \(copied)", "Copied \(copied)"))
             coordinator?.cancelSession()
             return
         }
@@ -3769,7 +3778,7 @@ final class OverlayCanvasView: NSView {
     }
 
     private func popFontMenu(from rect: CGRect) {
-        let menu = NSMenu(title: "字体")
+        let menu = NSMenu(title: L10n.tr("字体", "Font"))
         let preferred = ["PingFang SC", "Helvetica Neue", "Menlo", "SF Pro Display", "Songti SC", "Kaiti SC", "Heiti SC", "Arial"]
         let allInstalled = NSFontManager.shared.availableFontFamilies
         var listed = preferred.filter { allInstalled.contains($0) }
@@ -4009,7 +4018,7 @@ final class OverlayCanvasView: NSView {
         activeTool = nil
         document.clearAll()
         colorPicker = nil
-        ToastHUD.show("已重新抓屏")
+        ToastHUD.show(L10n.tr("已重新抓屏", "Recaptured"))
         needsDisplay = true
     }
 
@@ -4173,7 +4182,7 @@ final class OverlayCanvasView: NSView {
 
     private func triggerLongshot(forceAutoScroll: Bool = false) {
         guard let sel = selection, sel.width >= 24 && sel.height >= 24 else {
-            ToastHUD.show("选区过小")
+            ToastHUD.show(L10n.tr("选区过小", "Selection too small"))
             return
         }
         let pxRect = PixelRect(
@@ -4199,7 +4208,7 @@ final class OverlayCanvasView: NSView {
                 return
             }
             lastCancelAttemptTime = now
-            cancelConfirmBanner = "再按一次 Esc 退出"
+            cancelConfirmBanner = L10n.tr("再按一次 Esc 退出", "Press Esc again to discard annotations")
             needsDisplay = true
             cancelBannerTask?.cancel()
             cancelBannerTask = Task { @MainActor [weak self] in

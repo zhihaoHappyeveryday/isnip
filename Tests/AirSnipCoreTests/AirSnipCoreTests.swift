@@ -302,7 +302,7 @@ final class AirSnipCoreTests: XCTestCase {
 
         let legacyHotkeyJSON = #"{"screenshot":{"keyCode":122,"modifiers":0}}"#.data(using: .utf8)!
         let decodedHK = try JSONDecoder().decode(HotkeyConfig.self, from: legacyHotkeyJSON)
-        XCTAssertEqual(decodedHK.ocrCapture.displayString, "F2")
+        XCTAssertEqual(decodedHK.ocrCapture.displayString(in: .zhHans), "⌃F")
 
         // Legacy v0.2.x AirSnipConfig JSON without smartPngCompression must upgrade with smartPngCompression == true!
         let legacyConfigJSON = #"{"autoStart":false,"theme":"follow","windowSnap":true}"#.data(using: .utf8)!
@@ -549,19 +549,19 @@ final class AirSnipCoreTests: XCTestCase {
         let cfg = AirSnipConfig()
         XCTAssertTrue(cfg.longshotAutoScroll)
         XCTAssertEqual(cfg.longshotScrollSpeed, .normal)
-        XCTAssertEqual(cfg.hotkeys.longshotCapture, HotkeyBinding(keyCode: kVK_F4, modifiers: []))
+        XCTAssertEqual(cfg.hotkeys.longshotCapture, HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.control]))
         XCTAssertTrue(cfg.hotkeyConflicts().isEmpty)
 
-        // Legacy config where user had already bound F4 to `screenshot` -> `longshotCapture` falls back to `.unbound` cleanly
+        // Legacy config where user had already bound ⌃D (keyCode 2, modifiers 2) to `screenshot` -> `longshotCapture` falls back to `.unbound` cleanly
         let legacyConflictJSON = Data(#"""
         {
           "hotkeys": {
-            "screenshot": { "keyCode": 118, "modifiers": 0 }
+            "screenshot": { "keyCode": 2, "modifiers": 2 }
           }
         }
         """#.utf8)
         let migrated = try JSONDecoder().decode(AirSnipConfig.self, from: legacyConflictJSON)
-        XCTAssertEqual(migrated.hotkeys.screenshot.keyCode, kVK_F4)
+        XCTAssertEqual(migrated.hotkeys.screenshot, HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.control]))
         XCTAssertTrue(migrated.hotkeys.longshotCapture.isUnbound)
         XCTAssertTrue(migrated.hotkeyConflicts().isEmpty)
 
@@ -659,21 +659,21 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(WindowSnapResolver.resolveCandidate(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true, depthIndex: 2)?.windowID, 303)
         XCTAssertEqual(WindowSnapResolver.resolveCandidate(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true, depthIndex: 3)?.windowID, 101)
 
-        // Verify HotkeyConfig F5 default + legacy conflict avoidance
+        // Verify HotkeyConfig ⌃S default + legacy conflict avoidance
         let defaultCfg = AirSnipConfig()
-        XCTAssertEqual(defaultCfg.hotkeys.windowCapture, HotkeyBinding(keyCode: kVK_F5, modifiers: []))
+        XCTAssertEqual(defaultCfg.hotkeys.windowCapture, HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.control]))
         XCTAssertTrue(defaultCfg.windowCaptureShadow)
         XCTAssertTrue(defaultCfg.hotkeyConflicts().isEmpty)
 
-        let f5OccupiedJSON = Data(#"""
+        let ctrlSOccupiedJSON = Data(#"""
         {
           "hotkeys": {
-            "pin": { "keyCode": 96, "modifiers": 0 }
+            "pin": { "keyCode": 1, "modifiers": 2 }
           }
         }
         """#.utf8)
-        let migrated = try JSONDecoder().decode(AirSnipConfig.self, from: f5OccupiedJSON)
-        XCTAssertEqual(migrated.hotkeys.pin.keyCode, kVK_F5)
+        let migrated = try JSONDecoder().decode(AirSnipConfig.self, from: ctrlSOccupiedJSON)
+        XCTAssertEqual(migrated.hotkeys.pin, HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.control]))
         XCTAssertTrue(migrated.hotkeys.windowCapture.isUnbound)
         XCTAssertTrue(migrated.hotkeyConflicts().isEmpty)
 
@@ -1007,5 +1007,57 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(info1x.dpiW, 72.0, accuracy: 0.5)
         XCTAssertEqual(Double(info1x.ptSize.width), Double(pxW), accuracy: 0.5)
         XCTAssertEqual(Double(info1x.ptSize.height), Double(pxH), accuracy: 0.5)
+    }
+
+    func testControlASDFDefaultHotkeysLegacyMigrationAndAppLanguageLocalization() throws {
+        let fresh = AirSnipConfig()
+        XCTAssertEqual(fresh.hotkeys.screenshot, HotkeyBinding(keyCode: kVK_ANSI_A, modifiers: [.control]))
+        XCTAssertEqual(fresh.hotkeys.windowCapture, HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.control]))
+        XCTAssertEqual(fresh.hotkeys.longshotCapture, HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.control]))
+        XCTAssertEqual(fresh.hotkeys.ocrCapture, HotkeyBinding(keyCode: kVK_ANSI_F, modifiers: [.control]))
+        XCTAssertEqual(fresh.hotkeys.screenshot.displayString(in: .en), "⌃A")
+        XCTAssertEqual(fresh.hotkeys.windowCapture.displayString(in: .en), "⌃S")
+        XCTAssertEqual(fresh.hotkeys.longshotCapture.displayString(in: .en), "⌃D")
+        XCTAssertEqual(fresh.hotkeys.ocrCapture.displayString(in: .en), "⌃F")
+        XCTAssertTrue(fresh.hotkeyConflicts(in: .en).isEmpty)
+
+        // Legacy v0.3.15 config with F1/F5/F4/F2 upgrades once to ⌃A/⌃S/⌃D/⌃F
+        let legacyV1JSON = Data(#"""
+        {
+          "hotkeys": {
+            "screenshot": { "keyCode": 122, "modifiers": 0 },
+            "windowCapture": { "keyCode": 96, "modifiers": 0 },
+            "longshotCapture": { "keyCode": 118, "modifiers": 0 },
+            "ocrCapture": { "keyCode": 120, "modifiers": 0 }
+          }
+        }
+        """#.utf8)
+        var upgraded = try JSONDecoder().decode(AirSnipConfig.self, from: legacyV1JSON)
+        XCTAssertEqual(upgraded.hotkeys.screenshot, HotkeyBinding(keyCode: kVK_ANSI_A, modifiers: [.control]))
+        XCTAssertEqual(upgraded.hotkeys.windowCapture, HotkeyBinding(keyCode: kVK_ANSI_S, modifiers: [.control]))
+        XCTAssertEqual(upgraded.hotkeys.longshotCapture, HotkeyBinding(keyCode: kVK_ANSI_D, modifiers: [.control]))
+        XCTAssertEqual(upgraded.hotkeys.ocrCapture, HotkeyBinding(keyCode: kVK_ANSI_F, modifiers: [.control]))
+        XCTAssertTrue(upgraded.hotkeyDefaultsMigratedV2)
+
+        // Once migrated, explicitly binding F1 persists as F1
+        upgraded.hotkeys.screenshot = HotkeyBinding(keyCode: kVK_F1, modifiers: [])
+        upgraded.language = .en
+        let saved = try JSONEncoder().encode(upgraded)
+        let reloaded = try JSONDecoder().decode(AirSnipConfig.self, from: saved)
+        XCTAssertEqual(reloaded.hotkeys.screenshot, HotkeyBinding(keyCode: kVK_F1, modifiers: []))
+        XCTAssertEqual(reloaded.language, .en)
+
+        // Verify English vs Chinese localization strings
+        XCTAssertEqual(AnnotationTool.rect.displayName(in: .en), "Rectangle")
+        XCTAssertEqual(AnnotationTool.rect.displayName(in: .zhHans), "矩形")
+        XCTAssertEqual(ThemeSetting.follow.title(in: .en), "System")
+        XCTAssertEqual(ThemeSetting.follow.title(in: .zhHans), "跟随系统")
+        XCTAssertEqual(HotkeyBinding.unbound.displayString(in: .en), "Not Set")
+        XCTAssertEqual(HotkeyBinding.unbound.displayString(in: .zhHans), "未设置")
+
+        var conflictCfg = AirSnipConfig(language: .en)
+        conflictCfg.hotkeys.pin = conflictCfg.hotkeys.screenshot
+        XCTAssertTrue(conflictCfg.hotkeyConflicts(in: .en).first?.contains("conflicts with") == true)
+        XCTAssertTrue(conflictCfg.hotkeyConflicts(in: .zhHans).first?.contains("冲突") == true)
     }
 }

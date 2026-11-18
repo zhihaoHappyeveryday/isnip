@@ -348,7 +348,7 @@ public enum LocalVisionOCR {
                     image = crop
                 } else {
                     throw NSError(domain: VNErrorDomain, code: VNErrorCode.invalidImage.rawValue,
-                                  userInfo: [NSLocalizedDescriptionKey: "无法读取识别图片，请重新截图。"])
+                                  userInfo: [NSLocalizedDescriptionKey: L10n.tr("无法读取识别图片，请重新截图。", "Unable to read image for OCR. Please capture again.")])
                 }
 
                 let handler = VNImageRequestHandler(cgImage: image, options: [:])

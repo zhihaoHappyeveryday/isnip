@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import SwiftUI
+import AirSnipCore
 
 enum SelectedTextService {
     enum SelectionError: LocalizedError {
@@ -9,8 +10,16 @@ enum SelectedTextService {
 
         var errorDescription: String? {
             switch self {
-            case .permissionRequired: return "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 iSnip 读取选中文字。"
-            case .noSelection: return "未读取到选中文字；请先选中文字，或使用「截图翻译」。"
+            case .permissionRequired:
+                return L10n.tr(
+                    "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 iSnip 读取选中文字。",
+                    "Please allow iSnip to read selected text in System Settings → Privacy & Security → Accessibility."
+                )
+            case .noSelection:
+                return L10n.tr(
+                    "未读取到选中文字；请先选中文字，或使用「截图翻译」。",
+                    "No selected text found; select text first or use Capture & Translate."
+                )
             }
         }
     }
@@ -123,8 +132,14 @@ final class SelectionTranslationController {
         }
     }
 
+    func refreshLanguage() {
+        panel?.orderOut(nil)
+        panel = nil
+    }
+
     private func showButton(near point: NSPoint) {
-        let size = NSSize(width: 74, height: 30)
+        let isEn = L10n.current.isEnglish
+        let size = NSSize(width: isEn ? 88 : 74, height: 30)
         let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
         guard let bounds = screen?.visibleFrame else { return }
         let frame = NSRect(
@@ -172,7 +187,7 @@ private struct SelectionTranslatePillView: View {
                 Image(systemName: "character.bubble")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(p.inkPrimary)
-                Text("翻译")
+                Text(L10n.tr("翻译", "Translate"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(p.inkPrimary)
             }
@@ -189,7 +204,7 @@ private struct SelectionTranslatePillView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .help("翻译选中文字")
-        .accessibilityLabel("翻译选中文字")
+        .help(L10n.tr("翻译选中文字", "Translate Selected Text"))
+        .accessibilityLabel(L10n.tr("翻译选中文字", "Translate Selected Text"))
     }
 }

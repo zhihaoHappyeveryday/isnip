@@ -664,6 +664,7 @@ public enum SmokeTestRunner {
                         win.orderOut(nil)
                     }
 
+                    dummyApp.updateConfig { $0.language = .zhHans }
                     let tabsToDump: [(SettingsTab, String)] = [
                         (.general, "01_general.png"),
                         (.captureAndPin, "02_capture.png"),
@@ -704,6 +705,28 @@ public enum SmokeTestRunner {
                         appearance: .aqua,
                         to: dirURL.appendingPathComponent("05_editor_white_swatch.png")
                     )
+
+                    // English UI verification snapshots
+                    dummyApp.updateConfig {
+                        $0.activeColorIndex = 1
+                        $0.language = .en
+                    }
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .general),
+                        appearance: .aqua,
+                        to: dirURL.appendingPathComponent("01_general_en.png")
+                    )
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .hotkeys),
+                        appearance: .aqua,
+                        to: dirURL.appendingPathComponent("04_hotkeys_en.png")
+                    )
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .about),
+                        appearance: .darkAqua,
+                        to: dirURL.appendingPathComponent("07_about_en_dark.png")
+                    )
+                    dummyApp.updateConfig { $0.language = .zhHans }
 
                     let lsCtrl = LongshotSessionController(
                         screen: screen,

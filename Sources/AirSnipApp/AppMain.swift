@@ -26,9 +26,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public init(configURL: URL = AirSnipConfig.defaultConfigFileURL()) {
         self.configURL = configURL
-        self.config = AirSnipConfig.load(from: configURL)
+        let loadedConfig = AirSnipConfig.load(from: configURL)
+        L10n.current = loadedConfig.language
+        self.config = loadedConfig
         super.init()
 
+        self.ocrBubbleManager.appLanguage = loadedConfig.language
         self.settingsController = SettingsWindowController(appController: self)
 
         pinManager.getConfig = { [weak self] in
@@ -115,7 +118,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 guard let self else { return }
                 if case .success(let rel?) = await UpdateChecker.checkLatest(),
                    self.config.skippedVersion != rel.version {
-                    ToastHUD.show("发现新版本 v\(rel.version)", symbol: "arrow.down.circle", duration: 3.0)
+                    ToastHUD.show(
+                        L10n.tr("发现新版本 v\(rel.version)", "New version v\(rel.version) available", in: self.config.language),
+                        symbol: "arrow.down.circle",
+                        duration: 3.0
+                    )
                 }
             }
         }
@@ -143,11 +150,17 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func updateConfig(_ mutate: (inout AirSnipConfig) -> Void) {
         let oldHotkeys = config.hotkeys
+        let oldLang = config.language
         let oldSelectionButton = config.translation.showSelectionButton
         mutate(&config)
+        L10n.current = config.language
         try? config.save(to: configURL)
-        if config.hotkeys != oldHotkeys {
-            hotkeyRegistrationErrors = hotkeyManager.apply(hotkeys: config.hotkeys)
+        if config.language != oldLang {
+            ocrBubbleManager.appLanguage = config.language
+            selectionTranslation.refreshLanguage()
+        }
+        if config.hotkeys != oldHotkeys || config.language != oldLang {
+            hotkeyRegistrationErrors = hotkeyManager.apply(hotkeys: config.hotkeys, lang: config.language)
         }
         if config.translation.showSelectionButton != oldSelectionButton, #available(macOS 15.0, *) {
             if config.translation.showSelectionButton { SelectedTextService.requestAccess() }
@@ -242,56 +255,64 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     }
 
     private func populateStatusMenu(_ menu: NSMenu) {
-        let capItem = NSMenuItem(title: "截图", action: #selector(menuCapture), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.screenshot, to: capItem, baseTitle: "截图")
+        let l = config.language
+        let capTitle = L10n.tr("截图", "Capture Area", in: l)
+        let capItem = NSMenuItem(title: capTitle, action: #selector(menuCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.screenshot, to: capItem, baseTitle: capTitle)
         capItem.image = menuIcon("viewfinder")
         capItem.target = self
         menu.addItem(capItem)
 
-        let winCapItem = NSMenuItem(title: "窗体截图", action: #selector(menuDirectWindowCapture), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.windowCapture, to: winCapItem, baseTitle: "窗体截图")
+        let winTitle = L10n.tr("窗体截图", "Capture Window", in: l)
+        let winCapItem = NSMenuItem(title: winTitle, action: #selector(menuDirectWindowCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.windowCapture, to: winCapItem, baseTitle: winTitle)
         winCapItem.image = menuIcon("macwindow")
         winCapItem.target = self
         menu.addItem(winCapItem)
 
-        let lsCapItem = NSMenuItem(title: "页面长截图", action: #selector(menuDirectLongshotCapture), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.longshotCapture, to: lsCapItem, baseTitle: "页面长截图")
+        let lsTitle = L10n.tr("页面长截图", "Scrolling Capture", in: l)
+        let lsCapItem = NSMenuItem(title: lsTitle, action: #selector(menuDirectLongshotCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.longshotCapture, to: lsCapItem, baseTitle: lsTitle)
         lsCapItem.image = menuIcon("arrow.up.and.down.text.horizontal")
         lsCapItem.target = self
         menu.addItem(lsCapItem)
 
-        let ocrCapItem = NSMenuItem(title: "截图识字", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.ocrCapture, to: ocrCapItem, baseTitle: "截图识字")
+        let ocrTitle = L10n.tr("截图识字", "Capture & OCR", in: l)
+        let ocrCapItem = NSMenuItem(title: ocrTitle, action: #selector(menuDirectOCRCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.ocrCapture, to: ocrCapItem, baseTitle: ocrTitle)
         ocrCapItem.image = menuIcon("text.viewfinder")
         ocrCapItem.target = self
         menu.addItem(ocrCapItem)
 
-        let selectionItem = NSMenuItem(title: "划词翻译", action: #selector(menuTranslateSelection), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.translateSelection, to: selectionItem, baseTitle: "划词翻译")
+        let selTitle = L10n.tr("划词翻译", "Translate Selection", in: l)
+        let selectionItem = NSMenuItem(title: selTitle, action: #selector(menuTranslateSelection), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.translateSelection, to: selectionItem, baseTitle: selTitle)
         selectionItem.image = menuIcon("character.bubble")
         selectionItem.target = self
         menu.addItem(selectionItem)
 
-        let translateCaptureItem = NSMenuItem(title: "截图翻译", action: #selector(menuTranslateCapture), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.translateCapture, to: translateCaptureItem, baseTitle: "截图翻译")
+        let trCapTitle = L10n.tr("截图翻译", "Capture & Translate", in: l)
+        let translateCaptureItem = NSMenuItem(title: trCapTitle, action: #selector(menuTranslateCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.translateCapture, to: translateCaptureItem, baseTitle: trCapTitle)
         translateCaptureItem.image = menuIcon("character.viewfinder")
         translateCaptureItem.target = self
         menu.addItem(translateCaptureItem)
 
-        let pinItem = NSMenuItem(title: "剪贴板贴图", action: #selector(menuPinClipboard), keyEquivalent: "")
-        applyMenuShortcut(config.hotkeys.pin, to: pinItem, baseTitle: "剪贴板贴图")
+        let pinTitle = L10n.tr("剪贴板贴图", "Pin from Clipboard", in: l)
+        let pinItem = NSMenuItem(title: pinTitle, action: #selector(menuPinClipboard), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.pin, to: pinItem, baseTitle: pinTitle)
         pinItem.image = menuIcon("pin")
         pinItem.target = self
         menu.addItem(pinItem)
 
         menu.addItem(.separator())
 
-        let ocrClipItem = NSMenuItem(title: "识别剪贴板文字", action: #selector(menuOCRClipboard), keyEquivalent: "")
+        let ocrClipItem = NSMenuItem(title: L10n.tr("识别剪贴板文字", "OCR from Clipboard", in: l), action: #selector(menuOCRClipboard), keyEquivalent: "")
         ocrClipItem.image = menuIcon("doc.text.viewfinder")
         ocrClipItem.target = self
         menu.addItem(ocrClipItem)
 
-        let ocrFileItem = NSMenuItem(title: "识别图片文字…", action: #selector(menuOCRFile), keyEquivalent: "")
+        let ocrFileItem = NSMenuItem(title: L10n.tr("识别图片文字…", "OCR from Image File…", in: l), action: #selector(menuOCRFile), keyEquivalent: "")
         ocrFileItem.image = menuIcon("photo.badge.magnifyingglass")
         ocrFileItem.target = self
         menu.addItem(ocrFileItem)
@@ -299,12 +320,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if pinManager.count > 0 {
             menu.addItem(.separator())
             if pinManager.hasClickThroughPins {
-                let restoreItem = NSMenuItem(title: "取消贴图穿透", action: #selector(menuRestoreClickThrough), keyEquivalent: "")
+                let restoreItem = NSMenuItem(title: L10n.tr("取消贴图穿透", "Disable Click-Through", in: l), action: #selector(menuRestoreClickThrough), keyEquivalent: "")
                 restoreItem.image = menuIcon("cursorarrow.click.2")
                 restoreItem.target = self
                 menu.addItem(restoreItem)
             }
-            let closePins = NSMenuItem(title: "关闭全部贴图", action: #selector(menuCloseAllPins), keyEquivalent: "")
+            let closePins = NSMenuItem(title: L10n.tr("关闭全部贴图", "Close All Pins", in: l), action: #selector(menuCloseAllPins), keyEquivalent: "")
             closePins.image = menuIcon("xmark.circle")
             closePins.target = self
             menu.addItem(closePins)
@@ -312,12 +333,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
         menu.addItem(.separator())
 
-        let settingsItem = NSMenuItem(title: "设置…", action: #selector(menuSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: L10n.tr("设置…", "Settings…", in: l), action: #selector(menuSettings), keyEquivalent: ",")
         settingsItem.image = menuIcon("gearshape")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let quitItem = NSMenuItem(title: "退出", action: #selector(menuQuit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: L10n.tr("退出", "Quit iSnip", in: l), action: #selector(menuQuit), keyEquivalent: "q")
         quitItem.image = menuIcon("power")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -427,9 +448,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             ocrBubbleManager.presentSelectedText(text, anchorScreenPoint: NSEvent.mouseLocation, config: config)
         } catch SelectedTextService.SelectionError.permissionRequired {
             SelectedTextService.requestAccess()
-            ToastHUD.show("请开启 iSnip 的辅助功能权限", symbol: "hand.raised", tint: .systemOrange, duration: 3)
+            ToastHUD.show(L10n.tr("请开启 iSnip 的辅助功能权限", "Please grant Accessibility access to iSnip", in: config.language), symbol: "hand.raised", tint: .systemOrange, duration: 3)
         } catch {
-            ToastHUD.show("未读取到选中文字，可使用截图翻译", symbol: "text.viewfinder", tint: .systemOrange, duration: 3)
+            ToastHUD.show(L10n.tr("未读取到选中文字，可使用截图翻译", "No selected text found — try Capture & Translate", in: config.language), symbol: "text.viewfinder", tint: .systemOrange, duration: 3)
         }
     }
 
@@ -440,7 +461,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     private func translationAvailable() -> Bool {
         if #available(macOS 15.0, *) { return true }
-        ToastHUD.show("系统翻译需要 macOS 15 或更新版本", symbol: "info.circle", tint: .systemOrange, duration: 3)
+        ToastHUD.show(L10n.tr("系统翻译需要 macOS 15 或更新版本", "System Translation requires macOS 15 or later", in: config.language), symbol: "info.circle", tint: .systemOrange, duration: 3)
         return false
     }
 
@@ -485,7 +506,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func triggerOCRFromClipboard() {
         guard let clip = OutputService.readImageFromClipboard() else {
-            ToastHUD.show("剪贴板无图片")
+            ToastHUD.show(L10n.tr("剪贴板无图片", "No image in clipboard", in: config.language))
             return
         }
         ocrBubbleManager.recognizeAndPresent(
@@ -551,7 +572,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             let showToast = currentCfg?.showCompletionToast ?? true
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { _ in
                 guard showToast else { return }
-                ToastHUD.show("已复制")
+                ToastHUD.show(L10n.tr("已复制", "Copied"))
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
@@ -568,7 +589,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
             self?.config = cfg
             if showToast {
-                ToastHUD.show("已保存")
+                ToastHUD.show(L10n.tr("已保存", "Saved"))
             }
             return true
         }
@@ -627,7 +648,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             self?.activeLongshotSession = nil
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { _ in
                 guard showToast else { return }
-                ToastHUD.show("已复制")
+                ToastHUD.show(L10n.tr("已复制", "Copied"))
             }
         }
         ls.onFinishSave = { [weak self] cgImg, scale, forceDialog in
@@ -645,7 +666,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             ) != nil {
                 self.config = cfg
                 if showToast {
-                    ToastHUD.show("已保存")
+                    ToastHUD.show(L10n.tr("已保存", "Saved"))
                 }
             }
         }

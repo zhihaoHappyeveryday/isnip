@@ -79,16 +79,29 @@ public enum ScreenCaptureService {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "需要「屏幕录制」权限"
-        alert.informativeText = """
-        请在「系统设置 → 录屏与系统录音」中开启 iSnip：
-        • 刚开启开关：点「重启应用」生效
-        • 已开启仍提示：点「重置权限」修复旧授权记录
-        """
-        alert.addButton(withTitle: "重启应用")
-        alert.addButton(withTitle: "重置权限")
-        alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "取消")
+        if L10n.current.isEnglish {
+            alert.messageText = "Screen Recording Permission Required"
+            alert.informativeText = """
+            Please enable iSnip in System Settings → Privacy & Security → Screen & System Audio Recording:
+            • Just enabled: Click "Relaunch" to apply
+            • Already enabled: Click "Reset Permission" to repair stale TCC authorization
+            """
+            alert.addButton(withTitle: "Relaunch")
+            alert.addButton(withTitle: "Reset Permission")
+            alert.addButton(withTitle: "Open System Settings")
+            alert.addButton(withTitle: "Cancel")
+        } else {
+            alert.messageText = "需要「屏幕录制」权限"
+            alert.informativeText = """
+            请在「系统设置 → 录屏与系统录音」中开启 iSnip：
+            • 刚开启开关：点「重启应用」生效
+            • 已开启仍提示：点「重置权限」修复旧授权记录
+            """
+            alert.addButton(withTitle: "重启应用")
+            alert.addButton(withTitle: "重置权限")
+            alert.addButton(withTitle: "打开系统设置")
+            alert.addButton(withTitle: "取消")
+        }
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -486,7 +499,7 @@ public enum OutputService {
     public static func readImageFromFileDialog() -> CGImage? {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
-        panel.title = "选择图片"
+        panel.title = L10n.tr("选择图片", "Choose Image")
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -506,7 +519,7 @@ public enum OutputService {
                 return cg
             }
         }
-        ToastHUD.show("无法读取图片", symbol: "exclamationmark.triangle.fill", tint: .systemOrange)
+        ToastHUD.show(L10n.tr("无法读取图片", "Unable to read image"), symbol: "exclamationmark.triangle.fill", tint: .systemOrange)
         return nil
     }
 
@@ -537,8 +550,8 @@ public enum OutputService {
     public static func chooseSaveDirectory(initial: URL) -> URL? {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
-        panel.title = "选择保存位置"
-        panel.prompt = "选择"
+        panel.title = L10n.tr("选择保存位置", "Choose Save Folder")
+        panel.prompt = L10n.tr("选择", "Select")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
@@ -659,7 +672,7 @@ public enum OutputService {
         let resolvedScale = max(1.0, backingScale ?? Double(NSScreen.main?.backingScaleFactor ?? 2.0))
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
-        panel.title = "保存截图"
+        panel.title = L10n.tr("保存截图", "Save Screenshot")
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
 
@@ -678,15 +691,15 @@ public enum OutputService {
             panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         }
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 368, height: 72))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 386, height: 72))
 
-        let fmtLabel = NSTextField(labelWithString: "格式：")
+        let fmtLabel = NSTextField(labelWithString: L10n.tr("格式：", "Format:"))
         fmtLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
         fmtLabel.alignment = .right
         fmtLabel.lineBreakMode = .byClipping
-        fmtLabel.frame = NSRect(x: 12, y: 41, width: 82, height: 20)
+        fmtLabel.frame = NSRect(x: 10, y: 41, width: 96, height: 20)
 
-        let fmtPopup = NSPopUpButton(frame: NSRect(x: 100, y: 37, width: 132, height: 28), pullsDown: false)
+        let fmtPopup = NSPopUpButton(frame: NSRect(x: 112, y: 37, width: 132, height: 28), pullsDown: false)
         for fmt in ExportImageFormat.allCases {
             fmtPopup.addItem(withTitle: fmt.displayName)
         }
@@ -694,18 +707,18 @@ public enum OutputService {
             fmtPopup.selectItem(at: idx)
         }
 
-        let compLabel = NSTextField(labelWithString: "无损压缩：")
+        let compLabel = NSTextField(labelWithString: L10n.tr("无损压缩：", "Compress:"))
         compLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
         compLabel.alignment = .right
         compLabel.lineBreakMode = .byClipping
-        compLabel.frame = NSRect(x: 12, y: 11, width: 82, height: 20)
+        compLabel.frame = NSRect(x: 10, y: 11, width: 96, height: 20)
 
-        let compSwitch = NSSwitch(frame: NSRect(x: 102, y: 9, width: 42, height: 24))
+        let compSwitch = NSSwitch(frame: NSRect(x: 114, y: 9, width: 42, height: 24))
         compSwitch.state = chosenSmartCompress ? .on : .off
 
-        let qualityPopup = NSPopUpButton(frame: NSRect(x: 152, y: 7, width: 112, height: 28), pullsDown: false)
+        let qualityPopup = NSPopUpButton(frame: NSRect(x: 164, y: 7, width: 112, height: 28), pullsDown: false)
         for q in PngCompressionQualityPreset.allCases {
-            qualityPopup.addItem(withTitle: q.shortTitle)
+            qualityPopup.addItem(withTitle: q.title(in: config.language))
         }
         if let qIdx = PngCompressionQualityPreset.allCases.firstIndex(of: chosenQuality) {
             qualityPopup.selectItem(at: qIdx)
@@ -822,7 +835,7 @@ public enum OutputService {
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "保存失败"
+            alert.messageText = L10n.tr("保存失败", "Failed to Save", in: config.language)
             alert.informativeText = error.localizedDescription
             alert.runModal()
             return nil
@@ -936,19 +949,19 @@ public final class GlobalHotkeyManager {
     }
 
     @discardableResult
-    public func apply(hotkeys: HotkeyConfig) -> [String] {
+    public func apply(hotkeys: HotkeyConfig, lang: AppLanguage = L10n.current) -> [String] {
         unregisterAll()
         var failures: [String] = []
 
         let items: [(Action, String, HotkeyBinding)] = [
-            (.screenshot, "截图", hotkeys.screenshot),
-            (.windowCapture, "窗体截图", hotkeys.windowCapture),
-            (.longshotCapture, "页面长截图", hotkeys.longshotCapture),
-            (.ocrCapture, "截图识字", hotkeys.ocrCapture),
-            (.translateSelection, "划词翻译", hotkeys.translateSelection),
-            (.translateCapture, "截图翻译", hotkeys.translateCapture),
-            (.pin, "贴图", hotkeys.pin),
-            (.pinBorderToggle, "贴图边框", hotkeys.pinBorderToggle),
+            (.screenshot, L10n.tr("截图", "Capture Area", in: lang), hotkeys.screenshot),
+            (.windowCapture, L10n.tr("窗体截图", "Capture Window", in: lang), hotkeys.windowCapture),
+            (.longshotCapture, L10n.tr("页面长截图", "Scrolling Capture", in: lang), hotkeys.longshotCapture),
+            (.ocrCapture, L10n.tr("截图识字", "Capture & OCR", in: lang), hotkeys.ocrCapture),
+            (.translateSelection, L10n.tr("划词翻译", "Translate Selection", in: lang), hotkeys.translateSelection),
+            (.translateCapture, L10n.tr("截图翻译", "Capture & Translate", in: lang), hotkeys.translateCapture),
+            (.pin, L10n.tr("贴图", "Pin", in: lang), hotkeys.pin),
+            (.pinBorderToggle, L10n.tr("贴图边框", "Pin Border", in: lang), hotkeys.pinBorderToggle),
         ]
 
         let signature = OSType(0x4153_4E50) // 'ASNP'
@@ -972,7 +985,12 @@ public final class GlobalHotkeyManager {
             if status == noErr, let ref {
                 hotKeyRefs.append(ref)
             } else {
-                failures.append("\(title)（\(binding.displayString)）已被占用")
+                let keyStr = binding.displayString(in: lang)
+                if lang.isEnglish {
+                    failures.append("\(title) (\(keyStr)) is already in use")
+                } else {
+                    failures.append("\(title)（\(keyStr)）已被占用")
+                }
             }
         }
 

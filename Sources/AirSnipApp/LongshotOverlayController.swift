@@ -98,7 +98,7 @@ public final class LongshotSessionController: ObservableObject {
             } else {
                 needsAccessibilityAuth = true
                 _ = AccessibilityService.requestPermissionPrompt()
-                statusHint = "需辅助功能权限"
+                statusHint = L10n.tr("需辅助功能权限", "Accessibility required", in: config.language)
             }
         }
         startSessionLoop()
@@ -133,7 +133,7 @@ public final class LongshotSessionController: ObservableObject {
             needsAccessibilityAuth = true
             isAutoScrolling = false
             _ = AccessibilityService.requestPermissionPrompt()
-            statusHint = "需辅助功能权限"
+            statusHint = L10n.tr("需辅助功能权限", "Accessibility required", in: config.language)
             return
         }
         needsAccessibilityAuth = false
@@ -241,7 +241,8 @@ public final class LongshotSessionController: ObservableObject {
 
         // 3. Control bar window below (or above / cleanly inside bottom of) viewport, always respecting Dock & menu bar
         let vis = screen.visibleFrame
-        let barW = min(max(496, vis.width - 24), 544)
+        let isEn = config.language.isEnglish
+        let barW = min(max(isEn ? 536 : 496, vis.width - 24), isEn ? 584 : 544)
         let barH: CGFloat = 42
         let barX = max(vis.minX + 12, min(vis.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
         let barY: CGFloat
@@ -270,6 +271,8 @@ public final class LongshotSessionController: ObservableObject {
         cWin.orderFrontRegardless()
         self.controlWindow = cWin
     }
+
+    var appLanguage: AppLanguage { config.language }
 
     private func applyWindowTheme(to win: NSWindow) {
         switch config.theme {
@@ -534,7 +537,7 @@ public final class LongshotSessionController: ObservableObject {
             if consecutiveStillCount >= stopThreshold {
                 isAutoScrolling = false
                 reachedBottom = segmentCount > 0
-                statusHint = "已到底"
+                statusHint = L10n.tr("已到底", "Reached bottom", in: config.language)
             }
 
         case .failed:
@@ -548,7 +551,7 @@ public final class LongshotSessionController: ObservableObject {
         case .limitReached:
             isAutoScrolling = false
             pendingSettleRecapture = false
-            statusHint = "已达上限"
+            statusHint = L10n.tr("已达上限", "Height limit reached", in: config.language)
         }
     }
 
@@ -570,11 +573,11 @@ public final class LongshotSessionController: ObservableObject {
             break
         case .failed:
             if !fromAutoScroll {
-                statusHint = "滚动过快"
+                statusHint = L10n.tr("滚动过快", "Scrolling too fast", in: config.language)
             }
         case .limitReached:
             if !fromAutoScroll {
-                statusHint = "已达上限"
+                statusHint = L10n.tr("已达上限", "Height limit reached", in: config.language)
             }
         }
         return step
@@ -834,17 +837,19 @@ struct LongshotControlBarView: View {
     }
 
     private var autoScrollButtonLabel: String {
+        let l = controller.appLanguage
         if controller.isAutoScrolling {
-            return "暂停"
+            return L10n.tr("暂停", "Pause", in: l)
         }
         if controller.segmentCount > 0 && !controller.reachedBottom {
-            return "继续"
+            return L10n.tr("继续", "Resume", in: l)
         }
-        return "自动翻页"
+        return L10n.tr("自动翻页", "Auto-Scroll", in: l)
     }
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
+        let l = controller.appLanguage
 
         HStack(spacing: 6) {
             HStack(spacing: 6) {
@@ -870,12 +875,12 @@ struct LongshotControlBarView: View {
             Spacer(minLength: 8)
 
             if controller.needsAccessibilityAuth {
-                Button("授权") {
+                Button(L10n.tr("授权", "Grant", in: l)) {
                     controller.openAccessibilityAuthorization()
                 }
                 .buttonStyle(LongshotBarPillStyle(role: .warning))
                 .fixedSize(horizontal: true, vertical: false)
-                .help("打开辅助功能权限设置")
+                .help(L10n.tr("打开辅助功能权限设置", "Open Accessibility Settings", in: l))
             }
 
             Button {
@@ -890,18 +895,22 @@ struct LongshotControlBarView: View {
             }
             .buttonStyle(LongshotBarPillStyle(role: controller.isAutoScrolling ? .activeThumb : .secondary))
             .fixedSize(horizontal: true, vertical: false)
-            .help("自动翻页 / 暂停 (Space)")
+            .help(L10n.tr("自动翻页 / 暂停 (Space)", "Auto-Scroll / Pause (Space)", in: l))
 
             Button {
                 controller.cycleScrollSpeed()
             } label: {
-                Text(controller.scrollSpeed.title)
+                Text(controller.scrollSpeed.title(in: l))
                     .lineLimit(1)
                     .frame(minWidth: 24)
             }
             .buttonStyle(LongshotBarPillStyle())
             .fixedSize(horizontal: true, vertical: false)
-            .help("翻页速度：\(controller.scrollSpeed.title)（点击切换）")
+            .help(L10n.tr(
+                "翻页速度：\(controller.scrollSpeed.title(in: l))（点击切换）",
+                "Scroll speed: \(controller.scrollSpeed.title(in: l)) (click to cycle)",
+                in: l
+            ))
 
             Rectangle()
                 .fill(p.cardBorder)
@@ -916,28 +925,28 @@ struct LongshotControlBarView: View {
             }
             .buttonStyle(LongshotBarPillStyle())
             .disabled(!controller.canUndo)
-            .help("撤销上一段 (⌘Z)")
+            .help(L10n.tr("撤销上一段 (⌘Z)", "Undo last segment (⌘Z)", in: l))
 
             Button("OCR") {
                 controller.finishAndOCR()
             }
             .buttonStyle(LongshotBarPillStyle())
             .fixedSize(horizontal: true, vertical: false)
-            .help("识字 (T)")
+            .help(L10n.tr("识字 (T)", "Extract Text (T)", in: l))
 
-            Button("标注") {
+            Button(L10n.tr("标注", "Annotate", in: l)) {
                 controller.finishAndAnnotate()
             }
             .buttonStyle(LongshotBarPillStyle())
             .fixedSize(horizontal: true, vertical: false)
-            .help("标注")
+            .help(L10n.tr("标注", "Annotate", in: l))
 
-            Button("复制") {
+            Button(L10n.tr("复制", "Copy", in: l)) {
                 controller.finishAndCopy()
             }
             .buttonStyle(LongshotBarPillStyle())
             .fixedSize(horizontal: true, vertical: false)
-            .help("仅复制到剪贴板 (⌘C)")
+            .help(L10n.tr("仅复制到剪贴板 (⌘C)", "Copy to Clipboard (⌘C)", in: l))
 
             Button {
                 let forceDialog = NSEvent.modifierFlags.contains(.option)
@@ -946,13 +955,17 @@ struct LongshotControlBarView: View {
                 HStack(spacing: 3.5) {
                     Image(systemName: "checkmark")
                         .font(.system(size: 10, weight: .bold))
-                    Text("保存")
+                    Text(L10n.tr("保存", "Save", in: l))
                         .lineLimit(1)
                 }
             }
             .buttonStyle(LongshotBarPillStyle(role: .primary))
             .fixedSize(horizontal: true, vertical: false)
-            .help("保存到默认位置并复制（Enter / ⌘S，按住 ⌥ 另存为）")
+            .help(L10n.tr(
+                "保存到默认位置并复制（Enter / ⌘S，按住 ⌥ 另存为）",
+                "Save to default folder & copy (Enter / ⌘S, hold ⌥ for Save As)",
+                in: l
+            ))
 
             Button {
                 controller.cancel()
@@ -964,7 +977,7 @@ struct LongshotControlBarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("取消 (Esc)")
+            .help(L10n.tr("取消 (Esc)", "Cancel (Esc)", in: l))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

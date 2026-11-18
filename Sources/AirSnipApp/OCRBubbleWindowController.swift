@@ -60,6 +60,7 @@ public final class OCRBubbleManager: ObservableObject {
             rerunRecognitionIfPossible()
         }
     }
+    @Published public var appLanguage: AppLanguage = .system
     @Published public var copiedFeedback: Bool = false
     @Published public private(set) var copiedTranslationFeedback = false
     @Published private(set) var translationRequest: TextTranslationRequest?
@@ -102,6 +103,7 @@ public final class OCRBubbleManager: ObservableObject {
     ) {
         recognitionTask?.cancel()
         suppressCallback = true
+        self.appLanguage = config.language
         self.autoCopy = config.ocr.autoCopy
         self.mergeLineBreaks = config.ocr.mergeLineBreaks
         self.selectedLanguage = config.ocr.language
@@ -124,6 +126,7 @@ public final class OCRBubbleManager: ObservableObject {
     public func presentSelectedText(_ selectedText: String, anchorScreenPoint: NSPoint?, config: AirSnipConfig) {
         recognitionTask?.cancel()
         suppressCallback = true
+        appLanguage = config.language
         translationTargetLanguage = config.translation.targetLanguage
         translationSourceLanguage = "auto"
         suppressCallback = false
@@ -172,7 +175,7 @@ public final class OCRBubbleManager: ObservableObject {
                 self.paragraphRecognizedText = result.paragraphText
 
                 if result.isEmpty {
-                    self.errorMessage = "未识别到文字"
+                    self.errorMessage = L10n.tr("未识别到文字", "No text detected", in: self.appLanguage)
                 } else {
                     let chosen: String
                     if result.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -192,7 +195,7 @@ public final class OCRBubbleManager: ObservableObject {
             } catch {
                 guard !Task.isCancelled, let self else { return }
                 self.isRecognizing = false
-                self.errorMessage = "识别失败：\(error.localizedDescription)"
+                self.errorMessage = L10n.tr("识别失败：\(error.localizedDescription)", "OCR failed: \(error.localizedDescription)", in: self.appLanguage)
             }
         }
     }
@@ -220,7 +223,7 @@ public final class OCRBubbleManager: ObservableObject {
 
     public func copyBarcode(_ payload: String) {
         OutputService.copyStringToClipboard(payload)
-        ToastHUD.show("已复制")
+        ToastHUD.show(L10n.tr("已复制", "Copied", in: appLanguage))
     }
 
     private func clearTranslation() {
@@ -247,7 +250,7 @@ public final class OCRBubbleManager: ObservableObject {
             panel.setFrame(frame, display: true)
         }
         guard #available(macOS 15.0, *) else {
-            translationError = "系统翻译需要 macOS 15 或更新版本。"
+            translationError = L10n.tr("系统翻译需要 macOS 15 或更新版本。", "System Translation requires macOS 15 or later.", in: appLanguage)
             return
         }
         let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -281,11 +284,23 @@ public final class OCRBubbleManager: ObservableObject {
             isTranslating = false
             switch error {
             case TranslationError.unableToIdentifyLanguage:
-                translationError = "无法判断原文语言，请手动选择后重试。"
+                translationError = L10n.tr(
+                    "无法判断原文语言，请手动选择后重试。",
+                    "Could not detect source language. Please select it manually and try again.",
+                    in: appLanguage
+                )
             case TranslationError.unsupportedLanguagePairing, TranslationError.unsupportedSourceLanguage, TranslationError.unsupportedTargetLanguage:
-                translationError = "系统不支持这组语言，请更换原文语言或目标语言。"
+                translationError = L10n.tr(
+                    "系统不支持这组语言，请更换原文语言或目标语言。",
+                    "This language pair is not supported by macOS Translation.",
+                    in: appLanguage
+                )
             default:
-                translationError = "翻译失败：\(error.localizedDescription)\n请检查网络或语言包后重试。"
+                translationError = L10n.tr(
+                    "翻译失败：\(error.localizedDescription)\n请检查网络或语言包后重试。",
+                    "Translation failed: \(error.localizedDescription)\nPlease check your network or installed language packs.",
+                    in: appLanguage
+                )
             }
         }
     }
@@ -426,6 +441,16 @@ private struct OCRBubbleCardView: View {
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
+        let lang = manager.appLanguage
+        let headerTitle: String = {
+            if manager.sourceImage == nil {
+                return L10n.tr("划词翻译", "Selection Translate", in: lang)
+            }
+            if manager.isTranslationVisible {
+                return L10n.tr("截图翻译", "Capture & Translate", in: lang)
+            }
+            return L10n.tr("文字识别", "Text Recognition", in: lang)
+        }()
 
         VStack(spacing: 10) {
             // Top Header Bar
@@ -434,7 +459,7 @@ private struct OCRBubbleCardView: View {
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(p.inkPrimary)
 
-                Text(manager.sourceImage == nil ? "划词翻译" : (manager.isTranslationVisible ? "截图翻译" : "文字识别"))
+                Text(headerTitle)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(p.inkPrimary)
                     .lineLimit(1)
@@ -444,15 +469,18 @@ private struct OCRBubbleCardView: View {
 
                 if manager.sourceImage != nil {
                     MagpieMenuPicker(
-                        "识别语言",
-                        options: OcrConfig.compactOptions.map { ($0.tag, $0.shortLabel) },
+                        L10n.tr("识别语言", "Recognition Language", in: lang),
+                        options: OcrConfig.compactOptions(in: lang).map { ($0.tag, $0.shortLabel) },
                         selection: $manager.selectedLanguage,
                         minWidth: 78,
                         compact: true
                     )
-                    .help("识别语言")
+                    .help(L10n.tr("识别语言", "Recognition Language", in: lang))
                 }
 
+                let pinLabel = manager.isPinnedOnTop
+                    ? L10n.tr("取消置顶", "Unpin", in: lang)
+                    : L10n.tr("置顶", "Pin on Top", in: lang)
                 Button {
                     manager.isPinnedOnTop.toggle()
                 } label: {
@@ -468,8 +496,8 @@ private struct OCRBubbleCardView: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { hoverPin = $0 }
-                .help(manager.isPinnedOnTop ? "取消置顶" : "置顶")
-                .accessibilityLabel(manager.isPinnedOnTop ? "取消置顶" : "置顶")
+                .help(pinLabel)
+                .accessibilityLabel(pinLabel)
 
                 Button {
                     manager.dismiss()
@@ -486,8 +514,8 @@ private struct OCRBubbleCardView: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { hoverClose = $0 }
-                .help("关闭 (Esc)")
-                .accessibilityLabel("关闭")
+                .help(L10n.tr("关闭 (Esc)", "Close (Esc)", in: lang))
+                .accessibilityLabel(L10n.tr("关闭", "Close", in: lang))
             }
 
             // Detected QR / Barcodes Card
@@ -507,9 +535,9 @@ private struct OCRBubbleCardView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer(minLength: 4)
-                            MagpieCopyButton(value: code, helpText: "复制条码内容")
+                            MagpieCopyButton(value: code)
                             if let url = webURL(from: code) {
-                                MagpieTextAction("打开") {
+                                MagpieTextAction(L10n.tr("打开", "Open", in: lang)) {
                                     NSWorkspace.shared.open(url)
                                 }
                             }
@@ -521,25 +549,32 @@ private struct OCRBubbleCardView: View {
             }
 
             if manager.isTranslationVisible {
-                languageBar(palette: p)
+                languageBar(palette: p, lang: lang)
             }
 
             // Main Unified Card (Source + Optional Divided Translation)
             MagpieCard(cornerRadius: 10) {
                 if manager.isTranslationVisible {
                     HStack(spacing: 8) {
-                        Text("原文")
+                        Text(L10n.tr("原文", "Source", in: lang))
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(p.inkSecondary)
                         Spacer()
                         if manager.sourceImage != nil {
                             MagpieSegmentedPicker(
-                                options: [(false, "逐行"), (true, "合并换行")],
+                                options: [
+                                    (false, L10n.tr("逐行", "Lines", in: lang)),
+                                    (true, L10n.tr("合并换行", "Merge", in: lang))
+                                ],
                                 selection: $manager.mergeLineBreaks,
                                 compact: true
                             )
                         }
-                        MagpieTextAction(manager.copiedFeedback ? "已复制" : "复制原文") {
+                        MagpieTextAction(
+                            manager.copiedFeedback
+                                ? L10n.tr("已复制", "Copied", in: lang)
+                                : L10n.tr("复制原文", "Copy Source", in: lang)
+                        ) {
                             manager.copyCurrentText()
                         }
                         .disabled(manager.text.isEmpty || manager.isRecognizing)
@@ -549,7 +584,7 @@ private struct OCRBubbleCardView: View {
                     .padding(.bottom, 4)
                 }
 
-                sourceEditorArea(palette: p)
+                sourceEditorArea(palette: p, lang: lang)
                     .frame(
                         minHeight: manager.isTranslationVisible ? 52 : 84,
                         maxHeight: manager.isTranslationVisible ? 114 : .infinity
@@ -557,7 +592,7 @@ private struct OCRBubbleCardView: View {
 
                 if manager.isTranslationVisible {
                     MagpieRowDivider()
-                    translationSection(palette: p)
+                    translationSection(palette: p, lang: lang)
                 }
             }
             .overlay(
@@ -577,38 +612,56 @@ private struct OCRBubbleCardView: View {
                     }
                 } label: {
                     let copied = manager.isTranslationVisible ? manager.copiedTranslationFeedback : manager.copiedFeedback
+                    let labelStr: String = {
+                        if copied { return L10n.tr("已复制", "Copied", in: lang) }
+                        return manager.isTranslationVisible
+                            ? L10n.tr("复制译文", "Copy Translation", in: lang)
+                            : L10n.tr("复制原文", "Copy Text", in: lang)
+                    }()
                     HStack(spacing: 5) {
                         Image(systemName: copied ? "checkmark" : "square.on.square")
                             .font(.system(size: 11, weight: .semibold))
-                        Text(copied ? "已复制" : (manager.isTranslationVisible ? "复制译文" : "复制原文"))
+                        Text(labelStr)
                     }
                 }
                 .buttonStyle(MagpiePillButtonStyle(role: .primary))
                 .fixedSize(horizontal: true, vertical: false)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
                 .disabled(manager.isTranslationVisible ? (manager.translatedText.isEmpty || manager.isTranslating) : copyDisabled)
-                .help(manager.isTranslationVisible ? "复制完整译文 (⇧⌘C)" : "复制全部原文 (⇧⌘C)")
+                .help(
+                    manager.isTranslationVisible
+                        ? L10n.tr("复制完整译文 (⇧⌘C)", "Copy Translation (⇧⌘C)", in: lang)
+                        : L10n.tr("复制全部原文 (⇧⌘C)", "Copy All Text (⇧⌘C)", in: lang)
+                )
 
                 Spacer(minLength: 4)
 
                 if manager.sourceImage != nil && !manager.isTranslationVisible {
                     MagpieSegmentedPicker(
-                        options: [(false, "逐行"), (true, "合并换行")],
+                        options: [
+                            (false, L10n.tr("逐行", "Lines", in: lang)),
+                            (true, L10n.tr("合并换行", "Merge", in: lang))
+                        ],
                         selection: $manager.mergeLineBreaks,
                         compact: true
                     )
                 }
 
-                Button(manager.translatedText.isEmpty ? "翻译" : "重新翻译") {
+                Button(
+                    manager.translatedText.isEmpty
+                        ? L10n.tr("翻译", "Translate", in: lang)
+                        : L10n.tr("重新翻译", "Retranslate", in: lang)
+                ) {
                     editorFocused = false
                     manager.requestTranslation()
                 }
                 .buttonStyle(MagpiePillButtonStyle(role: .bordered))
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(copyDisabled || manager.isTranslating)
-                .help("翻译原文 (⌘Enter)")
+                .help(L10n.tr("翻译原文 (⌘Enter)", "Translate (⌘Enter)", in: lang))
             }
         }
+        .environment(\.appLanguage, lang)
         .padding(14)
         .background(p.canvasBg)
         .ignoresSafeArea(.container, edges: .top)
@@ -618,13 +671,13 @@ private struct OCRBubbleCardView: View {
     }
 
     @ViewBuilder
-    private func sourceEditorArea(palette p: MagpiePalette) -> some View {
+    private func sourceEditorArea(palette p: MagpiePalette, lang: AppLanguage) -> some View {
         ZStack {
             if manager.isRecognizing {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("识别中…")
+                    Text(L10n.tr("识别中…", "Recognizing…", in: lang))
                         .font(.system(size: 12.5))
                         .foregroundStyle(p.inkSecondary)
                 }
@@ -639,7 +692,7 @@ private struct OCRBubbleCardView: View {
                             .font(.system(size: 13))
                             .foregroundStyle(p.inkPrimary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        MagpieTextAction("重试", prominent: true) {
+                        MagpieTextAction(L10n.tr("重试", "Retry", in: lang), prominent: true) {
                             manager.rerunRecognitionIfPossible()
                         }
                     }
@@ -651,11 +704,11 @@ private struct OCRBubbleCardView: View {
                 TextEditor(text: $manager.text)
                     .font(.system(size: 14))
                     .foregroundStyle(p.inkPrimary)
-                    .accessibilityLabel("原文")
+                    .accessibilityLabel(L10n.tr("原文", "Source", in: lang))
                     .focused($editorFocused)
                     .scrollContentBackground(.hidden)
                     .scrollIndicators(needsScroller ? .automatic : .never)
-                    .help("可以编辑原文，按 ⌘Enter 重新翻译")
+                    .help(L10n.tr("可以编辑原文，按 ⌘Enter 重新翻译", "Edit source text and press ⌘Enter to retranslate", in: lang))
                     .padding(.horizontal, 8)
                     .padding(.vertical, manager.isTranslationVisible ? 4 : 8)
                     .onAppear {
@@ -665,16 +718,16 @@ private struct OCRBubbleCardView: View {
         }
     }
 
-    private func languageBar(palette p: MagpiePalette) -> some View {
+    private func languageBar(palette p: MagpiePalette, lang: AppLanguage) -> some View {
         HStack(spacing: 8) {
             MagpieMenuPicker(
-                "原文语言",
-                options: [("auto", "自动检测")] + TranslationConfig.languageOptions.map { ($0.tag, $0.label) },
+                L10n.tr("原文语言", "Source Language", in: lang),
+                options: [("auto", L10n.tr("自动检测", "Auto Detect", in: lang))] + TranslationConfig.languageOptions.map { ($0.tag, $0.label) },
                 selection: $manager.translationSourceLanguage,
                 minWidth: 112,
                 compact: true
             )
-            .help("原文语言")
+            .help(L10n.tr("原文语言", "Source Language", in: lang))
 
             Image(systemName: "arrow.right")
                 .font(.system(size: 11, weight: .medium))
@@ -682,28 +735,28 @@ private struct OCRBubbleCardView: View {
                 .accessibilityHidden(true)
 
             MagpieMenuPicker(
-                "目标语言",
+                L10n.tr("目标语言", "Target Language", in: lang),
                 options: TranslationConfig.languageOptions.map { ($0.tag, $0.label) },
                 selection: $manager.translationTargetLanguage,
                 minWidth: 112,
                 compact: true
             )
-            .help("目标语言")
+            .help(L10n.tr("目标语言", "Target Language", in: lang))
 
             Spacer(minLength: 0)
         }
     }
 
-    private func translationSection(palette p: MagpiePalette) -> some View {
+    private func translationSection(palette p: MagpiePalette, lang: AppLanguage) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("译文")
+                Text(L10n.tr("译文", "Translation", in: lang))
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(p.inkSecondary)
                 Spacer()
                 if manager.isTranslating {
                     ProgressView().controlSize(.mini)
-                    Text("翻译中…")
+                    Text(L10n.tr("翻译中…", "Translating…", in: lang))
                         .font(.system(size: 11.5))
                         .foregroundStyle(p.inkSecondary)
                 }
@@ -717,7 +770,7 @@ private struct OCRBubbleCardView: View {
                                 Image(systemName: "exclamationmark.triangle")
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundStyle(p.statusWarn)
-                                Text("暂时无法翻译")
+                                Text(L10n.tr("暂时无法翻译", "Unable to Translate", in: lang))
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(p.inkPrimary)
                             }
@@ -725,7 +778,7 @@ private struct OCRBubbleCardView: View {
                                 .font(.system(size: 12.5))
                                 .foregroundStyle(p.inkSecondary)
                                 .textSelection(.enabled)
-                            MagpieTextAction("重试", prominent: true) {
+                            MagpieTextAction(L10n.tr("重试", "Retry", in: lang), prominent: true) {
                                 manager.requestTranslation()
                             }
                         }
@@ -738,7 +791,7 @@ private struct OCRBubbleCardView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Text(translationHint)
+                        Text(translationHint(in: lang))
                             .font(.system(size: 12.5))
                             .foregroundStyle(p.inkSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -758,14 +811,20 @@ private struct OCRBubbleCardView: View {
         .layoutPriority(1)
     }
 
-    private var translationHint: String {
-        if manager.isTranslating { return "首次使用可能需要按系统提示下载语言包。" }
-        if manager.isRecognizing { return "识别完成后自动翻译" }
-        if manager.errorMessage != nil { return "请先重试文字识别，再翻译。" }
-        if manager.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "输入或粘贴原文后，点击「翻译」。"
+    private func translationHint(in lang: AppLanguage) -> String {
+        if manager.isTranslating {
+            return L10n.tr("首次使用可能需要按系统提示下载语言包。", "First-time translation may prompt to download a language pack.", in: lang)
         }
-        return "原文已修改，点击「翻译」或按 ⌘Enter 更新译文。"
+        if manager.isRecognizing {
+            return L10n.tr("识别完成后自动翻译", "Will translate automatically once OCR completes", in: lang)
+        }
+        if manager.errorMessage != nil {
+            return L10n.tr("请先重试文字识别，再翻译。", "Retry text recognition first, then translate.", in: lang)
+        }
+        if manager.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return L10n.tr("输入或粘贴原文后，点击「翻译」。", "Enter or paste source text, then click Translate.", in: lang)
+        }
+        return L10n.tr("原文已修改，点击「翻译」或按 ⌘Enter 更新译文。", "Source modified — click Retranslate or press ⌘Enter.", in: lang)
     }
 }
 

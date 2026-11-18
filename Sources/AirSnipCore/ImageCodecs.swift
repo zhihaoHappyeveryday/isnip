@@ -286,13 +286,16 @@ public enum ImageEncodingError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .invalidImage:
-            return "无效图像数据"
+            return L10n.tr("无效图像数据", "Invalid image data")
         case .destinationCreationFailed:
-            return "无法创建编码器"
+            return L10n.tr("无法创建编码器", "Failed to create image encoder")
         case .finalizeFailed:
-            return "写入图像失败"
+            return L10n.tr("写入图像失败", "Failed to write image data")
         case .webpDimensionsExceeded(let w, let h):
-            return "WebP 单边上限 16384 px（当前 \(w)×\(h)），请改存 PNG"
+            return L10n.tr(
+                "WebP 单边上限 16384 px（当前 \(w)×\(h)），请改存 PNG",
+                "WebP maximum dimension is 16384 px (current \(w)×\(h)); please save as PNG"
+            )
         }
     }
 }

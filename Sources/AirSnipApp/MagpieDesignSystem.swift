@@ -1,5 +1,19 @@
 import AppKit
 import SwiftUI
+import AirSnipCore
+
+// MARK: - SwiftUI AppLanguage Environment Key
+
+private struct AppLanguageEnvironmentKey: EnvironmentKey {
+    static let defaultValue: AppLanguage = .system
+}
+
+public extension EnvironmentValues {
+    var appLanguage: AppLanguage {
+        get { self[AppLanguageEnvironmentKey.self] }
+        set { self[AppLanguageEnvironmentKey.self] = newValue }
+    }
+}
 
 // MARK: - Magpie Neutral Minimalist Design Tokens
 
@@ -321,24 +335,27 @@ public struct MagpieSettingRow<Control: View>: View {
     }
 }
 
-// MARK: - Segmented Pill Controls (Boolean [关闭 | 开启] & Multi-Option)
+// MARK: - Segmented Pill Controls (Boolean [关闭 | 开启] / [Off | On] & Multi-Option)
 
 public struct MagpieBooleanSwitch: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appLanguage) private var appLanguage
     @Environment(\.isEnabled) private var isEnabled
     @Binding var isOn: Bool
-    var offLabel: String = "关闭"
-    var onLabel: String = "开启"
+    var customOffLabel: String?
+    var customOnLabel: String?
 
-    public init(isOn: Binding<Bool>, offLabel: String = "关闭", onLabel: String = "开启") {
+    public init(isOn: Binding<Bool>, offLabel: String? = nil, onLabel: String? = nil) {
         self._isOn = isOn
-        self.offLabel = offLabel
-        self.onLabel = onLabel
+        self.customOffLabel = offLabel
+        self.customOnLabel = onLabel
     }
 
     public var body: some View {
+        let offText = customOffLabel ?? (appLanguage.isEnglish ? "Off" : "关闭")
+        let onText = customOnLabel ?? (appLanguage.isEnglish ? "On" : "开启")
         MagpieSegmentedPicker(
-            options: [(false, offLabel), (true, onLabel)],
+            options: [(false, offText), (true, onText)],
             selection: $isOn
         )
         .opacity(isEnabled ? 1.0 : 0.48)
@@ -613,18 +630,21 @@ public struct MagpieTextAction: View {
 
 public struct MagpieCopyButton: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appLanguage) private var appLanguage
     let valueToCopy: String
-    var helpText: String = "复制路径"
+    var customHelpText: String?
     @State private var copied = false
     @State private var isHovered = false
 
-    public init(value: String, helpText: String = "复制") {
+    public init(value: String, helpText: String? = nil) {
         self.valueToCopy = value
-        self.helpText = helpText
+        self.customHelpText = helpText
     }
 
     public var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
+        let tip = customHelpText ?? (appLanguage.isEnglish ? "Copy" : "复制")
+        let copiedTip = appLanguage.isEnglish ? "Copied" : "已复制"
         Button {
             OutputService.copyStringToClipboard(valueToCopy)
             copied = true
@@ -645,7 +665,7 @@ public struct MagpieCopyButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .help(copied ? "已复制" : helpText)
+        .help(copied ? copiedTip : tip)
     }
 }
 
