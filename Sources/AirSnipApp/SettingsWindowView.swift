@@ -308,12 +308,9 @@ public struct SettingsRootView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                // Row 4: Persistent Centered Service Attribution Link Footer (opens WeChat Mini Program QR Code)
-                DingDingFooterBar(lang: lang, onShowQR: presentDingDingQR)
             }
 
             if showDingDingQR {
@@ -332,61 +329,64 @@ public struct SettingsRootView: View {
     }
 }
 
-private struct DingDingFooterBar: View {
+private struct DingDingServiceSupportRow: View {
     @Environment(\.colorScheme) private var colorScheme
     let lang: AppLanguage
     let onShowQR: () -> Void
-    @State private var isHovered = false
+    @State private var isLinkHovered = false
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
-        HStack {
-            Spacer(minLength: 12)
-            Button(action: onShowQR) {
-                HStack(spacing: 4.5) {
-                    if lang.isEnglish {
-                        HStack(spacing: 0) {
-                            Text("Powered by ")
-                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
-                            Text("【叮叮提醒】")
-                                .fontWeight(.medium)
-                                .foregroundStyle(p.inkPrimary)
-                            Text(" WeChat Mini Program")
-                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.tr("服务支持", "Service Provider", in: lang))
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(p.inkPrimary)
+
+                Button(action: onShowQR) {
+                    HStack(spacing: 3.5) {
+                        if lang.isEnglish {
+                            HStack(spacing: 0) {
+                                Text("Powered by ")
+                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
+                                Text("【叮叮提醒】")
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(p.inkPrimary)
+                                Text(" WeChat Mini Program")
+                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
+                            }
+                            .font(.system(size: 12))
+                        } else {
+                            HStack(spacing: 0) {
+                                Text("本程序由")
+                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
+                                Text("【叮叮提醒】")
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(p.inkPrimary)
+                                Text("微信小程序提供服务")
+                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
+                            }
+                            .font(.system(size: 12))
                         }
-                        .font(.system(size: 11.5))
-                    } else {
-                        HStack(spacing: 0) {
-                            Text("本程序由")
-                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
-                            Text("【叮叮提醒】")
-                                .fontWeight(.medium)
-                                .foregroundStyle(p.inkPrimary)
-                            Text("微信小程序提供服务")
-                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
-                        }
-                        .font(.system(size: 11.5))
+                        Image(systemName: "qrcode")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkTertiary)
                     }
-                    Image(systemName: "qrcode")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(isHovered ? p.inkPrimary : p.inkTertiary)
+                    .contentShape(Rectangle())
                 }
-                .lineLimit(1)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isHovered ? p.segmentedTrack : Color.clear)
-                )
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .onHover { isLinkHovered = $0 }
+                .help(L10n.tr("点击查看【叮叮提醒】微信小程序码", "Click to view 【叮叮提醒】 WeChat Mini Program QR code", in: lang))
             }
-            .buttonStyle(.plain)
-            .onHover { isHovered = $0 }
-            .help(L10n.tr("点击查看【叮叮提醒】微信小程序码", "Click to view 【叮叮提醒】 WeChat Mini Program QR code", in: lang))
-            Spacer(minLength: 12)
+
+            Spacer(minLength: 14)
+
+            MagpieTextAction(L10n.tr("小程序码", "Show QR Code", in: lang), prominent: true) {
+                onShowQR()
+            }
         }
-        .frame(height: 30)
-        .padding(.bottom, 5)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12.5)
     }
 }
 
@@ -1956,18 +1956,7 @@ private struct AboutSettingsPane: View {
 
             MagpieRowDivider()
 
-            MagpieSettingRow(
-                title: L10n.tr("服务支持", "Service Provider", in: lang),
-                subtitle: L10n.tr(
-                    "本程序由【叮叮提醒】微信小程序提供服务",
-                    "Powered by 【叮叮提醒】 WeChat Mini Program",
-                    in: lang
-                )
-            ) {
-                MagpieTextAction(L10n.tr("小程序码", "Show QR Code", in: lang), prominent: true) {
-                    onShowDingDingQR()
-                }
-            }
+            DingDingServiceSupportRow(lang: lang, onShowQR: onShowDingDingQR)
         }
     }
 }
@@ -2234,18 +2223,7 @@ private struct SettingsSearchResultsPane: View {
                 })
             },
             SearchEntry(id: "ab.dingding", keywords: "关于 about 服务支持 叮叮提醒 微信小程序 提供服务 二维码 小程序码 dingding wechat mini program service provider qrcode yinso") {
-                AnyView(MagpieSettingRow(
-                    title: L10n.tr("服务支持", "Service Provider", in: lang),
-                    subtitle: L10n.tr(
-                        "本程序由【叮叮提醒】微信小程序提供服务",
-                        "Powered by 【叮叮提醒】 WeChat Mini Program",
-                        in: lang
-                    )
-                ) {
-                    MagpieTextAction(L10n.tr("小程序码", "Show QR Code", in: lang), prominent: true) {
-                        onShowDingDingQR()
-                    }
-                })
+                AnyView(DingDingServiceSupportRow(lang: lang, onShowQR: onShowDingDingQR))
             }
         ]
 
