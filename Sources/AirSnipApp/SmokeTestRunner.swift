@@ -727,6 +727,16 @@ public enum SmokeTestRunner {
                         to: dirURL.appendingPathComponent("07_about_en_dark.png")
                     )
                     dummyApp.updateConfig { $0.language = .zhHans }
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .about, initialShowDingDingQR: true),
+                        appearance: .aqua,
+                        to: dirURL.appendingPathComponent("13_dingding_qr_modal.png")
+                    )
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .general, initialShowDingDingQR: true),
+                        appearance: .darkAqua,
+                        to: dirURL.appendingPathComponent("13_dingding_qr_modal_dark.png")
+                    )
 
                     let lsCtrl = LongshotSessionController(
                         screen: screen,

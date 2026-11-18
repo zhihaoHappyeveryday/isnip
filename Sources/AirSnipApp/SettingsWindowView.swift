@@ -3,6 +3,8 @@ import Carbon
 import SwiftUI
 import AirSnipCore
 
+private let dingDingServiceURL = URL(string: "https://dingding.yinso.com")!
+
 @MainActor
 public final class SettingsWindowController {
     private var window: NSWindow?
@@ -171,15 +173,18 @@ public struct SettingsRootView: View {
     @State private var selectedTab: SettingsTab
     @State private var searchQuery: String
     @State private var recordingSlot: String?
+    @State private var showDingDingQR: Bool
 
     public init(
         app: AirSnipAppController,
         initialTab: SettingsTab = .general,
-        initialSearchQuery: String = ""
+        initialSearchQuery: String = "",
+        initialShowDingDingQR: Bool = false
     ) {
         self.app = app
         self._selectedTab = State(initialValue: initialTab)
         self._searchQuery = State(initialValue: initialSearchQuery)
+        self._showDingDingQR = State(initialValue: initialShowDingDingQR)
     }
 
     private var lang: AppLanguage { app.config.language }
@@ -188,117 +193,355 @@ public struct SettingsRootView: View {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func presentDingDingQR() {
+        withAnimation(.easeOut(duration: 0.15)) {
+            showDingDingQR = true
+        }
+    }
+
     public var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
 
-        VStack(spacing: 0) {
-            // Row 1: Clean Unified Brand Header Bar (Traffic Lights + Brand + Refresh & Settings)
-            HStack(spacing: 0) {
-                HStack(spacing: 7) {
-                    MagpieBrandMark(size: 17)
-                    Text("iSnip")
-                        .font(.system(size: 14.5, weight: .bold))
-                        .foregroundStyle(p.inkPrimary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-                .padding(.leading, 78)
-
-                Spacer(minLength: 12)
-
-                HStack(spacing: 6) {
-                    HeaderIconButton(
-                        symbol: "arrow.clockwise",
-                        isActive: false,
-                        spinning: updateState.isChecking,
-                        helpText: L10n.tr("检查更新", "Check for Updates", in: lang)
-                    ) {
-                        updateState.checkNow(lang: lang, showToast: selectedTab != .about)
+        ZStack {
+            VStack(spacing: 0) {
+                // Row 1: Clean Unified Brand Header Bar (Traffic Lights + Brand + Refresh & Settings)
+                HStack(spacing: 0) {
+                    HStack(spacing: 7) {
+                        MagpieBrandMark(size: 17)
+                        Text("iSnip")
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(p.inkPrimary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
+                    .padding(.leading, 78)
 
-                    HeaderIconButton(
-                        symbol: "gearshape",
-                        isActive: true,
-                        helpText: L10n.tr("设置", "Settings", in: lang)
-                    ) {
-                        if !searchQuery.isEmpty {
-                            withAnimation(.easeOut(duration: 0.14)) {
-                                searchQuery = ""
-                            }
-                        }
-                    }
-                }
-                .padding(.trailing, 18)
-            }
-            .frame(height: 52)
+                    Spacer(minLength: 12)
 
-            // Row 2: Secondary Category Pill Tabs + Search Input
-            HStack(spacing: 12) {
-                HStack(spacing: 4) {
-                    ForEach(SettingsTab.allCases) { tab in
-                        SubTabPillButton(
-                            title: tab.title(in: lang),
-                            isSelected: trimmedSearch.isEmpty && selectedTab == tab
+                    HStack(spacing: 6) {
+                        HeaderIconButton(
+                            symbol: "arrow.clockwise",
+                            isActive: false,
+                            spinning: updateState.isChecking,
+                            helpText: L10n.tr("检查更新", "Check for Updates", in: lang)
                         ) {
-                            withAnimation(.easeOut(duration: 0.14)) {
-                                searchQuery = ""
-                                selectedTab = tab
+                            updateState.checkNow(lang: lang, showToast: selectedTab != .about)
+                        }
+
+                        HeaderIconButton(
+                            symbol: "gearshape",
+                            isActive: true,
+                            helpText: L10n.tr("设置", "Settings", in: lang)
+                        ) {
+                            if !searchQuery.isEmpty {
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    searchQuery = ""
+                                }
                             }
                         }
                     }
+                    .padding(.trailing, 18)
                 }
+                .frame(height: 52)
 
-                Spacer(minLength: 12)
-
-                SettingsSearchField(text: $searchQuery, lang: lang)
-                    .frame(width: 216)
-            }
-            .padding(.horizontal, 20)
-            .frame(height: 38)
-
-            // Row 3: Continuous White Card Content Area
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if !trimmedSearch.isEmpty {
-                        SettingsSearchResultsPane(
-                            app: app,
-                            query: trimmedSearch,
-                            updateState: updateState,
-                            recordingSlot: $recordingSlot,
-                            onSelectTab: { tab in
-                                searchQuery = ""
-                                selectedTab = tab
+                // Row 2: Secondary Category Pill Tabs + Search Input
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        ForEach(SettingsTab.allCases) { tab in
+                            SubTabPillButton(
+                                title: tab.title(in: lang),
+                                isSelected: trimmedSearch.isEmpty && selectedTab == tab
+                            ) {
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    searchQuery = ""
+                                    selectedTab = tab
+                                }
                             }
-                        )
-                    } else {
-                        switch selectedTab {
-                        case .general:
-                            GeneralSettingsPane(app: app)
-                        case .captureAndPin:
-                            CaptureAndPinPane(app: app)
-                        case .toolbar:
-                            ToolbarVisibilityPane(app: app)
-                        case .hotkeys:
-                            HotkeysSettingsPane(app: app, recordingSlot: $recordingSlot)
-                        case .editor:
-                            EditorDefaultsPane(app: app)
-                        case .ocr:
-                            OCRSettingsPane(app: app)
-                        case .about:
-                            AboutSettingsPane(app: app, updateState: updateState)
                         }
                     }
+
+                    Spacer(minLength: 12)
+
+                    SettingsSearchField(text: $searchQuery, lang: lang)
+                        .frame(width: 216)
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .padding(.bottom, 20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 38)
+
+                // Row 3: Continuous White Card Content Area
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if !trimmedSearch.isEmpty {
+                            SettingsSearchResultsPane(
+                                app: app,
+                                query: trimmedSearch,
+                                updateState: updateState,
+                                recordingSlot: $recordingSlot,
+                                onSelectTab: { tab in
+                                    searchQuery = ""
+                                    selectedTab = tab
+                                },
+                                onShowDingDingQR: presentDingDingQR
+                            )
+                        } else {
+                            switch selectedTab {
+                            case .general:
+                                GeneralSettingsPane(app: app)
+                            case .captureAndPin:
+                                CaptureAndPinPane(app: app)
+                            case .toolbar:
+                                ToolbarVisibilityPane(app: app)
+                            case .hotkeys:
+                                HotkeysSettingsPane(app: app, recordingSlot: $recordingSlot)
+                            case .editor:
+                                EditorDefaultsPane(app: app)
+                            case .ocr:
+                                OCRSettingsPane(app: app)
+                            case .about:
+                                AboutSettingsPane(
+                                    app: app,
+                                    updateState: updateState,
+                                    onShowDingDingQR: presentDingDingQR
+                                )
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Row 4: Persistent Centered Service Attribution Link Footer (opens WeChat Mini Program QR Code)
+                DingDingFooterBar(lang: lang, onShowQR: presentDingDingQR)
+            }
+
+            if showDingDingQR {
+                DingDingQRModalOverlay(lang: lang) {
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        showDingDingQR = false
+                    }
+                }
+                .transition(.opacity)
             }
         }
         .environment(\.appLanguage, lang)
         .frame(minWidth: 760, idealWidth: 880, maxWidth: .infinity, minHeight: 500, idealHeight: 640, maxHeight: .infinity)
         .background(p.canvasBg)
         .ignoresSafeArea(.container, edges: .top)
+    }
+}
+
+private struct DingDingFooterBar: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let lang: AppLanguage
+    let onShowQR: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        HStack {
+            Spacer(minLength: 12)
+            Button(action: onShowQR) {
+                HStack(spacing: 4.5) {
+                    if lang.isEnglish {
+                        HStack(spacing: 0) {
+                            Text("Powered by ")
+                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
+                            Text("【叮叮提醒】")
+                                .fontWeight(.medium)
+                                .foregroundStyle(p.inkPrimary)
+                            Text(" WeChat Mini Program")
+                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
+                        }
+                        .font(.system(size: 11.5))
+                    } else {
+                        HStack(spacing: 0) {
+                            Text("本程序由")
+                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
+                            Text("【叮叮提醒】")
+                                .fontWeight(.medium)
+                                .foregroundStyle(p.inkPrimary)
+                            Text("微信小程序提供服务")
+                                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
+                        }
+                        .font(.system(size: 11.5))
+                    }
+                    Image(systemName: "qrcode")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(isHovered ? p.inkPrimary : p.inkTertiary)
+                }
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovered ? p.segmentedTrack : Color.clear)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .help(L10n.tr("点击查看【叮叮提醒】微信小程序码", "Click to view 【叮叮提醒】 WeChat Mini Program QR code", in: lang))
+            Spacer(minLength: 12)
+        }
+        .frame(height: 30)
+        .padding(.bottom, 5)
+    }
+}
+
+private enum DingDingMiniProgramQRLoader {
+    static func bundledImage() -> NSImage? {
+        if let url = Bundle.main.url(forResource: "dingding-mp-qr", withExtension: "jpg"),
+           let img = NSImage(contentsOf: url) {
+            return img
+        }
+        let devURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Assets/dingding-mp-qr.jpg")
+        if let img = NSImage(contentsOf: devURL) {
+            return img
+        }
+        return nil
+    }
+
+    static func fetchRemoteImage() async -> NSImage? {
+        struct Envelope: Decodable {
+            struct Payload: Decodable { let qrcode: String }
+            let code: Int
+            let data: Payload?
+        }
+        for endpoint in [
+            "https://dingding.yinso.com/mp/api/desktop/mp_qrcode",
+            "https://dingding.llkan.com/mp/api/desktop/mp_qrcode"
+        ] {
+            guard let url = URL(string: endpoint) else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 8
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = Data("{}".utf8)
+            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                  (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let env = try? JSONDecoder().decode(Envelope.self, from: data),
+                  env.code == 0,
+                  let dataURI = env.data?.qrcode,
+                  let comma = dataURI.firstIndex(of: ","),
+                  let raw = Data(base64Encoded: String(dataURI[dataURI.index(after: comma)...])),
+                  let img = NSImage(data: raw) else {
+                continue
+            }
+            return img
+        }
+        return nil
+    }
+}
+
+private struct DingDingQRModalOverlay: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let lang: AppLanguage
+    let onClose: () -> Void
+    @State private var qrImage: NSImage? = DingDingMiniProgramQRLoader.bundledImage()
+    @State private var loadFailed = false
+    @State private var closeHovered = false
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        ZStack {
+            Color.black.opacity(colorScheme == .dark ? 0.52 : 0.24)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onClose)
+
+            VStack(spacing: 14) {
+                HStack(alignment: .center) {
+                    Text("叮叮提醒")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(p.inkPrimary)
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(closeHovered ? p.inkPrimary : p.inkSecondary)
+                            .frame(width: 24, height: 24)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(closeHovered ? p.segmentedTrack : Color.clear)
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { closeHovered = $0 }
+                    .keyboardShortcut(.cancelAction)
+                }
+
+                Text(L10n.tr(
+                    "微信扫一扫，打开【叮叮提醒】小程序",
+                    "Scan with WeChat to open 【叮叮提醒】 Mini Program",
+                    in: lang
+                ))
+                .font(.system(size: 12))
+                .foregroundStyle(p.inkSecondary)
+                .multilineTextAlignment(.center)
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Color.black.opacity(0.08), lineWidth: 1)
+                        )
+
+                    if let qrImage {
+                        Image(nsImage: qrImage)
+                            .resizable()
+                            .interpolation(.high)
+                            .antialiased(true)
+                            .frame(width: 184, height: 184)
+                    } else if loadFailed {
+                        Text(L10n.tr("二维码加载失败，请稍后重试", "Failed to load QR code", in: lang))
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.gray)
+                            .padding(16)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                .frame(width: 204, height: 204)
+
+                HStack(spacing: 8) {
+                    Text(L10n.tr("微信搜索：叮叮提醒", "WeChat Search: 叮叮提醒", in: lang))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(p.inkTertiary)
+                    Text("·")
+                        .foregroundStyle(p.inkTertiary)
+                    MagpieTextAction(L10n.tr("访问官网 ↗", "Website ↗", in: lang)) {
+                        NSWorkspace.shared.open(dingDingServiceURL)
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 14)
+            .frame(width: 288)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(p.cardBg)
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.14), radius: 22, x: 0, y: 8)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(p.cardBorder, lineWidth: 1)
+            )
+            .task {
+                if qrImage == nil {
+                    if let remote = await DingDingMiniProgramQRLoader.fetchRemoteImage() {
+                        qrImage = remote
+                    } else {
+                        loadFailed = true
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1573,6 +1816,7 @@ private struct AboutSettingsPane: View {
     @Environment(\.appLanguage) private var lang
     @ObservedObject var app: AirSnipAppController
     @ObservedObject var updateState: SettingsUpdateState
+    let onShowDingDingQR: () -> Void
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
@@ -1709,6 +1953,21 @@ private struct AboutSettingsPane: View {
                     }
                 }
             }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(
+                title: L10n.tr("服务支持", "Service Provider", in: lang),
+                subtitle: L10n.tr(
+                    "本程序由【叮叮提醒】微信小程序提供服务",
+                    "Powered by 【叮叮提醒】 WeChat Mini Program",
+                    in: lang
+                )
+            ) {
+                MagpieTextAction(L10n.tr("小程序码", "Show QR Code", in: lang), prominent: true) {
+                    onShowDingDingQR()
+                }
+            }
         }
     }
 }
@@ -1723,6 +1982,7 @@ private struct SettingsSearchResultsPane: View {
     @ObservedObject var updateState: SettingsUpdateState
     @Binding var recordingSlot: String?
     let onSelectTab: (SettingsTab) -> Void
+    let onShowDingDingQR: () -> Void
 
     private struct SearchEntry: Identifiable {
         let id: String
@@ -1970,6 +2230,20 @@ private struct SettingsSearchResultsPane: View {
                             .foregroundStyle(p.inkMono)
                         MagpieCopyButton(value: configDirURL.path)
                         MagpieTextAction(L10n.tr("打开", "Open", in: lang)) { NSWorkspace.shared.open(configDirURL) }
+                    }
+                })
+            },
+            SearchEntry(id: "ab.dingding", keywords: "关于 about 服务支持 叮叮提醒 微信小程序 提供服务 二维码 小程序码 dingding wechat mini program service provider qrcode yinso") {
+                AnyView(MagpieSettingRow(
+                    title: L10n.tr("服务支持", "Service Provider", in: lang),
+                    subtitle: L10n.tr(
+                        "本程序由【叮叮提醒】微信小程序提供服务",
+                        "Powered by 【叮叮提醒】 WeChat Mini Program",
+                        in: lang
+                    )
+                ) {
+                    MagpieTextAction(L10n.tr("小程序码", "Show QR Code", in: lang), prominent: true) {
+                        onShowDingDingQR()
                     }
                 })
             }
