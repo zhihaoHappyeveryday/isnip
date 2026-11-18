@@ -1246,3 +1246,55 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         return conflicts
     }
 }
+
+public enum ReleaseAssetSelector {
+    public static var currentArchTag: String {
+        #if arch(x86_64)
+        return "amd64"
+        #else
+        return "arm64"
+        #endif
+    }
+
+    public static func selectDownloadURL(
+        assets: [(name: String, url: String)],
+        arch: String = currentArchTag
+    ) -> URL? {
+        let normalized = arch.lowercased()
+        let dmgAssets = assets.filter { $0.name.lowercased().hasSuffix(".dmg") }
+        guard !dmgAssets.isEmpty else { return nil }
+
+        let isAmd64Name: (String) -> Bool = { n in
+            n.contains("amd64") || n.contains("x86_64") || n.contains("x64") || n.contains("intel")
+        }
+        let isArm64Name: (String) -> Bool = { n in
+            n.contains("arm64") || n.contains("aarch64")
+        }
+
+        if normalized == "amd64" || normalized == "x86_64" {
+            if let hit = dmgAssets.first(where: { isAmd64Name($0.name.lowercased()) }),
+               let url = URL(string: hit.url) {
+                return url
+            }
+            if let uni = dmgAssets.first(where: { $0.name.lowercased().contains("universal") }),
+               let url = URL(string: uni.url) {
+                return url
+            }
+            return nil
+        } else {
+            if let hit = dmgAssets.first(where: { isArm64Name($0.name.lowercased()) }),
+               let url = URL(string: hit.url) {
+                return url
+            }
+            if let uni = dmgAssets.first(where: { $0.name.lowercased().contains("universal") }),
+               let url = URL(string: uni.url) {
+                return url
+            }
+            if let fallback = dmgAssets.first(where: { !isAmd64Name($0.name.lowercased()) }),
+               let url = URL(string: fallback.url) {
+                return url
+            }
+            return nil
+        }
+    }
+}

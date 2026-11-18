@@ -1,5 +1,12 @@
 # Changelog
 
+## macOS v0.3.19
+
+- **新增 `amd64`（`x86_64` / Intel 及 AMD 架构 Mac）独立安装包与双架构自动更新支持**：
+  - 构建并内置原生静态链接的 `x86_64-apple-darwin`（`macOS 14.0+`）压缩引擎 `pngquant 3.0.3` 与 `oxipng 10.2.1`，零外部动态库依赖。
+  - 为离线 Vision OCR 与条码识别引入三级计算设备兜底管线（默认硬件加速 → `MLCPUComputeDevice` 高精度识别 → 快速识别回退），兼容无 ANE / 独立 AMD 显卡驱动及跨架构运行环境。
+  - GitHub Release 同步提供 `isnip-macos-arm64-v*.dmg/.zip`（Apple Silicon）与 `isnip-macos-amd64-v*.dmg/.zip`（`x86_64` Intel / AMD 架构 Mac）双独立安装包；内置更新检查器 `ReleaseAssetSelector` 自动根据当前运行 CPU 架构精准匹配对应 DMG 下载地址。
+
 ## macOS v0.3.18
 
 - **精简设置窗口底部重复服务标识**：

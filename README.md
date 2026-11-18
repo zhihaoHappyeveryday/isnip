@@ -5,7 +5,7 @@
   <p>
     <a href="https://github.com/zzusec/isnip/releases/latest"><img src="https://img.shields.io/github/v/release/zzusec/isnip?label=Release&color=0A84FF" alt="Latest Release" /></a>
     <img src="https://img.shields.io/badge/macOS-14.0%2B-111827" alt="macOS 14.0+" />
-    <img src="https://img.shields.io/badge/Arch-Apple%20Silicon-0F766E" alt="Apple Silicon" />
+    <img src="https://img.shields.io/badge/Arch-arm64%20%7C%20amd64-0F766E" alt="arm64 | amd64" />
     <img src="https://img.shields.io/badge/Swift-5.10-F05138" alt="Swift 5.10" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue" alt="License GPL-3.0" /></a>
   </p>
@@ -49,7 +49,9 @@
 
 ### Option 1: Download Prebuilt DMG (Recommended)
 
-1. Download the latest `isnip-macos-arm64-v*.dmg` from **[GitHub Releases](https://github.com/zzusec/isnip/releases/latest)**.
+1. Download the matching DMG from **[GitHub Releases](https://github.com/zzusec/isnip/releases/latest)**:
+   - **Apple Silicon (`M1` / `M2` / `M3` / `M4` / `M5`)**: `isnip-macos-arm64-v*.dmg`
+   - **Intel / AMD (`x86_64`) Mac**: `isnip-macos-amd64-v*.dmg`
 2. Open the DMG and drag **iSnip.app** into `/Applications`.
 3. If macOS Gatekeeper blocks the first launch, clear the quarantine attribute once in Terminal:
    ```sh
@@ -59,7 +61,7 @@
 
 ### Option 2: Build & Install from Source
 
-Requirements: **macOS 14.0+** (Apple Silicon) and **Xcode Command Line Tools (Swift 5.10+)**.
+Requirements: **macOS 14.0+** (`arm64` or `x86_64`) and **Xcode Command Line Tools (Swift 5.10+)**.
 
 ```sh
 git clone https://github.com/zzusec/isnip.git

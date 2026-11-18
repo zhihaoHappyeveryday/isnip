@@ -1086,14 +1086,14 @@ public enum UpdateChecker {
             let notes = (json["body"] as? String) ?? ""
             var dmgURL: URL?
             if let assets = json["assets"] as? [[String: Any]] {
-                for asset in assets {
-                    if let name = asset["name"] as? String,
-                       name.hasSuffix(".dmg"),
-                       let dl = asset["browser_download_url"] as? String {
-                        dmgURL = URL(string: dl)
-                        break
+                let parsed: [(name: String, url: String)] = assets.compactMap { asset in
+                    guard let name = asset["name"] as? String,
+                          let dl = asset["browser_download_url"] as? String else {
+                        return nil
                     }
+                    return (name: name, url: dl)
                 }
+                dmgURL = ReleaseAssetSelector.selectDownloadURL(assets: parsed)
             }
             return .success(UpdateReleaseInfo(version: remoteVer, htmlURL: htmlURL, downloadURL: dmgURL, body: notes))
         } catch {

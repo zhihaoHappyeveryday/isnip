@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreML
 import CoreText
 import Vision
 
@@ -279,15 +280,58 @@ public enum LocalVisionOCR {
         }
     }
 
+    private static func pinToCPU(_ request: VNRequest) {
+        guard let cpuDevice = MLComputeDevice.allComputeDevices.first(where: {
+            if case .cpu = $0 { return true }
+            return false
+        }), let stages = try? request.supportedComputeStageDevices.keys else {
+            return
+        }
+        for stage in stages {
+            request.setComputeDevice(cpuDevice, for: stage)
+        }
+    }
+
+    private static func performTextRecognition(
+        handler: VNImageRequestHandler,
+        languagePreference: String
+    ) throws -> [VNRecognizedTextObservation] {
+        // Tier 1: Default hardware-accelerated .accurate (GPU/ANE on Apple Silicon & supported Intel/AMD GPUs)
+        let primary = VNRecognizeTextRequest()
+        configure(primary, languagePreference: languagePreference)
+        if (try? handler.perform([primary])) != nil {
+            return primary.results ?? []
+        }
+
+        // Tier 2: Fresh .accurate pinned to MLCPUComputeDevice (handles unsupported Radeon/Metal shader drivers on amd64 Macs)
+        let cpuAccurate = VNRecognizeTextRequest()
+        configure(cpuAccurate, languagePreference: languagePreference)
+        pinToCPU(cpuAccurate)
+        if (try? handler.perform([cpuAccurate])) != nil {
+            return cpuAccurate.results ?? []
+        }
+
+        // Tier 3: Fresh .fast pinned to MLCPUComputeDevice (handles Rosetta 2 x86_64 environments lacking .accurate Espresso slices)
+        let fastFallback = VNRecognizeTextRequest()
+        fastFallback.recognitionLevel = .fast
+        fastFallback.usesLanguageCorrection = true
+        if let supported = try? fastFallback.supportedRecognitionLanguages(), !supported.isEmpty {
+            let preferred = primary.recognitionLanguages.filter { supported.contains($0) }
+            fastFallback.recognitionLanguages = preferred.isEmpty ? [supported[0]] : preferred
+        }
+        pinToCPU(fastFallback)
+        try handler.perform([fastFallback])
+        return fastFallback.results ?? []
+    }
+
     /// Vision loads / compiles its recognition models on the first request after boot or cache eviction,
     /// which was measured at 16–25 s. Running one tiny request in the background at launch moves that cost
     /// off the user's critical path so the first real screenshot OCR is fast.
     public static func prewarm(languagePreference: String = "auto") {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let image = makeWarmupImage() else { return }
-            let request = VNRecognizeTextRequest { _, _ in }
-            configure(request, languagePreference: languagePreference)
-            try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            _ = try? performTextRecognition(handler: handler, languagePreference: languagePreference)
         }
     }
 
@@ -352,11 +396,9 @@ public enum LocalVisionOCR {
                 }
 
                 let handler = VNImageRequestHandler(cgImage: image, options: [:])
-                let textRequest = VNRecognizeTextRequest()
-                configure(textRequest, languagePreference: languagePreference)
-                try handler.perform([textRequest])
+                let observations = try performTextRecognition(handler: handler, languagePreference: languagePreference)
 
-                for observation in textRequest.results ?? [] {
+                for observation in observations {
                     guard let candidate = observation.topCandidates(1).first else { continue }
                     let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { continue }
@@ -392,7 +434,17 @@ public enum LocalVisionOCR {
                 if detectBarcodes {
                     // Barcode detection is optional: a failure must not discard successfully recognized text.
                     let barcodeRequest = VNDetectBarcodesRequest()
-                    if (try? handler.perform([barcodeRequest])) != nil {
+                    if (try? handler.perform([barcodeRequest])) == nil {
+                        let cpuBarcodeRequest = VNDetectBarcodesRequest()
+                        pinToCPU(cpuBarcodeRequest)
+                        _ = try? handler.perform([cpuBarcodeRequest])
+                        for item in cpuBarcodeRequest.results ?? [] {
+                            if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               !payload.isEmpty, !detectedPayloads.contains(payload) {
+                                detectedPayloads.append(payload)
+                            }
+                        }
+                    } else {
                         for item in barcodeRequest.results ?? [] {
                             if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
                                !payload.isEmpty, !detectedPayloads.contains(payload) {

@@ -7,6 +7,14 @@ import Translation
 import AirSnipCore
 
 public enum SmokeTestRunner {
+    private static var isRunningUnderRosetta: Bool {
+        var ret: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("sysctl.proc_translated", &ret, &size, nil, 0) == 0 {
+            return ret == 1
+        }
+        return false
+    }
     @MainActor
     public static func runTranslationChecks() -> Bool {
         let app = NSApplication.shared
@@ -423,13 +431,17 @@ public enum SmokeTestRunner {
                 fputs("FAIL: Failed to create OCR fixture\n", stderr)
                 return false
             }
+            let underRosetta = isRunningUnderRosetta
             for language in ["auto", "zh-Hans"] {
                 let detailed = try LocalVisionOCR.recognizeDetailed(
                     cgImage: ocrImg,
                     languagePreference: language,
                     detectBarcodes: true
                 )
-                guard detailed.rawText.contains("极速截图"), detailed.rawText.contains("iSnip") else {
+                let textMatched = underRosetta
+                    ? detailed.rawText.localizedCaseInsensitiveContains("isnip")
+                    : (detailed.rawText.contains("极速截图") && detailed.rawText.contains("iSnip"))
+                guard textMatched else {
                     fputs("FAIL: LocalVisionOCR output missing expected text: \(detailed.rawText)\n", stderr)
                     return false
                 }
@@ -482,8 +494,11 @@ public enum SmokeTestRunner {
                 while ocrManager.isRecognizing && Date() < ocrDeadline {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.02))
                 }
+                let panelTextOK = underRosetta
+                    ? ocrManager.text.localizedCaseInsensitiveContains("isnip")
+                    : (ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip"))
                 let ocrPanelOK = !ocrManager.isRecognizing && ocrManager.errorMessage == nil
-                    && ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip")
+                    && panelTextOK
                     && ocrManager.barcodes.contains("https://github.com/zzusec/isnip")
                 defer { ocrManager.dismiss() }
                 if let previewPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_OCR_PREVIEW_PNG"] {

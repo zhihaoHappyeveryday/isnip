@@ -77,12 +77,18 @@ sh scripts/release-app.sh "$version"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "打包期间源码已改变；未创建 Release"
 
 dist=$root/dist
-base=isnip-macos-arm64-v$version
-assets="$base.dmg $base.dmg.sha256 $base.zip $base.zip.sha256"
+arm_base=isnip-macos-arm64-v$version
+amd_base=isnip-macos-amd64-v$version
+assets="$arm_base.dmg $arm_base.dmg.sha256 $arm_base.zip $arm_base.zip.sha256 $amd_base.dmg $amd_base.dmg.sha256 $amd_base.zip $amd_base.zip.sha256"
 for f in $assets; do [ -s "$dist/$f" ] || die "缺少产物 ${dist}/${f}"; done
 
-( cd "$dist" && shasum -a 256 -c "$base.dmg.sha256" && shasum -a 256 -c "$base.zip.sha256" ) \
-  || die "本地 SHA-256 自检未通过"
+(
+  cd "$dist"
+  shasum -a 256 -c "$arm_base.dmg.sha256"
+  shasum -a 256 -c "$arm_base.zip.sha256"
+  shasum -a 256 -c "$amd_base.dmg.sha256"
+  shasum -a 256 -c "$amd_base.zip.sha256"
+) || die "本地 SHA-256 自检未通过"
 
 notes=$scratch/notes.md
 awk -v head="## macOS v$version" 'index($0, head) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$notes"
@@ -133,7 +139,7 @@ case $latest in
   */tag/v$version) ;;
   *) die "latest 未指向 v${version}" ;;
 esac
-for f in "$base.zip" "$base.dmg"; do
+for f in "$arm_base.zip" "$arm_base.dmg" "$amd_base.zip" "$amd_base.dmg"; do
   remote=$(curl -sSL "https://github.com/$REPO/releases/download/v$version/$f.sha256" | awk '{print $1}')
   [ ${#remote} -eq 64 ] || die "${f}.sha256 未正常上传或格式无效"
   [ "$remote" = "$(awk '{print $1}' "$dist/$f.sha256")" ] || die "${f} 线上校验值与本地不一致"
@@ -141,11 +147,15 @@ for f in "$base.zip" "$base.dmg"; do
 done
 
 api -f "https://api.github.com/repos/$REPO/releases/tags/v$version" -o "$scratch/release.json"
-python3 - "$scratch/release.json" "$dist" "$base" <<'PY'
+python3 - "$scratch/release.json" "$dist" "$arm_base" "$amd_base" <<'PY'
 import hashlib, json, pathlib, sys
 metadata = json.load(open(sys.argv[1]))
-dist, base = sys.argv[2:]
-expected = {base + suffix for suffix in ('.dmg', '.dmg.sha256', '.zip', '.zip.sha256')}
+dist, arm_base, amd_base = sys.argv[2:]
+expected = {
+    b + suffix
+    for b in (arm_base, amd_base)
+    for suffix in ('.dmg', '.dmg.sha256', '.zip', '.zip.sha256')
+}
 assets = metadata.get('assets', [])
 if len(assets) != len(expected) or {a['name'] for a in assets} != expected:
     sys.exit('Release 附件不完整或包含非允许附件；main 未更新')

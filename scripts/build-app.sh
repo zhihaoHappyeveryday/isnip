@@ -5,30 +5,57 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 version=${ISNIP_VERSION:-${AIRSNIP_VERSION:-}}
+host_uname=$(uname -m)
+if [ "$host_uname" = "x86_64" ]; then
+  default_arch=amd64
+else
+  default_arch=arm64
+fi
+req_arch=${ISNIP_ARCH:-$default_arch}
 
-swift build -c release >&2
+case "$req_arch" in
+  arm64|aarch64)
+    target_arch=arm64
+    swift_arch=arm64
+    helpers_dir="$root/Vendor/Helpers"
+    frameworks_dir="$root/Vendor/Frameworks"
+    ;;
+  amd64|x86_64)
+    target_arch=amd64
+    swift_arch=x86_64
+    helpers_dir="$root/Vendor/amd64/Helpers"
+    frameworks_dir="$root/Vendor/amd64/Frameworks"
+    ;;
+  *)
+    echo "Unsupported ISNIP_ARCH: ${req_arch} (expected arm64 or amd64)" >&2
+    exit 2
+    ;;
+esac
 
-app="$root/dist/iSnip.app"
+swift build -c release --arch "$swift_arch" >&2
+bin_dir=$(swift build -c release --arch "$swift_arch" --show-bin-path)
+
+app=${ISNIP_OUT_APP:-"$root/dist/iSnip.app"}
 rm -rf "$app" "$root/dist/AirSnip.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Helpers" "$app/Contents/Frameworks"
 
-cp "$root/.build/release/iSnip" "$app/Contents/MacOS/iSnip"
+cp "$bin_dir/iSnip" "$app/Contents/MacOS/iSnip"
 cp "$root/Assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 if [ -f "$root/Assets/dingding-mp-qr.jpg" ]; then
   cp "$root/Assets/dingding-mp-qr.jpg" "$app/Contents/Resources/dingding-mp-qr.jpg"
 fi
 cp "$root/Info.plist" "$app/Contents/Info.plist"
 
-if [ -d "$root/Vendor/Helpers" ]; then
-  for helper in "$root/Vendor/Helpers"/*; do
+if [ -d "$helpers_dir" ]; then
+  for helper in "$helpers_dir"/*; do
     [ -f "$helper" ] || continue
     cp "$helper" "$app/Contents/Helpers/$(basename "$helper")"
     chmod 755 "$app/Contents/Helpers/$(basename "$helper")"
   done
 fi
 
-if [ -d "$root/Vendor/Frameworks" ]; then
-  for dylib in "$root/Vendor/Frameworks"/*.dylib; do
+if [ -d "$frameworks_dir" ]; then
+  for dylib in "$frameworks_dir"/*.dylib; do
     [ -f "$dylib" ] || continue
     cp "$dylib" "$app/Contents/Frameworks/$(basename "$dylib")"
     chmod 755 "$app/Contents/Frameworks/$(basename "$dylib")"
@@ -56,7 +83,7 @@ if [ -z "$sign_identity" ]; then
   sign_identity=-
 fi
 
-echo "Signing iSnip.app (inside-out) with identity: $sign_identity" >&2
+echo "Signing iSnip.app [${target_arch}] (inside-out) with identity: ${sign_identity}" >&2
 for dylib in "$app/Contents/Frameworks"/*.dylib; do
   [ -f "$dylib" ] || continue
   codesign --force --sign "$sign_identity" "$dylib"

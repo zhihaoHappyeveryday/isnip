@@ -1060,4 +1060,41 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertTrue(conflictCfg.hotkeyConflicts(in: .en).first?.contains("conflicts with") == true)
         XCTAssertTrue(conflictCfg.hotkeyConflicts(in: .zhHans).first?.contains("冲突") == true)
     }
+
+    func testReleaseAssetSelectorMatchesArm64AndAmd64Architectures() {
+        let dualAssets: [(name: String, url: String)] = [
+            ("isnip-macos-arm64-v0.3.19.dmg", "https://example.com/arm64.dmg"),
+            ("isnip-macos-arm64-v0.3.19.zip", "https://example.com/arm64.zip"),
+            ("isnip-macos-amd64-v0.3.19.dmg", "https://example.com/amd64.dmg"),
+            ("isnip-macos-amd64-v0.3.19.zip", "https://example.com/amd64.zip"),
+        ]
+        XCTAssertEqual(
+            ReleaseAssetSelector.selectDownloadURL(assets: dualAssets, arch: "arm64")?.absoluteString,
+            "https://example.com/arm64.dmg"
+        )
+        XCTAssertEqual(
+            ReleaseAssetSelector.selectDownloadURL(assets: dualAssets, arch: "amd64")?.absoluteString,
+            "https://example.com/amd64.dmg"
+        )
+        XCTAssertEqual(
+            ReleaseAssetSelector.selectDownloadURL(assets: dualAssets, arch: "x86_64")?.absoluteString,
+            "https://example.com/amd64.dmg"
+        )
+
+        // Reversed order still picks exact architecture match
+        XCTAssertEqual(
+            ReleaseAssetSelector.selectDownloadURL(assets: dualAssets.reversed(), arch: "arm64")?.absoluteString,
+            "https://example.com/arm64.dmg"
+        )
+
+        // Legacy arm64-only release never offers an incompatible arm64 DMG to an amd64 Mac
+        let armOnly: [(name: String, url: String)] = [
+            ("isnip-macos-arm64-v0.3.18.dmg", "https://example.com/legacy-arm64.dmg")
+        ]
+        XCTAssertEqual(
+            ReleaseAssetSelector.selectDownloadURL(assets: armOnly, arch: "arm64")?.absoluteString,
+            "https://example.com/legacy-arm64.dmg"
+        )
+        XCTAssertNil(ReleaseAssetSelector.selectDownloadURL(assets: armOnly, arch: "amd64"))
+    }
 }
