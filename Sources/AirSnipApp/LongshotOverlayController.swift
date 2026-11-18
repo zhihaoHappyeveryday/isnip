@@ -233,6 +233,7 @@ public final class LongshotSessionController: ObservableObject {
             pWin.level = .statusBar
             pWin.ignoresMouseEvents = true
             pWin.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            applyWindowTheme(to: pWin)
             pWin.contentView = NSHostingView(rootView: LongshotPreviewCard(controller: self))
             pWin.orderFrontRegardless()
             self.previewWindow = pWin
@@ -240,7 +241,7 @@ public final class LongshotSessionController: ObservableObject {
 
         // 3. Control bar window below (or above / cleanly inside bottom of) viewport, always respecting Dock & menu bar
         let vis = screen.visibleFrame
-        let barW = min(max(488, vis.width - 24), 532)
+        let barW = min(max(496, vis.width - 24), 544)
         let barH: CGFloat = 42
         let barX = max(vis.minX + 12, min(vis.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
         let barY: CGFloat
@@ -264,9 +265,18 @@ public final class LongshotSessionController: ObservableObject {
         cWin.hasShadow = true
         cWin.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         cWin.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        applyWindowTheme(to: cWin)
         cWin.contentView = FirstMouseHostingView(rootView: LongshotControlBarView(controller: self))
         cWin.orderFrontRegardless()
         self.controlWindow = cWin
+    }
+
+    private func applyWindowTheme(to win: NSWindow) {
+        switch config.theme {
+        case .follow: win.appearance = nil
+        case .light: win.appearance = NSAppearance(named: .aqua)
+        case .dark: win.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 
     private func installKeyMonitors() {
@@ -695,38 +705,47 @@ private final class LongshotFrameOverlayView: NSView {
         ctx.fill(bounds)
         ctx.restoreGState()
 
-        // Crisp dual-stroke border outside viewport
-        let outer = viewportInView.insetBy(dx: -1.5, dy: -1.5)
-        ctx.setStrokeColor(CGColor(srgbRed: 0.12, green: 0.53, blue: 0.96, alpha: 0.96))
+        // Crisp dual-contrast neutral border outside viewport (legible on both dark & light pages)
+        let outerRim = viewportInView.insetBy(dx: -2.0, dy: -2.0)
+        ctx.setStrokeColor(CGColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 0.72))
         ctx.setLineWidth(2.0)
-        ctx.stroke(outer)
+        ctx.stroke(outerRim)
+
+        let innerRim = viewportInView.insetBy(dx: -0.75, dy: -0.75)
+        ctx.setStrokeColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.96))
+        ctx.setLineWidth(1.5)
+        ctx.stroke(innerRim)
     }
 }
 
 private struct LongshotPreviewCard: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var controller: LongshotSessionController
 
     var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
         ZStack {
             if let cg = controller.thumbnailImage {
                 Image(decorative: cg, scale: 1.0)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(p.cardBorder, lineWidth: 1)
                     )
             }
         }
         .padding(7)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(p.cardBg.opacity(0.97))
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+                .strokeBorder(p.cardBorder, lineWidth: 1)
         )
     }
 }
@@ -737,60 +756,81 @@ private struct LongshotBarPillStyle: ButtonStyle {
 
     enum Role {
         case secondary
-        case activeTint
+        case activeThumb
         case warning
         case primary
     }
 
     func makeBody(configuration: Configuration) -> some View {
-        let bg: Color = {
-            switch role {
-            case .primary:
-                return Color.accentColor.opacity(configuration.isPressed ? 0.84 : 1.0)
-            case .activeTint:
-                return Color.accentColor.opacity(configuration.isPressed ? 0.24 : 0.15)
-            case .warning:
-                return Color.orange.opacity(configuration.isPressed ? 0.26 : 0.16)
-            case .secondary:
-                return Color.primary.opacity(configuration.isPressed ? 0.15 : 0.08)
-            }
-        }()
-        let fg: Color = {
-            switch role {
-            case .primary:
-                return .white
-            case .activeTint:
-                return .accentColor
-            case .warning:
-                return .orange
-            case .secondary:
-                return .primary
-            }
-        }()
-        configuration.label
-            .font(.system(size: 11.5, weight: role == .primary ? .semibold : .medium))
-            .foregroundStyle(fg)
-            .padding(.horizontal, 8.5)
-            .frame(height: 24)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(bg)
-            )
-            .opacity(isEnabled ? 1.0 : 0.38)
+        InnerBarPill(configuration: configuration, role: role, isEnabled: isEnabled)
+    }
+
+    private struct InnerBarPill: View {
+        @Environment(\.colorScheme) private var colorScheme
+        let configuration: Configuration
+        let role: Role
+        let isEnabled: Bool
+        @State private var isHovered = false
+
+        var body: some View {
+            let p = MagpiePalette(colorScheme: colorScheme)
+            let bg: Color = {
+                switch role {
+                case .primary:
+                    return p.solidBtnBg.opacity(configuration.isPressed ? 0.82 : (isHovered ? 0.90 : 1.0))
+                case .activeThumb:
+                    return p.segmentedThumb
+                case .warning:
+                    return p.statusWarn.opacity(configuration.isPressed ? 0.24 : 0.14)
+                case .secondary:
+                    return isHovered ? p.navActivePill : p.segmentedTrack
+                }
+            }()
+            let fg: Color = {
+                switch role {
+                case .primary:
+                    return p.solidBtnFg
+                case .activeThumb, .secondary:
+                    return p.inkPrimary
+                case .warning:
+                    return p.statusWarn
+                }
+            }()
+
+            configuration.label
+                .font(.system(size: 11.5, weight: role == .primary || role == .activeThumb ? .semibold : .medium))
+                .foregroundStyle(fg)
+                .padding(.horizontal, 8.5)
+                .frame(height: 25)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(bg)
+                )
+                .overlay {
+                    if role == .activeThumb {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(p.segmentedThumbBorder, lineWidth: 0.85)
+                    }
+                }
+                .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+                .opacity(isEnabled ? 1.0 : 0.38)
+                .onHover { isHovered = $0 }
+        }
     }
 }
 
 struct LongshotControlBarView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var controller: LongshotSessionController
 
-    private var statusDotColor: Color {
+    private func statusDotColor(palette p: MagpiePalette) -> Color {
         if controller.needsAccessibilityAuth {
-            return .orange
+            return p.statusWarn
         }
         if controller.isAutoScrolling {
-            return .accentColor
+            return p.statusOk
         }
-        return .green
+        return p.inkSecondary
     }
 
     private var autoScrollButtonLabel: String {
@@ -804,13 +844,16 @@ struct LongshotControlBarView: View {
     }
 
     var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+
         HStack(spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(statusDotColor)
-                    .frame(width: 7, height: 7)
+                    .fill(statusDotColor(palette: p))
+                    .frame(width: 6.5, height: 6.5)
                 Text("\(controller.pixelWidth) × \(controller.pixelHeight)")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(p.inkMono)
                     .monospacedDigit()
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
@@ -818,7 +861,7 @@ struct LongshotControlBarView: View {
                 if !controller.statusHint.isEmpty {
                     Text(controller.statusHint)
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(p.inkSecondary)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -845,7 +888,7 @@ struct LongshotControlBarView: View {
                         .lineLimit(1)
                 }
             }
-            .buttonStyle(LongshotBarPillStyle(role: controller.isAutoScrolling ? .activeTint : .secondary))
+            .buttonStyle(LongshotBarPillStyle(role: controller.isAutoScrolling ? .activeThumb : .secondary))
             .fixedSize(horizontal: true, vertical: false)
             .help("自动翻页 / 暂停 (Space)")
 
@@ -860,8 +903,9 @@ struct LongshotControlBarView: View {
             .fixedSize(horizontal: true, vertical: false)
             .help("翻页速度：\(controller.scrollSpeed.title)（点击切换）")
 
-            Divider()
-                .frame(height: 15)
+            Rectangle()
+                .fill(p.cardBorder)
+                .frame(width: 1, height: 15)
                 .padding(.horizontal, 1)
 
             Button {
@@ -915,7 +959,7 @@ struct LongshotControlBarView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(p.inkSecondary)
                     .frame(width: 22, height: 24)
                     .contentShape(Rectangle())
             }
@@ -925,11 +969,13 @@ struct LongshotControlBarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 10.5, style: .continuous)
+                .fill(p.cardBg.opacity(0.98))
+        )
         .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.85)
+            RoundedRectangle(cornerRadius: 10.5, style: .continuous)
+                .strokeBorder(p.cardBorder, lineWidth: 1)
         )
     }
 }

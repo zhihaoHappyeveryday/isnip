@@ -629,6 +629,41 @@ public enum SmokeTestRunner {
                     let dirURL = URL(fileURLWithPath: dirPath)
                     try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
                     let dummyApp = AirSnipAppController(configURL: tempDir.appendingPathComponent("preview-config.json"))
+                    func renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView,
+                        appearance: NSAppearance.Name,
+                        to outURL: URL
+                    ) {
+                        let win = NSWindow(
+                            contentRect: NSRect(x: -5000, y: -5000, width: 880, height: 640),
+                            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                            backing: .buffered,
+                            defer: false
+                        )
+                        win.titleVisibility = .hidden
+                        win.titlebarAppearsTransparent = true
+                        let tb = NSToolbar(identifier: "preview.tb.\(UUID().uuidString)")
+                        tb.showsBaselineSeparator = false
+                        win.toolbar = tb
+                        win.toolbarStyle = .unified
+                        win.appearance = NSAppearance(named: appearance)
+                        let host = NSHostingView(rootView: rootView)
+                        host.frame = NSRect(x: 0, y: 0, width: 880, height: 640)
+                        host.appearance = NSAppearance(named: appearance)
+                        win.contentView = host
+                        win.layoutIfNeeded()
+                        host.layoutSubtreeIfNeeded()
+                        let targetView = win.contentView?.superview ?? host
+                        targetView.layoutSubtreeIfNeeded()
+                        if let rep = targetView.bitmapImageRepForCachingDisplay(in: targetView.bounds) {
+                            targetView.cacheDisplay(in: targetView.bounds, to: rep)
+                            if let png = rep.representation(using: .png, properties: [:]) {
+                                try? png.write(to: outURL)
+                            }
+                        }
+                        win.orderOut(nil)
+                    }
+
                     let tabsToDump: [(SettingsTab, String)] = [
                         (.general, "01_general.png"),
                         (.captureAndPin, "02_capture.png"),
@@ -639,41 +674,36 @@ public enum SmokeTestRunner {
                         (.about, "07_about.png"),
                     ]
                     for (tab, fileName) in tabsToDump {
-                        let host = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: tab))
-                        host.frame = NSRect(x: 0, y: 0, width: 740, height: 560)
-                        host.appearance = NSAppearance(named: .aqua)
-                        host.layoutSubtreeIfNeeded()
-                        if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                            host.cacheDisplay(in: host.bounds, to: rep)
-                            if let png = rep.representation(using: .png, properties: [:]) {
-                                try? png.write(to: dirURL.appendingPathComponent(fileName))
-                            }
-                        }
+                        renderSettingsWindowSnapshot(
+                            rootView: SettingsRootView(app: dummyApp, initialTab: tab),
+                            appearance: .aqua,
+                            to: dirURL.appendingPathComponent(fileName)
+                        )
                     }
 
-                    // Dark appearance check + White (#FFFFFF) swatch preview contrast check
-                    let darkGeneralHost = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: .general))
-                    darkGeneralHost.frame = NSRect(x: 0, y: 0, width: 740, height: 560)
-                    darkGeneralHost.appearance = NSAppearance(named: .darkAqua)
-                    darkGeneralHost.layoutSubtreeIfNeeded()
-                    if let rep = darkGeneralHost.bitmapImageRepForCachingDisplay(in: darkGeneralHost.bounds) {
-                        darkGeneralHost.cacheDisplay(in: darkGeneralHost.bounds, to: rep)
-                        if let png = rep.representation(using: .png, properties: [:]) {
-                            try? png.write(to: dirURL.appendingPathComponent("01_general_dark.png"))
-                        }
-                    }
+                    // Dark appearance checks + Search filter + White (#FFFFFF) swatch preview contrast check
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .general),
+                        appearance: .darkAqua,
+                        to: dirURL.appendingPathComponent("01_general_dark.png")
+                    )
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .about),
+                        appearance: .darkAqua,
+                        to: dirURL.appendingPathComponent("07_about_dark.png")
+                    )
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .general, initialSearchQuery: "压缩"),
+                        appearance: .aqua,
+                        to: dirURL.appendingPathComponent("09_search.png")
+                    )
 
                     dummyApp.updateConfig { $0.activeColorIndex = 0 } // #FFFFFF pure white swatch
-                    let whiteSwatchHost = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: .editor))
-                    whiteSwatchHost.frame = NSRect(x: 0, y: 0, width: 740, height: 560)
-                    whiteSwatchHost.appearance = NSAppearance(named: .aqua)
-                    whiteSwatchHost.layoutSubtreeIfNeeded()
-                    if let rep = whiteSwatchHost.bitmapImageRepForCachingDisplay(in: whiteSwatchHost.bounds) {
-                        whiteSwatchHost.cacheDisplay(in: whiteSwatchHost.bounds, to: rep)
-                        if let png = rep.representation(using: .png, properties: [:]) {
-                            try? png.write(to: dirURL.appendingPathComponent("05_editor_white_swatch.png"))
-                        }
-                    }
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialTab: .editor),
+                        appearance: .aqua,
+                        to: dirURL.appendingPathComponent("05_editor_white_swatch.png")
+                    )
 
                     let lsCtrl = LongshotSessionController(
                         screen: screen,

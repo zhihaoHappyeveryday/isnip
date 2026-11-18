@@ -395,16 +395,25 @@ public final class OCRBubbleManager: ObservableObject {
 
     private func applyTheme(_ theme: ThemeSetting, to win: NSWindow) {
         switch theme {
-        case .follow: win.appearance = nil
-        case .light: win.appearance = NSAppearance(named: .aqua)
-        case .dark: win.appearance = NSAppearance(named: .darkAqua)
+        case .follow:
+            win.appearance = nil
+            win.backgroundColor = .windowBackgroundColor
+        case .light:
+            win.appearance = NSAppearance(named: .aqua)
+            win.backgroundColor = NSColor(srgbRed: 0.969, green: 0.969, blue: 0.973, alpha: 1.0)
+        case .dark:
+            win.appearance = NSAppearance(named: .darkAqua)
+            win.backgroundColor = NSColor(srgbRed: 0.075, green: 0.075, blue: 0.086, alpha: 1.0)
         }
     }
 }
 
 private struct OCRBubbleCardView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var manager: OCRBubbleManager
     @FocusState private var editorFocused: Bool
+    @State private var hoverPin = false
+    @State private var hoverClose = false
 
     private func webURL(from payload: String) -> URL? {
         guard let url = URL(string: payload),
@@ -416,28 +425,31 @@ private struct OCRBubbleCardView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            // Top bar
+        let p = MagpiePalette(colorScheme: colorScheme)
+
+        VStack(spacing: 10) {
+            // Top Header Bar
             HStack(spacing: 8) {
                 Image(systemName: manager.sourceImage == nil ? "character.bubble" : "text.viewfinder")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(p.inkPrimary)
+
                 Text(manager.sourceImage == nil ? "划词翻译" : (manager.isTranslationVisible ? "截图翻译" : "文字识别"))
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(p.inkPrimary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
 
                 Spacer(minLength: 4)
 
                 if manager.sourceImage != nil {
-                    Picker("识别语言", selection: $manager.selectedLanguage) {
-                        ForEach(OcrConfig.compactOptions, id: \.tag) { opt in
-                            Text(opt.shortLabel).tag(opt.tag)
-                        }
-                    }
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 88)
+                    MagpieMenuPicker(
+                        "识别语言",
+                        options: OcrConfig.compactOptions.map { ($0.tag, $0.shortLabel) },
+                        selection: $manager.selectedLanguage,
+                        minWidth: 78,
+                        compact: true
+                    )
                     .help("识别语言")
                 }
 
@@ -445,15 +457,17 @@ private struct OCRBubbleCardView: View {
                     manager.isPinnedOnTop.toggle()
                 } label: {
                     Image(systemName: manager.isPinnedOnTop ? "pin.fill" : "pin.slash")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(manager.isPinnedOnTop ? Color.accentColor : Color.secondary)
-                        .frame(width: 28, height: 28)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(manager.isPinnedOnTop || hoverPin ? p.inkPrimary : p.inkSecondary)
+                        .frame(width: 26, height: 26)
                         .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(manager.isPinnedOnTop ? Color.accentColor.opacity(0.14) : Color.clear)
+                            RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                .fill(manager.isPinnedOnTop ? p.navActivePill : (hoverPin ? p.navHoverPill : Color.clear))
                         )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { hoverPin = $0 }
                 .help(manager.isPinnedOnTop ? "取消置顶" : "置顶")
                 .accessibilityLabel(manager.isPinnedOnTop ? "取消置顶" : "置顶")
 
@@ -462,133 +476,114 @@ private struct OCRBubbleCardView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
+                        .foregroundStyle(hoverClose ? p.inkPrimary : p.inkSecondary)
+                        .frame(width: 26, height: 26)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                .fill(hoverClose ? p.navHoverPill : Color.clear)
+                        )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { hoverClose = $0 }
                 .help("关闭 (Esc)")
                 .accessibilityLabel("关闭")
             }
 
-            // Detected QR / Barcodes banner (if any)
+            // Detected QR / Barcodes Card
             if !manager.barcodes.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(manager.barcodes, id: \.self) { code in
-                        HStack(spacing: 6) {
-                            Image(systemName: "qrcode.viewfinder")
+                MagpieCard(cornerRadius: 9) {
+                    ForEach(Array(manager.barcodes.enumerated()), id: \.offset) { idx, code in
+                        if idx > 0 {
+                            MagpieRowDivider()
+                        }
+                        HStack(spacing: 8) {
+                            Image(systemName: "qrcode")
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
+                                .foregroundStyle(p.inkPrimary)
                             Text(code)
                                 .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(p.inkMono)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer(minLength: 4)
+                            MagpieCopyButton(value: code, helpText: "复制条码内容")
                             if let url = webURL(from: code) {
-                                Button("打开") {
+                                MagpieTextAction("打开") {
                                     NSWorkspace.shared.open(url)
                                 }
-                                .controlSize(.mini)
                             }
-                            Button("复制") {
-                                manager.copyBarcode(code)
-                            }
-                            .controlSize(.mini)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.10)))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
                     }
                 }
             }
 
             if manager.isTranslationVisible {
-                languageBar
-                HStack(spacing: 8) {
-                    Text("原文")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                    if manager.sourceImage != nil {
-                        Toggle("合并换行", isOn: $manager.mergeLineBreaks)
-                            .toggleStyle(.checkbox)
-                            .controlSize(.small)
-                    }
-                    Button(manager.copiedFeedback ? "已复制" : "复制原文") {
-                        manager.copyCurrentText()
-                    }
-                    .controlSize(.small)
-                    .disabled(manager.text.isEmpty || manager.isRecognizing)
-                }
+                languageBar(palette: p)
             }
 
-            // Editable native text area
-            ZStack {
-                if manager.isRecognizing {
+            // Main Unified Card (Source + Optional Divided Translation)
+            MagpieCard(cornerRadius: 10) {
+                if manager.isTranslationVisible {
                     HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("识别中…")
-                            .font(.system(size: 12))
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let err = manager.errorMessage {
-                    ScrollView {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.system(size: 18))
-                            Text(err)
-                                .font(.system(size: 13))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Button("重试") {
-                                manager.rerunRecognitionIfPossible()
-                            }
-                            .controlSize(.small)
+                        Text("原文")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(p.inkSecondary)
+                        Spacer()
+                        if manager.sourceImage != nil {
+                            MagpieSegmentedPicker(
+                                options: [(false, "逐行"), (true, "合并换行")],
+                                selection: $manager.mergeLineBreaks,
+                                compact: true
+                            )
                         }
-                        .padding(10)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    TextEditor(text: $manager.text)
-                        .font(.system(size: 14))
-                        .accessibilityLabel("原文")
-                        .focused($editorFocused)
-                        .scrollContentBackground(.hidden)
-                        .scrollIndicators(.visible)
-                        .help("可以编辑原文，按 ⌘Enter 重新翻译")
-                        .padding(8)
-                        .onAppear {
-                            editorFocused = !manager.isTranslationVisible
+                        MagpieTextAction(manager.copiedFeedback ? "已复制" : "复制原文") {
+                            manager.copyCurrentText()
                         }
+                        .disabled(manager.text.isEmpty || manager.isRecognizing)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+                }
+
+                sourceEditorArea(palette: p)
+                    .frame(
+                        minHeight: manager.isTranslationVisible ? 52 : 84,
+                        maxHeight: manager.isTranslationVisible ? 114 : .infinity
+                    )
+
+                if manager.isTranslationVisible {
+                    MagpieRowDivider()
+                    translationSection(palette: p)
                 }
             }
-            .frame(minHeight: manager.isTranslationVisible ? 54 : 80, maxHeight: manager.isTranslationVisible ? 116 : .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(Color(nsColor: .textBackgroundColor))
-            )
             .overlay(
-                RoundedRectangle(cornerRadius: 7)
-                    .strokeBorder(editorFocused ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(editorFocused && !manager.isTranslationVisible ? p.focusBorder : Color.clear, lineWidth: 1)
+                    .allowsHitTesting(false)
             )
 
-            if manager.isTranslationVisible {
-                Divider()
-                translationSection
-            }
-
-            Divider()
+            // Footer Action Bar
             let copyDisabled = manager.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manager.isRecognizing
             HStack(spacing: 8) {
                 Button {
-                    if manager.isTranslationVisible { manager.copyTranslation() }
-                    else { manager.copyCurrentText() }
+                    if manager.isTranslationVisible {
+                        manager.copyTranslation()
+                    } else {
+                        manager.copyCurrentText()
+                    }
                 } label: {
                     let copied = manager.isTranslationVisible ? manager.copiedTranslationFeedback : manager.copiedFeedback
-                    Label(copied ? "已复制" : (manager.isTranslationVisible ? "复制译文" : "复制原文"),
-                          systemImage: copied ? "checkmark" : "doc.on.doc")
+                    HStack(spacing: 5) {
+                        Image(systemName: copied ? "checkmark" : "square.on.square")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(copied ? "已复制" : (manager.isTranslationVisible ? "复制译文" : "复制原文"))
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.accentColor)
-                .controlSize(.regular)
+                .buttonStyle(MagpiePillButtonStyle(role: .primary))
                 .fixedSize(horizontal: true, vertical: false)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
                 .disabled(manager.isTranslationVisible ? (manager.translatedText.isEmpty || manager.isTranslating) : copyDisabled)
@@ -597,90 +592,160 @@ private struct OCRBubbleCardView: View {
                 Spacer(minLength: 4)
 
                 if manager.sourceImage != nil && !manager.isTranslationVisible {
-                    Toggle("合并换行", isOn: $manager.mergeLineBreaks)
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .font(.system(size: 12))
-                        .fixedSize(horizontal: true, vertical: false)
+                    MagpieSegmentedPicker(
+                        options: [(false, "逐行"), (true, "合并换行")],
+                        selection: $manager.mergeLineBreaks,
+                        compact: true
+                    )
                 }
 
                 Button(manager.translatedText.isEmpty ? "翻译" : "重新翻译") {
                     editorFocused = false
                     manager.requestTranslation()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(MagpiePillButtonStyle(role: .bordered))
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(copyDisabled || manager.isTranslating)
                 .help("翻译原文 (⌘Enter)")
             }
         }
-        .padding(16)
-        .background(.regularMaterial)
+        .padding(14)
+        .background(p.canvasBg)
         .ignoresSafeArea(.container, edges: .top)
         .onChange(of: manager.isTranslationVisible) { _, visible in
             if visible { editorFocused = false }
         }
     }
 
-    private var languageBar: some View {
-        HStack(spacing: 10) {
-            Picker("原文语言", selection: $manager.translationSourceLanguage) {
-                Text("自动检测").tag("auto")
-                ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
-                    Text(option.label).tag(option.tag)
+    @ViewBuilder
+    private func sourceEditorArea(palette p: MagpiePalette) -> some View {
+        ZStack {
+            if manager.isRecognizing {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("识别中…")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(p.inkSecondary)
                 }
-            }
-            .help("原文语言")
-            Image(systemName: "arrow.right")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Picker("目标语言", selection: $manager.translationTargetLanguage) {
-                ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
-                    Text(option.label).tag(option.tag)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let err = manager.errorMessage {
+                ScrollView {
+                    HStack(alignment: .center, spacing: 8) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 15))
+                            .foregroundStyle(p.inkSecondary)
+                        Text(err)
+                            .font(.system(size: 13))
+                            .foregroundStyle(p.inkPrimary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        MagpieTextAction("重试", prominent: true) {
+                            manager.rerunRecognitionIfPossible()
+                        }
+                    }
+                    .padding(12)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                let needsScroller = manager.text.count > 100 || manager.text.filter({ $0 == "\n" }).count >= 3
+                TextEditor(text: $manager.text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(p.inkPrimary)
+                    .accessibilityLabel("原文")
+                    .focused($editorFocused)
+                    .scrollContentBackground(.hidden)
+                    .scrollIndicators(needsScroller ? .automatic : .never)
+                    .help("可以编辑原文，按 ⌘Enter 重新翻译")
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, manager.isTranslationVisible ? 4 : 8)
+                    .onAppear {
+                        editorFocused = !manager.isTranslationVisible
+                    }
             }
-            .help("目标语言")
         }
-        .labelsHidden()
-        .controlSize(.regular)
     }
 
-    private var translationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func languageBar(palette p: MagpiePalette) -> some View {
+        HStack(spacing: 8) {
+            MagpieMenuPicker(
+                "原文语言",
+                options: [("auto", "自动检测")] + TranslationConfig.languageOptions.map { ($0.tag, $0.label) },
+                selection: $manager.translationSourceLanguage,
+                minWidth: 112,
+                compact: true
+            )
+            .help("原文语言")
+
+            Image(systemName: "arrow.right")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(p.inkTertiary)
+                .accessibilityHidden(true)
+
+            MagpieMenuPicker(
+                "目标语言",
+                options: TranslationConfig.languageOptions.map { ($0.tag, $0.label) },
+                selection: $manager.translationTargetLanguage,
+                minWidth: 112,
+                compact: true
+            )
+            .help("目标语言")
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func translationSection(palette p: MagpiePalette) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text("译文")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(p.inkSecondary)
                 Spacer()
                 if manager.isTranslating {
                     ProgressView().controlSize(.mini)
-                    Text("翻译中…").font(.system(size: 12))
+                    Text("翻译中…")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(p.inkSecondary)
                 }
             }
+
             ZStack(alignment: .topLeading) {
                 ScrollView {
                     if let error = manager.translationError {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("暂时无法翻译", systemImage: "exclamationmark.triangle")
-                                .font(.system(size: 13, weight: .medium))
-                            Text(error).font(.system(size: 13)).textSelection(.enabled)
-                            Button("重试") { manager.requestTranslation() }.controlSize(.small)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(p.statusWarn)
+                                Text("暂时无法翻译")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(p.inkPrimary)
+                            }
+                            Text(error)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(p.inkSecondary)
+                                .textSelection(.enabled)
+                            MagpieTextAction("重试", prominent: true) {
+                                manager.requestTranslation()
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     } else if !manager.translatedText.isEmpty {
                         Text(manager.translatedText)
-                            .font(.system(size: 16))
+                            .font(.system(size: 15.5))
+                            .foregroundStyle(p.inkPrimary)
                             .lineSpacing(4)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         Text(translationHint)
-                            .font(.system(size: 13))
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(p.inkSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .scrollIndicators(.visible)
+                .scrollIndicators(.automatic)
+
                 if #available(macOS 15.0, *), let request = manager.translationRequest {
                     AppleTranslationTaskView(manager: manager, request: request).id(request.id)
                 }
@@ -688,6 +753,8 @@ private struct OCRBubbleCardView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(minHeight: 54)
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .layoutPriority(1)
     }
 

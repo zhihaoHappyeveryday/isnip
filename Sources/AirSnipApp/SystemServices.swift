@@ -1103,8 +1103,8 @@ public enum ToastHUD {
 
     public static func show(
         _ message: String,
-        symbol: String = "checkmark.circle.fill",
-        tint: NSColor = NSColor(srgbRed: 0.19, green: 0.82, blue: 0.48, alpha: 1.0),
+        symbol: String = "checkmark",
+        tint: NSColor? = nil,
         duration: Double = 1.45
     ) {
         dismissTask?.cancel()
@@ -1113,21 +1113,33 @@ public enum ToastHUD {
         let screen = NSScreen.main ?? NSScreen.screens.first
         let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
 
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 13.0, weight: .medium)
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let bgColor = isDark
+            ? NSColor(srgbRed: 0.110, green: 0.110, blue: 0.125, alpha: 0.98)
+            : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.98)
+        let borderColor = isDark
+            ? NSColor(srgbRed: 0.185, green: 0.185, blue: 0.212, alpha: 1.0)
+            : NSColor(srgbRed: 0.886, green: 0.886, blue: 0.906, alpha: 1.0)
+        let primaryText = isDark
+            ? NSColor(srgbRed: 0.957, green: 0.957, blue: 0.965, alpha: 1.0)
+            : NSColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 1.0)
+        let iconTint = tint ?? primaryText
+
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
         let rawTextWidth = ceil((message as NSString).size(withAttributes: [.font: font]).width)
         let maxW = min(screenFrame.width - 48, 520)
-        let iconSide: CGFloat = 17
+        let iconSide: CGFloat = 15
         let iconGap: CGFloat = 7
-        let maxTextW = max(60, maxW - 30 - iconSide - iconGap)
+        let maxTextW = max(60, maxW - 28 - iconSide - iconGap)
         let textWidth = min(rawTextWidth, maxTextW)
         let groupW = iconSide + iconGap + textWidth
-        let w = min(maxW, max(124, ceil(groupW + 30)))
-        let h: CGFloat = 36
+        let w = min(maxW, max(116, ceil(groupW + 28)))
+        let h: CGFloat = 34
 
-        let targetY = screenFrame.maxY - 58
+        let targetY = screenFrame.maxY - 56
         let startFrame = NSRect(
             x: round(screenFrame.midX - w * 0.5),
-            y: targetY + 6,
+            y: targetY + 5,
             width: w,
             height: h
         )
@@ -1153,42 +1165,39 @@ public enum ToastHUD {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        let visual = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: w, height: h))
-        visual.appearance = NSAppearance(named: .vibrantDark)
-        visual.material = .hudWindow
-        visual.blendingMode = .behindWindow
-        visual.state = .active
-        visual.wantsLayer = true
-        visual.layer?.cornerRadius = h * 0.5
-        visual.layer?.cornerCurve = .continuous
-        visual.layer?.masksToBounds = true
-        visual.layer?.borderWidth = 0.8
-        visual.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.16).cgColor
+        let cardView = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        cardView.wantsLayer = true
+        cardView.layer?.backgroundColor = bgColor.cgColor
+        cardView.layer?.cornerRadius = 9.0
+        cardView.layer?.cornerCurve = .continuous
+        cardView.layer?.masksToBounds = true
+        cardView.layer?.borderWidth = 1.0
+        cardView.layer?.borderColor = borderColor.cgColor
 
         let groupStartX = round((w - groupW) * 0.5)
-        let symCfg = NSImage.SymbolConfiguration(pointSize: 14.0, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [tint]))
+        let symCfg = NSImage.SymbolConfiguration(pointSize: 12.0, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [iconTint]))
         if let symImg = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(symCfg) {
             let iconView = NSImageView(image: symImg)
             iconView.frame = NSRect(x: groupStartX, y: round((h - iconSide) * 0.5), width: iconSide, height: iconSide)
-            visual.addSubview(iconView)
+            cardView.addSubview(iconView)
         }
 
         let label = NSTextField(labelWithString: message)
         label.font = font
-        label.textColor = NSColor(calibratedWhite: 0.98, alpha: 0.96)
+        label.textColor = primaryText
         label.alignment = .left
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
         label.frame = NSRect(
             x: groupStartX + iconSide + iconGap,
-            y: round((h - 19) * 0.5),
+            y: round((h - 18) * 0.5),
             width: textWidth + 2,
-            height: 19
+            height: 18
         )
-        visual.addSubview(label)
+        cardView.addSubview(label)
 
-        panel.contentView = visual
+        panel.contentView = cardView
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in

@@ -294,14 +294,21 @@ private final class PinCanvasView: NSView {
         ctx.restoreGState()
 
         if owner.showBorder {
-            let insetRect = bounds.insetBy(dx: 0.75, dy: 0.75)
-            let borderPath = CGPath(roundedRect: insetRect, cornerWidth: max(1, r - 0.75), cornerHeight: max(1, r - 0.75), transform: nil)
-            ctx.addPath(borderPath)
-            ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.92))
-            ctx.setLineWidth(1.5)
+            let outerRect = bounds.insetBy(dx: 0.65, dy: 0.65)
+            let outerPath = CGPath(roundedRect: outerRect, cornerWidth: max(1, r - 0.65), cornerHeight: max(1, r - 0.65), transform: nil)
+            ctx.addPath(outerPath)
+            ctx.setStrokeColor(CGColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 0.72))
+            ctx.setLineWidth(1.3)
+            ctx.strokePath()
+
+            let innerRect = bounds.insetBy(dx: 1.55, dy: 1.55)
+            let innerPath = CGPath(roundedRect: innerRect, cornerWidth: max(1, r - 1.55), cornerHeight: max(1, r - 1.55), transform: nil)
+            ctx.addPath(innerPath)
+            ctx.setStrokeColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.85))
+            ctx.setLineWidth(0.8)
             ctx.strokePath()
         } else {
-            // Subtle crisp hairline rim even when blue border is toggled off so light-on-light pins stay defined
+            // Subtle crisp hairline rim even when border is toggled off so light-on-light pins stay defined
             let insetRect = bounds.insetBy(dx: 0.5, dy: 0.5)
             let borderPath = CGPath(roundedRect: insetRect, cornerWidth: max(1, r - 0.5), cornerHeight: max(1, r - 0.5), transform: nil)
             ctx.addPath(borderPath)
@@ -311,15 +318,19 @@ private final class PinCanvasView: NSView {
         }
 
         if let badge = badgeText {
-            let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+            let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+            let fg = isDark
+                ? NSColor(srgbRed: 0.957, green: 0.957, blue: 0.965, alpha: 1)
+                : NSColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 1)
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
             let sz = (badge as NSString).size(withAttributes: attrs)
             let pill = NSRect(x: 9, y: bounds.height - sz.height - 15, width: sz.width + 16, height: sz.height + 7)
-            let path = NSBezierPath(roundedRect: pill, xRadius: pill.height * 0.5, yRadius: pill.height * 0.5)
-            NSColor(calibratedWhite: 0.08, alpha: 0.80).setFill()
+            let path = NSBezierPath(roundedRect: pill, xRadius: 6.0, yRadius: 6.0)
+            (isDark ? NSColor(srgbRed: 0.11, green: 0.11, blue: 0.125, alpha: 0.96) : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.96)).setFill()
             path.fill()
-            NSColor(calibratedWhite: 1.0, alpha: 0.18).setStroke()
-            path.lineWidth = 0.75
+            (isDark ? NSColor(srgbRed: 0.22, green: 0.22, blue: 0.26, alpha: 1) : NSColor(srgbRed: 0.86, green: 0.86, blue: 0.89, alpha: 1)).setStroke()
+            path.lineWidth = 1.0
             path.stroke()
             (badge as NSString).draw(at: NSPoint(x: pill.minX + 8, y: pill.minY + 3.5), withAttributes: attrs)
         }

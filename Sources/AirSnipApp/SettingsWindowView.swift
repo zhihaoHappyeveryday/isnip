@@ -22,15 +22,22 @@ public final class SettingsWindowController {
         }
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 740, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        win.title = "iSnip 设置"
+        win.title = "iSnip"
         win.titleVisibility = .hidden
         win.titlebarAppearsTransparent = true
         win.isMovableByWindowBackground = true
+        win.minSize = NSSize(width: 760, height: 500)
+
+        let toolbar = NSToolbar(identifier: "io.zzusec.airsnip.settings.toolbar")
+        toolbar.showsBaselineSeparator = false
+        win.toolbar = toolbar
+        win.toolbarStyle = .unified
+
         win.center()
         win.isReleasedWhenClosed = false
         applyTheme(appController.config.theme, to: win)
@@ -52,9 +59,15 @@ public final class SettingsWindowController {
 
     private func applyTheme(_ theme: ThemeSetting, to win: NSWindow) {
         switch theme {
-        case .follow: win.appearance = nil
-        case .light: win.appearance = NSAppearance(named: .aqua)
-        case .dark: win.appearance = NSAppearance(named: .darkAqua)
+        case .follow:
+            win.appearance = nil
+            win.backgroundColor = .windowBackgroundColor
+        case .light:
+            win.appearance = NSAppearance(named: .aqua)
+            win.backgroundColor = NSColor(srgbRed: 0.969, green: 0.969, blue: 0.973, alpha: 1.0)
+        case .dark:
+            win.appearance = NSAppearance(named: .darkAqua)
+            win.backgroundColor = NSColor(srgbRed: 0.075, green: 0.075, blue: 0.086, alpha: 1.0)
         }
     }
 }
@@ -81,313 +94,371 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
         case .about: return "关于"
         }
     }
-
-    var icon: String {
-        switch self {
-        case .general: return "gearshape.fill"
-        case .captureAndPin: return "viewfinder"
-        case .toolbar: return "slider.horizontal.below.rectangle"
-        case .hotkeys: return "command"
-        case .editor: return "paintbrush.pointed.fill"
-        case .ocr: return "text.viewfinder"
-        case .about: return "info.circle.fill"
-        }
-    }
-
-    var badgeGradient: [Color] {
-        switch self {
-        case .general:
-            return [Color(red: 0.42, green: 0.48, blue: 0.58), Color(red: 0.30, green: 0.35, blue: 0.44)]
-        case .captureAndPin:
-            return [Color(red: 0.08, green: 0.58, blue: 0.98), Color(red: 0.04, green: 0.40, blue: 0.88)]
-        case .toolbar:
-            return [Color(red: 0.36, green: 0.42, blue: 0.95), Color(red: 0.26, green: 0.30, blue: 0.82)]
-        case .hotkeys:
-            return [Color(red: 0.98, green: 0.58, blue: 0.14), Color(red: 0.90, green: 0.42, blue: 0.08)]
-        case .editor:
-            return [Color(red: 0.96, green: 0.34, blue: 0.44), Color(red: 0.84, green: 0.20, blue: 0.34)]
-        case .ocr:
-            return [Color(red: 0.14, green: 0.76, blue: 0.54), Color(red: 0.08, green: 0.58, blue: 0.42)]
-        case .about:
-            return [Color(red: 0.22, green: 0.64, blue: 0.98), Color(red: 0.12, green: 0.36, blue: 0.86)]
-        }
-    }
 }
 
-private struct SidebarVisualEffectView: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let v = NSVisualEffectView()
-        v.material = .sidebar
-        v.blendingMode = .behindWindow
-        v.state = .followsWindowActiveState
-        return v
-    }
+@MainActor
+final class SettingsUpdateState: ObservableObject {
+    @Published var isChecking = false
+    @Published var statusText = ""
+    @Published var latestRelease: UpdateReleaseInfo?
 
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+    func checkNow(showToast: Bool = false) {
+        guard !isChecking else { return }
+        isChecking = true
+        statusText = "正在检查更新…"
+        Task { @MainActor in
+            let res = await UpdateChecker.checkLatest()
+            isChecking = false
+            switch res {
+            case .success(let info?):
+                latestRelease = info
+                statusText = "\(info.version) 可更新"
+                if showToast {
+                    ToastHUD.show("发现新版本 v\(info.version)", symbol: "arrow.down.circle")
+                }
+            case .success(nil):
+                latestRelease = nil
+                statusText = "已是最新版本"
+                if showToast {
+                    ToastHUD.show("已是最新版本 v\(UpdateChecker.currentVersion)", symbol: "checkmark")
+                }
+            case .failure(let err):
+                statusText = "检查失败：\(err.localizedDescription)"
+                if showToast {
+                    ToastHUD.show("检查更新失败", symbol: "exclamationmark.circle")
+                }
+            }
+        }
+    }
 }
 
 public struct SettingsRootView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
+    @StateObject private var updateState = SettingsUpdateState()
     @State private var selectedTab: SettingsTab
+    @State private var searchQuery: String
+    @State private var showQuickActionsBar: Bool = true
+    @State private var recordingSlot: String?
 
-    public init(app: AirSnipAppController, initialTab: SettingsTab = .general) {
+    public init(
+        app: AirSnipAppController,
+        initialTab: SettingsTab = .general,
+        initialSearchQuery: String = ""
+    ) {
         self.app = app
         self._selectedTab = State(initialValue: initialTab)
+        self._searchQuery = State(initialValue: initialSearchQuery)
+    }
+
+    private var trimmedSearch: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func runScreenAction(_ work: @escaping @MainActor () -> Void) {
+        app.settingsController?.hide()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 170_000_000)
+            work()
+        }
     }
 
     public var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Spacer().frame(height: 24)
+        let p = MagpiePalette(colorScheme: colorScheme)
 
-                HStack(spacing: 8) {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 30, height: 30)
-                        .shadow(color: .black.opacity(0.15), radius: 2.5, x: 0, y: 1)
-
-                    Text("iSnip")
-                        .font(.system(size: 14.5, weight: .bold))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-
-                    Text("v\(UpdateChecker.currentVersion)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.primary.opacity(0.075)))
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 7)
-                .padding(.bottom, 12)
-
-                ForEach(SettingsTab.allCases) { tab in
-                    let isSelected = (selectedTab == tab)
-                    Button {
-                        withAnimation(.easeOut(duration: 0.14)) {
-                            selectedTab = tab
+        VStack(spacing: 0) {
+            // Row 1: Unified Magpie Header Bar (Traffic Lights + Toggle + Brand + Quick Actions + Refresh/Settings)
+            HStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    HeaderIconButton(
+                        symbol: "sidebar.left",
+                        isActive: false,
+                        helpText: showQuickActionsBar ? "切换为精简顶栏" : "展开顶部快捷功能栏"
+                    ) {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            showQuickActionsBar.toggle()
                         }
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(
-                                        LinearGradient(
-                                            colors: tab.badgeGradient,
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
-                                    )
-                                    .frame(width: 22, height: 22)
-                                    .shadow(color: tab.badgeGradient[1].opacity(0.22), radius: 2, x: 0, y: 1)
+                    }
 
-                                Image(systemName: tab.icon)
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(.white)
+                    HStack(spacing: 7) {
+                        MagpieBrandMark(size: 17)
+                        Text("iSnip")
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(p.inkPrimary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .padding(.leading, 78)
+
+                if showQuickActionsBar {
+                    HStack(spacing: 4) {
+                        TopQuickNavButton(title: "截图", tip: "开始区域截图 (\(app.config.hotkeys.screenshot.displayString))") {
+                            runScreenAction { app.triggerCapture() }
+                        }
+                        TopQuickNavButton(title: "窗体", tip: "独立窗体截图 (\(app.config.hotkeys.windowCapture.displayString))") {
+                            runScreenAction { app.triggerDirectWindowCapture() }
+                        }
+                        TopQuickNavButton(title: "长截图", tip: "页面长截图 (\(app.config.hotkeys.longshotCapture.displayString))") {
+                            runScreenAction { app.triggerDirectLongshotCapture() }
+                        }
+                        TopQuickNavButton(title: "识字", tip: "框选文字识别 (\(app.config.hotkeys.ocrCapture.displayString))") {
+                            runScreenAction { app.triggerDirectOCRCapture() }
+                        }
+                        TopQuickNavButton(title: "翻译", tip: "框选截图翻译 (\(app.config.hotkeys.translateCapture.displayString))") {
+                            runScreenAction { app.triggerOCRTranslation() }
+                        }
+                        TopQuickNavButton(title: "贴图", tip: "从剪贴板置顶贴图 (\(app.config.hotkeys.pin.displayString))") {
+                            app.triggerGlobalPinFromClipboard()
+                        }
+                        TopQuickNavButton(title: "图片识字", tip: "选择本地图片文件识别文字") {
+                            app.triggerOCRFromFile()
+                        }
+                    }
+                    .padding(.leading, 22)
+                    .transition(.opacity)
+                }
+
+                Spacer(minLength: 12)
+
+                HStack(spacing: 6) {
+                    HeaderIconButton(
+                        symbol: "arrow.clockwise",
+                        isActive: false,
+                        spinning: updateState.isChecking,
+                        helpText: "检查更新"
+                    ) {
+                        updateState.checkNow(showToast: selectedTab != .about)
+                    }
+
+                    HeaderIconButton(
+                        symbol: "gearshape",
+                        isActive: true,
+                        helpText: "设置"
+                    ) {
+                        if !searchQuery.isEmpty {
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                searchQuery = ""
                             }
-
-                            Text(tab.title)
-                                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                                .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.86))
-
-                            Spacer()
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6.5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isSelected ? Color.primary.opacity(0.10) : Color.clear)
-                        )
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
                 }
-
-                Spacer()
+                .padding(.trailing, 18)
             }
-            .padding(12)
-            .frame(width: 192)
-            .background(SidebarVisualEffectView())
+            .frame(height: 52)
 
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor))
-                .frame(width: 1)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    switch selectedTab {
-                    case .general:
-                        GeneralSettingsPane(app: app)
-                    case .captureAndPin:
-                        CaptureAndPinPane(app: app)
-                    case .toolbar:
-                        ToolbarVisibilityPane(app: app)
-                    case .hotkeys:
-                        HotkeysSettingsPane(app: app)
-                    case .editor:
-                        EditorDefaultsPane(app: app)
-                    case .ocr:
-                        OCRSettingsPane(app: app)
-                    case .about:
-                        AboutSettingsPane(app: app)
+            // Row 2: Secondary Category Pill Tabs + Search Input ("查找设置")
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    ForEach(SettingsTab.allCases) { tab in
+                        SubTabPillButton(
+                            title: tab.title,
+                            isSelected: trimmedSearch.isEmpty && selectedTab == tab
+                        ) {
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                searchQuery = ""
+                                selectedTab = tab
+                            }
+                        }
                     }
                 }
-                .padding(.horizontal, 24)
-                .padding(.top, 24)
-                .padding(.bottom, 22)
+
+                Spacer(minLength: 12)
+
+                SettingsSearchField(text: $searchQuery)
+                    .frame(width: 216)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 38)
+
+            // Row 3: Continuous White Card Content Area
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !trimmedSearch.isEmpty {
+                        SettingsSearchResultsPane(
+                            app: app,
+                            query: trimmedSearch,
+                            updateState: updateState,
+                            recordingSlot: $recordingSlot,
+                            onSelectTab: { tab in
+                                searchQuery = ""
+                                selectedTab = tab
+                            }
+                        )
+                    } else {
+                        switch selectedTab {
+                        case .general:
+                            GeneralSettingsPane(app: app)
+                        case .captureAndPin:
+                            CaptureAndPinPane(app: app)
+                        case .toolbar:
+                            ToolbarVisibilityPane(app: app)
+                        case .hotkeys:
+                            HotkeysSettingsPane(app: app, recordingSlot: $recordingSlot)
+                        case .editor:
+                            EditorDefaultsPane(app: app)
+                        case .ocr:
+                            OCRSettingsPane(app: app)
+                        case .about:
+                            AboutSettingsPane(app: app, updateState: updateState)
+                        }
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Color(nsColor: .windowBackgroundColor))
         }
-        .frame(width: 740, height: 560)
+        .frame(minWidth: 760, idealWidth: 880, maxWidth: .infinity, minHeight: 500, idealHeight: 640, maxHeight: .infinity)
+        .background(p.canvasBg)
+        .ignoresSafeArea(.container, edges: .top)
     }
 }
 
-// MARK: - Shared Components
+// MARK: - Header & Sub-Navigation Controls
 
-private struct SettingsPageHeader<Trailing: View>: View {
+private struct HeaderIconButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let symbol: String
+    let isActive: Bool
+    var spinning: Bool = false
+    let helpText: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13.5, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(isActive || isHovered ? p.inkPrimary : p.inkSecondary)
+                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .animation(spinning ? .linear(duration: 0.85).repeatForever(autoreverses: false) : .default, value: spinning)
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isActive ? p.navActivePill : (isHovered ? p.navHoverPill : Color.clear))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(helpText)
+        .accessibilityLabel(helpText)
+    }
+}
+
+private struct TopQuickNavButton: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
-    let subtitle: String?
-    @ViewBuilder var trailing: () -> Trailing
-
-    init(_ title: String, subtitle: String? = nil, @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
-        self.title = title
-        self.subtitle = subtitle
-        self.trailing = trailing
-    }
+    let tip: String
+    let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 18, weight: .bold))
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            trailing()
+        let p = MagpiePalette(colorScheme: colorScheme)
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(isHovered ? p.inkPrimary : p.inkSecondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                        .fill(isHovered ? p.navHoverPill : Color.clear)
+                )
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(tip)
     }
 }
 
-private struct SettingsSectionCard<Content: View>: View {
-    let header: String?
-    @ViewBuilder var content: () -> Content
-
-    init(_ header: String? = nil, @ViewBuilder content: @escaping () -> Content) {
-        self.header = header
-        self.content = content
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let header {
-                Text(header)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 4)
-            }
-
-            VStack(alignment: .leading, spacing: 0) {
-                content()
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
-            )
-            .shadow(color: .black.opacity(0.03), radius: 4, x: 0, y: 1)
-        }
-    }
-}
-
-private struct SettingsRowDivider: View {
-    var body: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.065))
-            .frame(height: 1)
-            .padding(.leading, 14)
-    }
-}
-
-private struct SettingsSwitchRow: View {
+private struct SubTabPillButton: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
-    var subtitle: String? = nil
-    @Binding var isOn: Bool
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 12)
-            Toggle("", isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
+        let p = MagpiePalette(colorScheme: colorScheme)
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? p.inkPrimary : (isHovered ? p.inkPrimary : p.inkSecondary))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                        .fill(isSelected ? p.navActivePill : (isHovered ? p.navHoverPill : Color.clear))
+                )
+                .contentShape(Rectangle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 
-private struct SettingsControlRow<Control: View>: View {
-    let title: String
-    var subtitle: String? = nil
-    @ViewBuilder var control: () -> Control
+private struct SettingsSearchField: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Binding var text: String
+    @FocusState private var isFocused: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+        let p = MagpiePalette(colorScheme: colorScheme)
+        HStack(spacing: 6) {
+            TextField("", text: $text, prompt: Text("查找设置").foregroundStyle(p.inkTertiary))
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .foregroundStyle(p.inkPrimary)
+                .focused($isFocused)
+
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(p.inkTertiary)
                 }
+                .buttonStyle(.plain)
+                .help("清空搜索")
             }
-            Spacer(minLength: 12)
-            control()
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9.5)
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(p.cardBg)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(isFocused ? p.focusBorder : p.cardBorder, lineWidth: 1)
+        )
     }
 }
 
-// MARK: - 1. General
+// MARK: - 1. General (通用)
 
 private struct GeneralSettingsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
     @State private var hasScreenCapture = ScreenCaptureService.hasScreenCapturePermission()
     @State private var hasAccessibility = AccessibilityService.hasPermission()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            SettingsPageHeader("通用")
+        let p = MagpiePalette(colorScheme: colorScheme)
 
-            SettingsSectionCard("常规") {
-                SettingsSwitchRow(
-                    title: "开机自动启动",
+        MagpieCard {
+            MagpieSettingRow(title: "开机自动启动") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.autoStart },
                         set: { val in
@@ -396,55 +467,56 @@ private struct GeneralSettingsPane: View {
                         }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "外观") {
-                    Picker("", selection: Binding(
+            MagpieSettingRow(title: "外观") {
+                MagpieSegmentedPicker(
+                    options: ThemeSetting.allCases.map { ($0, $0.title) },
+                    selection: Binding(
                         get: { app.config.theme },
                         set: { t in
                             app.updateConfig { $0.theme = t }
                             app.settingsController?.refreshTheme()
                         }
-                    )) {
-                        ForEach(ThemeSetting.allCases, id: \.self) { t in
-                            Text(t.title).tag(t)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 204)
-                }
+                    )
+                )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "工具栏缩放") {
-                    Picker("", selection: Binding(
+            MagpieSettingRow(title: "工具栏缩放") {
+                MagpieSegmentedPicker(
+                    options: UiScaleSetting.allCases.map { ($0, $0.title) },
+                    selection: Binding(
                         get: { app.config.uiScale },
                         set: { s in app.updateConfig { $0.uiScale = s } }
-                    )) {
-                        ForEach(UiScaleSetting.allCases, id: \.self) { s in
-                            Text(s.title).tag(s)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 108)
-                }
+                    )
+                )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "有标注时按两次 Esc 退出",
+            MagpieSettingRow(
+                title: "有标注时按两次 Esc 退出",
+                infoTip: "开启后，画布上已有标注对象时首次按 Esc 仅显示确认提示，防止误触丢失内容"
+            ) {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.confirmCancel },
                         set: { v in app.updateConfig { $0.confirmCancel = v } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "操作完成提示",
+            MagpieSettingRow(
+                title: "操作完成提示",
+                infoTip: "截图复制或保存完成后，在屏幕顶部短暂展示轻量化确认卡片"
+            ) {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.showCompletionToast },
                         set: { v in app.updateConfig { $0.showCompletionToast = v } }
@@ -452,66 +524,72 @@ private struct GeneralSettingsPane: View {
                 )
             }
 
-            SettingsSectionCard("权限") {
-                SettingsControlRow(title: "屏幕录制") {
-                    if hasScreenCapture {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(.green)
-                            Text("已授权")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.green)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3.5)
-                        .background(Capsule().fill(Color.green.opacity(0.12)))
-                    } else {
-                        HStack(spacing: 8) {
-                            Button("打开设置") {
-                                ScreenCaptureService.openScreenCaptureSystemSettings()
-                            }
-                            .controlSize(.small)
+            MagpieRowDivider()
 
-                            Button("重置权限") {
-                                ScreenCaptureService.resetScreenCapturePermissionAndRelaunch()
-                            }
-                            .controlSize(.small)
+            MagpieSettingRow(
+                title: "屏幕录制权限",
+                subtitle: hasScreenCapture ? nil : "截图、独立窗体捕获与页面长截图依赖此系统授权"
+            ) {
+                if hasScreenCapture {
+                    HStack(spacing: 10) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(p.statusOk)
+                                .frame(width: 6, height: 6)
+                            Text("已授权")
+                                .font(.system(size: 12.5, design: .monospaced))
+                                .foregroundStyle(p.inkMono)
+                        }
+                        MagpieTextAction("打开设置") {
+                            ScreenCaptureService.openScreenCaptureSystemSettings()
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        Text("未授权")
+                            .font(.system(size: 12.5, design: .monospaced))
+                            .foregroundStyle(p.statusWarn)
+                        MagpieTextAction("打开设置", prominent: true) {
+                            ScreenCaptureService.openScreenCaptureSystemSettings()
+                        }
+                        MagpieTextAction("重置权限") {
+                            ScreenCaptureService.resetScreenCapturePermissionAndRelaunch()
                         }
                     }
                 }
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "辅助功能") {
-                    if hasAccessibility {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(.green)
+            MagpieSettingRow(
+                title: "辅助功能权限",
+                infoTip: "仅用于页面长截图自动平滑滚轮与划词翻译读取公开选中文本"
+            ) {
+                if hasAccessibility {
+                    HStack(spacing: 10) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(p.statusOk)
+                                .frame(width: 6, height: 6)
                             Text("已授权")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.green)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
+                                .font(.system(size: 12.5, design: .monospaced))
+                                .foregroundStyle(p.inkMono)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3.5)
-                        .background(Capsule().fill(Color.green.opacity(0.12)))
-                    } else {
-                        HStack(spacing: 8) {
-                            Button("授权") {
-                                _ = AccessibilityService.requestPermissionPrompt()
-                                hasAccessibility = AccessibilityService.hasPermission()
-                            }
-                            .controlSize(.small)
-
-                            Button("打开设置") {
-                                AccessibilityService.openSystemSettings()
-                            }
-                            .controlSize(.small)
+                        MagpieTextAction("打开设置") {
+                            AccessibilityService.openSystemSettings()
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        Text("未授权")
+                            .font(.system(size: 12.5, design: .monospaced))
+                            .foregroundStyle(p.inkSecondary)
+                        MagpieTextAction("授权", prominent: true) {
+                            _ = AccessibilityService.requestPermissionPrompt()
+                            hasAccessibility = AccessibilityService.hasPermission()
+                        }
+                        MagpieTextAction("打开设置") {
+                            AccessibilityService.openSystemSettings()
                         }
                     }
                 }
@@ -528,139 +606,134 @@ private struct GeneralSettingsPane: View {
     }
 }
 
-// MARK: - 2. Capture, Compression & Pin
+// MARK: - 2. Capture, Compression & Pin (截图)
 
 private struct CaptureAndPinPane: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("截图")
+        let p = MagpiePalette(colorScheme: colorScheme)
+        let saveDirURL = OutputService.defaultSaveDirectoryURL(for: app.config)
+        let saveDisplayPath = OutputService.displayPath(for: saveDirURL)
 
-            SettingsSectionCard("PNG 压缩") {
-                SettingsSwitchRow(
-                    title: "无损压缩",
+        MagpieCard {
+            MagpieSettingRow(
+                title: "智能无损压缩",
+                infoTip: "内置 pngquant + oxipng 双引擎管线，瞬时输出后后台原子精压，体积可缩减 60%–75%"
+            ) {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.smartPngCompression },
                         set: { v in app.updateConfig { $0.smartPngCompression = v } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "压缩档位") {
-                    Picker("", selection: Binding(
+            MagpieSettingRow(title: "压缩档位") {
+                MagpieSegmentedPicker(
+                    options: PngCompressionQualityPreset.allCases.map { ($0, $0.title) },
+                    selection: Binding(
                         get: { app.config.pngCompressionQuality },
                         set: { q in app.updateConfig { $0.pngCompressionQuality = q } }
-                    )) {
-                        ForEach(PngCompressionQualityPreset.allCases, id: \.self) { q in
-                            Text(q.title).tag(q)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 196)
-                    .disabled(!app.config.smartPngCompression)
-                }
-                .opacity(app.config.smartPngCompression ? 1.0 : 0.5)
+                    )
+                )
+                .disabled(!app.config.smartPngCompression)
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "压缩剪贴板图片",
+            MagpieSettingRow(title: "压缩剪贴板图片") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.compressClipboardPng },
                         set: { v in app.updateConfig { $0.compressClipboardPng = v } }
                     )
                 )
                 .disabled(!app.config.smartPngCompression)
-                .opacity(app.config.smartPngCompression ? 1.0 : 0.5)
             }
 
-            SettingsSectionCard("保存与选区") {
-                let saveDirURL = OutputService.defaultSaveDirectoryURL(for: app.config)
-                SettingsControlRow(title: "保存位置") {
-                    HStack(spacing: 6) {
-                        Text(OutputService.displayPath(for: saveDirURL))
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: 190, alignment: .trailing)
+            MagpieRowDivider()
 
-                        Button {
-                            try? FileManager.default.createDirectory(at: saveDirURL, withIntermediateDirectories: true)
-                            NSWorkspace.shared.open(saveDirURL)
-                        } label: {
-                            Image(systemName: "folder")
-                                .font(.system(size: 11.5, weight: .medium))
-                        }
-                        .controlSize(.small)
-                        .help("打开目录")
+            MagpieSettingRow(title: "保存位置") {
+                HStack(spacing: 6) {
+                    Text(saveDisplayPath)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 260, alignment: .trailing)
 
-                        Button("更改…") {
-                            if let chosen = OutputService.chooseSaveDirectory(initial: saveDirURL) {
-                                app.updateConfig { $0.lastSaveDirectory = chosen.path }
-                            }
+                    MagpieCopyButton(value: saveDirURL.path, helpText: "复制目录路径")
+
+                    MagpieTextAction("打开") {
+                        try? FileManager.default.createDirectory(at: saveDirURL, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(saveDirURL)
+                    }
+
+                    MagpieTextAction("更改…") {
+                        if let chosen = OutputService.chooseSaveDirectory(initial: saveDirURL) {
+                            app.updateConfig { $0.lastSaveDirectory = chosen.path }
                         }
-                        .controlSize(.small)
                     }
                 }
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "每次询问保存位置",
+            MagpieSettingRow(title: "每次询问保存位置") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.askBeforeSave },
                         set: { v in app.updateConfig { $0.askBeforeSave = v } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "默认格式") {
-                    Picker("", selection: Binding(
+            MagpieSettingRow(title: "默认格式") {
+                MagpieSegmentedPicker(
+                    options: ExportImageFormat.allCases.map { ($0, $0.displayName) },
+                    selection: Binding(
                         get: { app.config.lastSaveFormat },
                         set: { f in app.updateConfig { $0.lastSaveFormat = f } }
-                    )) {
-                        ForEach(ExportImageFormat.allCases, id: \.self) { f in
-                            Text(f.displayName).tag(f)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 132)
-                }
+                    )
+                )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "文件命名") {
-                    Picker("", selection: Binding(
+            MagpieSettingRow(title: "文件命名") {
+                MagpieSegmentedPicker(
+                    options: NameStyle.allCases.map { ($0, $0.title) },
+                    selection: Binding(
                         get: { app.config.nameStyle },
                         set: { s in app.updateConfig { $0.nameStyle = s } }
-                    )) {
-                        ForEach(NameStyle.allCases, id: \.self) { s in
-                            Text(s.title).tag(s)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 132)
-                }
+                    )
+                )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "自动识别窗口",
+            MagpieSettingRow(title: "自动识别窗口") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.windowSnap },
                         set: { v in app.updateConfig { $0.windowSnap = v } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "窗体截图保留阴影",
+            MagpieSettingRow(
+                title: "窗体截图保留阴影",
+                infoTip: "窗体截图模式下按住 Option 点击窗口可临时切换无阴影"
+            ) {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.windowCaptureShadow },
                         set: { v in app.updateConfig { $0.windowCaptureShadow = v } }
@@ -668,278 +741,306 @@ private struct CaptureAndPinPane: View {
                 )
             }
 
-            SettingsSectionCard("页面长截图") {
-                SettingsSwitchRow(
-                    title: "自动翻页",
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "页面长截图自动翻页") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.longshotAutoScroll },
                         set: { v in app.updateConfig { $0.longshotAutoScroll = v } }
                     )
                 )
-
-                SettingsRowDivider()
-
-                SettingsControlRow(title: "翻页速度") {
-                    Picker("", selection: Binding(
-                        get: { app.config.longshotScrollSpeed },
-                        set: { s in app.updateConfig { $0.longshotScrollSpeed = s } }
-                    )) {
-                        ForEach(LongshotScrollSpeed.allCases, id: \.self) { s in
-                            Text(s.title).tag(s)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 172)
-                    .disabled(!app.config.longshotAutoScroll)
-                }
-                .opacity(app.config.longshotAutoScroll ? 1.0 : 0.5)
-
-                SettingsRowDivider()
-
-                SettingsControlRow(title: "高度上限") {
-                    HStack(spacing: 8) {
-                        Text("\(app.config.longshotMaxHeight) px")
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-
-                        Stepper(
-                            "",
-                            value: Binding(
-                                get: { app.config.longshotMaxHeight },
-                                set: { h in app.updateConfig { $0.longshotMaxHeight = h } }
-                            ),
-                            in: 5000...60000,
-                            step: 5000
-                        )
-                        .labelsHidden()
-                    }
-                }
             }
 
-            SettingsSectionCard("贴图") {
-                SettingsControlRow(title: "初始位置") {
-                    Picker("", selection: Binding(
-                        get: { app.config.pinPosition },
-                        set: { p in app.updateConfig { $0.pinPosition = p } }
-                    )) {
-                        ForEach(PinPosition.allCases, id: \.self) { p in
-                            Text(p.title).tag(p)
-                        }
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "长截图翻页速度") {
+                MagpieSegmentedPicker(
+                    options: LongshotScrollSpeed.allCases.map { ($0, $0.title) },
+                    selection: Binding(
+                        get: { app.config.longshotScrollSpeed },
+                        set: { s in app.updateConfig { $0.longshotScrollSpeed = s } }
+                    )
+                )
+                .disabled(!app.config.longshotAutoScroll)
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "长截图高度上限") {
+                MagpieStepperPill(
+                    displayValue: "\(app.config.longshotMaxHeight) px",
+                    canDecrement: app.config.longshotMaxHeight > 5000,
+                    canIncrement: app.config.longshotMaxHeight < 60000,
+                    onDecrement: {
+                        app.updateConfig { $0.longshotMaxHeight = max(5000, $0.longshotMaxHeight - 5000) }
+                    },
+                    onIncrement: {
+                        app.updateConfig { $0.longshotMaxHeight = min(60000, $0.longshotMaxHeight + 5000) }
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 172)
-                }
+                )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "显示边框",
+            MagpieSettingRow(title: "贴图初始位置") {
+                MagpieSegmentedPicker(
+                    options: PinPosition.allCases.map { ($0, $0.title) },
+                    selection: Binding(
+                        get: { app.config.pinPosition },
+                        set: { pos in app.updateConfig { $0.pinPosition = pos } }
+                    )
+                )
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "贴图显示边框") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.pinBorder },
                         set: { b in app.updateConfig { $0.pinBorder = b } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsControlRow(title: "数量上限") {
-                    HStack(spacing: 8) {
-                        Text("\(app.config.pinMaxCount) 张")
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-
-                        Stepper(
-                            "",
-                            value: Binding(
-                                get: { app.config.pinMaxCount },
-                                set: { n in app.updateConfig { $0.pinMaxCount = n } }
-                            ),
-                            in: 5...50,
-                            step: 5
-                        )
-                        .labelsHidden()
+            MagpieSettingRow(title: "贴图数量上限") {
+                MagpieStepperPill(
+                    displayValue: "\(app.config.pinMaxCount) 张",
+                    canDecrement: app.config.pinMaxCount > 5,
+                    canIncrement: app.config.pinMaxCount < 50,
+                    onDecrement: {
+                        app.updateConfig { $0.pinMaxCount = max(5, $0.pinMaxCount - 5) }
+                    },
+                    onIncrement: {
+                        app.updateConfig { $0.pinMaxCount = min(50, $0.pinMaxCount + 5) }
                     }
-                }
+                )
             }
         }
     }
 }
 
-// MARK: - 3. Toolbar
+// MARK: - 3. Toolbar Visibility (工具栏)
 
 private struct ToolbarVisibilityPane: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 5)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("工具栏") {
-                Button("全部显示") {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        let totalSlots = ToolbarSlot.allOrdered.count
+        let visibleSlots = ToolbarSlot.allOrdered.filter { app.config.toolbar.isVisible($0) }.count
+
+        MagpieCard {
+            MagpieSettingRow(
+                title: "悬浮工具栏槽位",
+                subtitle: "当前显示 \(visibleSlots) / \(totalSlots) 项"
+            ) {
+                MagpieTextAction("全部显示", prominent: visibleSlots < totalSlots) {
                     app.updateConfig { $0.toolbar.hidden.removeAll() }
                 }
-                .controlSize(.small)
+                .disabled(visibleSlots == totalSlots)
             }
 
             ForEach(ToolbarGroup.allCases, id: \.rawValue) { group in
                 let state = app.config.toolbar.groupState(group)
-                SettingsSectionCard {
-                    VStack(alignment: .leading, spacing: 11) {
-                        HStack {
-                            Button {
-                                let turnOn = (state == .none)
-                                app.updateConfig { $0.toolbar.setGroupVisible(group, turnOn) }
-                            } label: {
-                                HStack(spacing: 7) {
-                                    Image(systemName: state == .all ? "checkmark.circle.fill" : (state == .partial ? "minus.circle.fill" : "circle"))
-                                        .font(.system(size: 13.5, weight: .semibold))
-                                        .foregroundStyle(state == .none ? Color.secondary : Color.accentColor)
-                                    Text(group.title)
-                                        .font(.system(size: 13, weight: .semibold))
-                                }
-                            }
-                            .buttonStyle(.plain)
+                MagpieRowDivider()
 
-                            Spacer()
-                        }
+                VStack(alignment: .leading, spacing: 11) {
+                    HStack(alignment: .center) {
+                        Text(group.title)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(p.inkPrimary)
 
-                        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-                            ForEach(group.slots, id: \.key) { slot in
-                                let visible = app.config.toolbar.isVisible(slot)
-                                Button {
-                                    app.updateConfig { $0.toolbar.setVisible(slot, !visible) }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: visible ? "checkmark" : "plus")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundStyle(visible ? Color.accentColor : Color.secondary)
-                                        Text(slot.label)
-                                            .font(.system(size: 12, weight: visible ? .medium : .regular))
-                                            .foregroundStyle(visible ? Color.primary : Color.secondary)
-                                            .lineLimit(1)
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6.5)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .fill(visible ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.04))
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .strokeBorder(visible ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.08), lineWidth: 0.8)
-                                    )
+                        Text("\(app.config.toolbar.visibleCount(in: group))/\(group.slots.count)")
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(p.inkTertiary)
+
+                        Spacer()
+
+                        MagpieBooleanSwitch(
+                            isOn: Binding(
+                                get: { state != .none },
+                                set: { turnOn in
+                                    app.updateConfig { $0.toolbar.setGroupVisible(group, turnOn) }
                                 }
-                                .buttonStyle(.plain)
+                            ),
+                            offLabel: "全隐",
+                            onLabel: "显示"
+                        )
+                    }
+
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 7) {
+                        ForEach(group.slots, id: \.key) { slot in
+                            ToolbarSlotChip(
+                                label: slot.label,
+                                isVisible: app.config.toolbar.isVisible(slot)
+                            ) {
+                                let cur = app.config.toolbar.isVisible(slot)
+                                app.updateConfig { $0.toolbar.setVisible(slot, !cur) }
                             }
                         }
                     }
-                    .padding(14)
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
             }
         }
     }
 }
 
-// MARK: - 4. Hotkeys
-
-private struct HotkeysSettingsPane: View {
-    @ObservedObject var app: AirSnipAppController
-    @State private var recordingSlot: String?
+private struct ToolbarSlotChip: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let label: String
+    let isVisible: Bool
+    let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("快捷键") {
-                Button("恢复默认") {
-                    app.updateConfig {
-                        $0.hotkeys = HotkeyConfig()
-                        $0.toolKeys = ToolKeysConfig()
-                    }
-                }
-                .controlSize(.small)
+        let p = MagpiePalette(colorScheme: colorScheme)
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: isVisible ? "checkmark" : "plus")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(isVisible ? p.inkPrimary : p.inkTertiary)
+                Text(label)
+                    .font(.system(size: 12, weight: isVisible ? .medium : .regular))
+                    .foregroundStyle(isVisible ? p.inkPrimary : p.inkSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                    .fill(isVisible ? p.segmentedThumb : p.segmentedTrack.opacity(isHovered ? 1.0 : 0.65))
+                    .shadow(
+                        color: .black.opacity(isVisible ? (p.isDark ? 0.22 : 0.04) : 0),
+                        radius: 1.5,
+                        x: 0,
+                        y: 0.5
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                    .strokeBorder(
+                        isVisible ? p.segmentedThumbBorder : (isHovered ? p.cardBorder : Color.clear),
+                        lineWidth: 0.85
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
 
-            let conflicts = app.config.hotkeyConflicts() + app.hotkeyRegistrationErrors
+// MARK: - 4. Hotkeys (快捷键)
+
+private struct HotkeysSettingsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject var app: AirSnipAppController
+    @Binding var recordingSlot: String?
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        let conflicts = app.config.hotkeyConflicts() + app.hotkeyRegistrationErrors
+
+        VStack(alignment: .leading, spacing: 12) {
             if !conflicts.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(conflicts, id: \.self) { msg in
-                        Label(msg, systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.orange)
+                MagpieCard(cornerRadius: 10) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(conflicts, id: \.self) { msg in
+                            HStack(spacing: 7) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(p.statusWarn)
+                                Text(msg)
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(p.statusWarn)
+                            }
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
                 }
-                .padding(11)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.orange.opacity(0.11))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(Color.orange.opacity(0.28), lineWidth: 0.75)
-                )
             }
 
-            SettingsSectionCard("全局") {
-                HotkeyRow(title: "截图", slotID: "global.screenshot", binding: app.config.hotkeys.screenshot, recordingSlot: $recordingSlot) { b in
+            MagpieCard {
+                MagpieSettingRow(
+                    title: "快捷键绑定",
+                    subtitle: "点击右侧键位录制新组合键或鼠标中键/侧键，按 Esc 取消录制"
+                ) {
+                    MagpieTextAction("恢复默认") {
+                        recordingSlot = nil
+                        app.updateConfig {
+                            $0.hotkeys = HotkeyConfig()
+                            $0.toolKeys = ToolKeysConfig()
+                        }
+                    }
+                }
+
+                MagpieRowDivider()
+                MagpieSectionGroupRow(title: "全局热键", trailingText: "系统级常驻响应")
+
+                MagpieRowDivider()
+                HotkeyRow(title: "开始截图", slotID: "global.screenshot", binding: app.config.hotkeys.screenshot, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.screenshot = b }
                 }
-                SettingsRowDivider()
-                HotkeyRow(title: "窗体截图", slotID: "global.windowCapture", binding: app.config.hotkeys.windowCapture, recordingSlot: $recordingSlot) { b in
+                MagpieRowDivider()
+                HotkeyRow(title: "独立窗体截图", slotID: "global.windowCapture", binding: app.config.hotkeys.windowCapture, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.windowCapture = b }
                 }
-                SettingsRowDivider()
+                MagpieRowDivider()
                 HotkeyRow(title: "页面长截图", slotID: "global.longshotCapture", binding: app.config.hotkeys.longshotCapture, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.longshotCapture = b }
                 }
-                SettingsRowDivider()
+                MagpieRowDivider()
                 HotkeyRow(title: "截图识字", slotID: "global.ocrCapture", binding: app.config.hotkeys.ocrCapture, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.ocrCapture = b }
                 }
-                SettingsRowDivider()
+                MagpieRowDivider()
                 HotkeyRow(title: "划词翻译", slotID: "global.translateSelection", binding: app.config.hotkeys.translateSelection, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.translateSelection = b }
                 }
-                SettingsRowDivider()
+                MagpieRowDivider()
                 HotkeyRow(title: "截图翻译", slotID: "global.translateCapture", binding: app.config.hotkeys.translateCapture, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.translateCapture = b }
                 }
-                SettingsRowDivider()
+                MagpieRowDivider()
                 HotkeyRow(title: "剪贴板贴图", slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.pin = b }
                 }
-                SettingsRowDivider()
+                MagpieRowDivider()
                 HotkeyRow(title: "切换贴图边框", slotID: "global.pinBorder", binding: app.config.hotkeys.pinBorderToggle, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.pinBorderToggle = b }
                 }
-            }
 
-            SettingsSectionCard("截图内") {
+                MagpieRowDivider()
+                MagpieSectionGroupRow(title: "截图会话内", trailingText: "框选期间生效")
+
+                MagpieRowDivider()
                 HotkeyRow(title: "重新抓屏", slotID: "ov.recapture", binding: app.config.hotkeys.recapture, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.recapture = b }
                 }
-                SettingsRowDivider()
-                HotkeyRow(title: "长截图", slotID: "ov.longshot", binding: app.config.hotkeys.longshot, recordingSlot: $recordingSlot) { b in
+                MagpieRowDivider()
+                HotkeyRow(title: "进入长截图", slotID: "ov.longshot", binding: app.config.hotkeys.longshot, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.longshot = b }
                 }
-                SettingsRowDivider()
-                HotkeyRow(title: "OCR 识字", slotID: "ov.ocr", binding: app.config.hotkeys.ocr, recordingSlot: $recordingSlot) { b in
+                MagpieRowDivider()
+                HotkeyRow(title: "选区 OCR 识字", slotID: "ov.ocr", binding: app.config.hotkeys.ocr, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.ocr = b }
                 }
-            }
 
-            SettingsSectionCard("标注工具") {
-                ForEach(Array(AnnotationTool.allOrdered.enumerated()), id: \.element.rawValue) { idx, tool in
-                    if idx > 0 {
-                        SettingsRowDivider()
-                    }
+                MagpieRowDivider()
+                MagpieSectionGroupRow(title: "标注工具切换", trailingText: "默认数字键 1–0")
+
+                ForEach(AnnotationTool.allOrdered, id: \.rawValue) { tool in
+                    MagpieRowDivider()
                     HotkeyRow(
                         title: tool.shortLabel,
                         slotID: "tool.\(tool.rawValue)",
@@ -955,63 +1056,70 @@ private struct HotkeysSettingsPane: View {
 }
 
 private struct HotkeyRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
+    var subtitle: String? = nil
     let slotID: String
     let binding: HotkeyBinding
     @Binding var recordingSlot: String?
     let onUpdate: (HotkeyBinding) -> Void
 
     @State private var eventMonitor: Any?
+    @State private var isHovered = false
 
     private var isRecording: Bool { recordingSlot == slotID }
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(title)
-                .font(.system(size: 13))
-            Spacer()
+        let p = MagpiePalette(colorScheme: colorScheme)
 
-            Button {
-                if isRecording {
-                    stopRecording()
-                } else {
-                    startRecording()
-                }
-            } label: {
-                Text(isRecording ? "按下快捷键…" : binding.displayString)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(isRecording ? Color.accentColor : (binding.isUnbound ? Color.secondary : Color.primary))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .frame(minWidth: 118)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(isRecording ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.05))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(isRecording ? Color.accentColor : Color.primary.opacity(0.13), lineWidth: isRecording ? 1.2 : 0.8)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            if !binding.isUnbound {
+        MagpieSettingRow(title: title, subtitle: subtitle) {
+            HStack(spacing: 8) {
                 Button {
-                    stopRecording()
-                    onUpdate(.unbound)
+                    if isRecording {
+                        stopRecording()
+                    } else {
+                        startRecording()
+                    }
                 } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary.opacity(0.75))
+                    Text(isRecording ? "按下快捷键…" : binding.displayString)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(isRecording ? p.inkPrimary : (binding.isUnbound ? p.inkTertiary : p.inkMono))
+                        .padding(.horizontal, 12)
+                        .frame(minWidth: 112, minHeight: 27)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                .fill(isRecording ? p.segmentedThumb : (isHovered ? p.segmentedThumb : p.segmentedTrack))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                .strokeBorder(
+                                    isRecording ? p.inkPrimary : (isHovered ? p.segmentedThumbBorder : Color.clear),
+                                    lineWidth: isRecording ? 1.2 : 0.85
+                                )
+                        )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("清除")
-            } else {
-                Spacer().frame(width: 13)
+                .onHover { isHovered = $0 }
+
+                if !binding.isUnbound {
+                    Button {
+                        stopRecording()
+                        onUpdate(.unbound)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(p.inkTertiary)
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("清除快捷键")
+                } else {
+                    Spacer().frame(width: 20)
+                }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8.5)
         .onDisappear {
             stopRecording()
         }
@@ -1050,9 +1158,10 @@ private struct HotkeyRow: View {
     }
 }
 
-// MARK: - 5. Editor Defaults
+// MARK: - 5. Editor Defaults (标注)
 
 private struct EditorDefaultsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
 
     private func swiftUIColor(_ c: RGBAColor) -> Color {
@@ -1069,95 +1178,81 @@ private struct EditorDefaultsPane: View {
     }
 
     var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
         let clampedActiveIdx = max(0, min(app.config.swatchColors.count - 1, app.config.activeColorIndex))
         let activeRGB = app.config.swatchColors[clampedActiveIdx]
         let activeLum = (0.299 * Double(activeRGB.r) + 0.587 * Double(activeRGB.g) + 0.114 * Double(activeRGB.b)) / 255.0
         let needsDarkPreview = activeLum > 0.80
 
-        VStack(alignment: .leading, spacing: 15) {
-            SettingsPageHeader("标注") {
-                Button("恢复默认") {
-                    app.updateConfig {
-                        $0.swatchColors = ColorPalette.defaultSwatches
-                        $0.activeColorIndex = 1
-                        $0.defaultLineWidth = 2.0
-                        $0.defaultBlurRadius = 16.0
-                        $0.defaultFontSize = 24.0
-                        $0.defaultFillEnabled = false
-                    }
-                }
-                .controlSize(.small)
-            }
-
-            SettingsSectionCard("默认样式") {
+        MagpieCard {
+            MagpieSettingRow(title: "线宽") {
                 HStack(spacing: 14) {
-                    Text("线宽")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 76, alignment: .leading)
-                    Slider(
+                    MagpieSlider(
                         value: Binding(
                             get: { app.config.defaultLineWidth },
                             set: { v in app.updateConfig { $0.defaultLineWidth = v.rounded() } }
                         ),
-                        in: 1...20
+                        in: 1...20,
+                        step: 1
                     )
+                    .frame(width: 210)
+
                     Text("\(Int(app.config.defaultLineWidth)) px")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 12.5, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(p.inkMono)
                         .frame(width: 52, alignment: .trailing)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10.5)
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
+            MagpieSettingRow(title: "模糊强度") {
                 HStack(spacing: 14) {
-                    Text("模糊强度")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 76, alignment: .leading)
-                    Slider(
+                    MagpieSlider(
                         value: Binding(
                             get: { app.config.defaultBlurRadius },
                             set: { v in app.updateConfig { $0.defaultBlurRadius = (v / 2.0).rounded() * 2.0 } }
                         ),
-                        in: 4...48
+                        in: 4...48,
+                        step: 2
                     )
+                    .frame(width: 210)
+
                     Text("\(Int(app.config.defaultBlurRadius)) px")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 12.5, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(p.inkMono)
                         .frame(width: 52, alignment: .trailing)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10.5)
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
+            MagpieSettingRow(title: "默认字号") {
                 HStack(spacing: 14) {
-                    Text("字号")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 76, alignment: .leading)
-                    Slider(
+                    MagpieSlider(
                         value: Binding(
                             get: { app.config.defaultFontSize },
                             set: { v in app.updateConfig { $0.defaultFontSize = (v / 2.0).rounded() * 2.0 } }
                         ),
-                        in: 12...72
+                        in: 12...72,
+                        step: 2
                     )
+                    .frame(width: 210)
+
                     Text("\(Int(app.config.defaultFontSize)) pt")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 12.5, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(p.inkMono)
                         .frame(width: 52, alignment: .trailing)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10.5)
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "实心填充",
+            MagpieSettingRow(title: "实心填充") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.defaultFillEnabled },
                         set: { v in app.updateConfig { $0.defaultFillEnabled = v } }
@@ -1165,9 +1260,11 @@ private struct EditorDefaultsPane: View {
                 )
             }
 
-            SettingsSectionCard("预设颜色") {
-                VStack(alignment: .leading, spacing: 13) {
-                    HStack(spacing: 14) {
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "预设调色板", subtitle: "选中色槽后可通过右侧取色器自定义对应预设色") {
+                HStack(spacing: 14) {
+                    HStack(spacing: 11) {
                         ForEach(0..<ColorPalette.swatchCount, id: \.self) { idx in
                             let c = idx < app.config.swatchColors.count ? app.config.swatchColors[idx] : ColorPalette.defaultSwatches[idx]
                             let isActive = (clampedActiveIdx == idx)
@@ -1179,140 +1276,163 @@ private struct EditorDefaultsPane: View {
                                 ZStack {
                                     Circle()
                                         .fill(swiftUIColor(c))
-                                        .frame(width: 26, height: 26)
-                                        .shadow(color: .black.opacity(0.10), radius: 1.5, x: 0, y: 1)
+                                        .frame(width: 24, height: 24)
                                         .overlay(
                                             Circle()
-                                                .strokeBorder(Color.primary.opacity(lum > 0.80 ? 0.24 : 0.16), lineWidth: 1)
+                                                .strokeBorder(
+                                                    Color.primary.opacity(lum > 0.80 ? 0.24 : 0.15),
+                                                    lineWidth: 1
+                                                )
                                         )
                                         .overlay(
                                             Circle()
-                                                .strokeBorder(Color.accentColor, lineWidth: isActive ? 2.0 : 0)
-                                                .padding(-3.5)
+                                                .strokeBorder(p.inkPrimary, lineWidth: isActive ? 1.8 : 0)
+                                                .padding(-3.2)
                                         )
 
                                     if isActive {
                                         Image(systemName: "checkmark")
-                                            .font(.system(size: 10.5, weight: .bold))
-                                            .foregroundStyle(lum > 0.68 ? Color.black.opacity(0.78) : Color.white)
+                                            .font(.system(size: 9.5, weight: .bold))
+                                            .foregroundStyle(lum > 0.68 ? Color.black.opacity(0.82) : Color.white)
                                     }
                                 }
                             }
                             .buttonStyle(.plain)
                         }
-
-                        Spacer()
-
-                        HStack(spacing: 8) {
-                            Text("自定义")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-
-                            ColorPicker("", selection: Binding(
-                                get: { swiftUIColor(activeRGB) },
-                                set: { newCol in
-                                    let ns = NSColor(newCol)
-                                    let rgba = rgbaFromNSColor(ns)
-                                    app.updateConfig {
-                                        if clampedActiveIdx < $0.swatchColors.count {
-                                            $0.swatchColors[clampedActiveIdx] = rgba
-                                        }
-                                    }
-                                }
-                            ), supportsOpacity: false)
-                            .labelsHidden()
-                        }
                     }
 
-                    HStack(spacing: 16) {
+                    Rectangle()
+                        .fill(p.cardBorder)
+                        .frame(width: 1, height: 16)
+
+                    HStack(spacing: 6) {
+                        Text(activeRGB.hexString)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(p.inkMono)
+
+                        ColorPicker("", selection: Binding(
+                            get: { swiftUIColor(activeRGB) },
+                            set: { newCol in
+                                let ns = NSColor(newCol)
+                                let rgba = rgbaFromNSColor(ns)
+                                app.updateConfig {
+                                    if clampedActiveIdx < $0.swatchColors.count {
+                                        $0.swatchColors[clampedActiveIdx] = rgba
+                                    }
+                                }
+                            }
+                        ), supportsOpacity: false)
+                        .labelsHidden()
+                    }
+                }
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "标注样式预览") {
+                HStack(spacing: 14) {
+                    HStack(spacing: 14) {
                         Group {
                             if app.config.defaultFillEnabled {
-                                RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
                                     .fill(swiftUIColor(activeRGB))
                             } else {
-                                RoundedRectangle(cornerRadius: 4.5, style: .continuous)
-                                    .strokeBorder(swiftUIColor(activeRGB), lineWidth: max(1.5, min(8, app.config.defaultLineWidth * 0.6)))
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .strokeBorder(
+                                        swiftUIColor(activeRGB),
+                                        lineWidth: max(1.5, min(7, app.config.defaultLineWidth * 0.6))
+                                    )
                             }
                         }
-                        .frame(width: 50, height: 26)
+                        .frame(width: 44, height: 22)
 
                         Capsule()
                             .fill(swiftUIColor(activeRGB))
-                            .frame(width: 72, height: max(2, min(16, app.config.defaultLineWidth)))
+                            .frame(width: 60, height: max(2, min(14, app.config.defaultLineWidth)))
 
                         Text("Aa 预览")
-                            .font(.system(size: max(12, min(22, app.config.defaultFontSize * 0.68)), weight: .semibold))
+                            .font(.system(size: max(12, min(20, app.config.defaultFontSize * 0.64)), weight: .semibold))
                             .foregroundStyle(swiftUIColor(activeRGB))
                             .lineLimit(1)
-
-                        Spacer()
                     }
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 9.5)
+                    .frame(height: 34)
                     .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(needsDarkPreview ? Color(white: 0.18) : Color.primary.opacity(0.045))
+                        RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                            .fill(needsDarkPreview ? Color(white: 0.16) : p.subtleSurface)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.75)
+                        RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                            .strokeBorder(p.cardBorder, lineWidth: 1)
                     )
+
+                    MagpieTextAction("恢复默认") {
+                        app.updateConfig {
+                            $0.swatchColors = ColorPalette.defaultSwatches
+                            $0.activeColorIndex = 1
+                            $0.defaultLineWidth = 2.0
+                            $0.defaultBlurRadius = 16.0
+                            $0.defaultFontSize = 24.0
+                            $0.defaultFillEnabled = false
+                        }
+                    }
                 }
-                .padding(14)
             }
         }
     }
 }
 
-// MARK: - 6. OCR
+// MARK: - 6. OCR & Translation (OCR 与翻译)
 
 private struct OCRSettingsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("OCR 与翻译")
+        let p = MagpiePalette(colorScheme: colorScheme)
 
-            SettingsSectionCard("识别") {
-                SettingsControlRow(title: "识别语言") {
-                    Picker("", selection: Binding(
+        MagpieCard {
+            MagpieSettingRow(
+                title: "识别语言",
+                infoTip: "基于端侧 Apple Vision 离线文字识别，全程不上传网络"
+            ) {
+                MagpieMenuPicker(
+                    "识别语言",
+                    options: OcrConfig.supportedOptions.map { ($0.tag, $0.label) },
+                    selection: Binding(
                         get: { app.config.ocr.language },
                         set: { lang in app.updateConfig { $0.ocr.language = lang } }
-                    )) {
-                        ForEach(OcrConfig.supportedOptions, id: \.tag) { opt in
-                            Text(opt.label).tag(opt.tag)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 136)
-                }
+                    ),
+                    minWidth: 124
+                )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "自动复制结果",
+            MagpieSettingRow(title: "自动复制识别结果") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.ocr.autoCopy },
                         set: { ac in app.updateConfig { $0.ocr.autoCopy = ac } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "合并段落换行",
+            MagpieSettingRow(title: "合并段落换行") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.ocr.mergeLineBreaks },
                         set: { mb in app.updateConfig { $0.ocr.mergeLineBreaks = mb } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
-                SettingsSwitchRow(
-                    title: "识别二维码与条码",
+            MagpieSettingRow(title: "识别二维码与条码") {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.ocr.detectBarcodes },
                         set: { db in app.updateConfig { $0.ocr.detectBarcodes = db } }
@@ -1320,196 +1440,499 @@ private struct OCRSettingsPane: View {
                 )
             }
 
-            SettingsSectionCard("快捷识别") {
-                HStack(spacing: 10) {
-                    Button {
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "快捷文字识别") {
+                HStack(spacing: 6) {
+                    Button("框选识字") {
                         app.settingsController?.hide()
                         Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 180_000_000)
                             app.triggerDirectOCRCapture()
                         }
-                    } label: {
-                        Label("框选识字", systemImage: "text.viewfinder")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(MagpiePillButtonStyle(role: .bordered, compact: true))
 
-                    Button {
+                    Button("剪贴板识字") {
                         app.triggerOCRFromClipboard()
-                    } label: {
-                        Label("剪贴板识字", systemImage: "doc.on.clipboard")
                     }
+                    .buttonStyle(MagpiePillButtonStyle(role: .bordered, compact: true))
 
-                    Button {
+                    Button("选择图片…") {
                         app.triggerOCRFromFile()
-                    } label: {
-                        Label("选择图片…", systemImage: "photo")
                     }
-
-                    Spacer()
+                    .buttonStyle(MagpiePillButtonStyle(role: .bordered, compact: true))
                 }
-                .padding(14)
             }
 
-            SettingsSectionCard("翻译") {
-                SettingsControlRow(title: "目标语言") {
-                    Picker("目标语言", selection: Binding(
+            MagpieRowDivider()
+
+            MagpieSettingRow(
+                title: "翻译目标语言",
+                subtitle: "使用 macOS 15+ 系统 Translation 框架，无需配置 API Key"
+            ) {
+                MagpieMenuPicker(
+                    "目标语言",
+                    options: TranslationConfig.languageOptions.map { ($0.tag, $0.label) },
+                    selection: Binding(
                         get: { app.config.translation.targetLanguage },
                         set: { language in app.updateConfig { $0.translation.targetLanguage = language } }
-                    )) {
-                        ForEach(TranslationConfig.languageOptions, id: \.tag) { option in
-                            Text(option.label).tag(option.tag)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 136)
-                }
-                SettingsRowDivider()
-                SettingsSwitchRow(
-                    title: "划词后显示翻译按钮",
+                    ),
+                    minWidth: 124
+                )
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(
+                title: "划词后显示翻译按钮",
+                subtitle: "仅读取应用公开选中文字，不模拟复制或改写剪贴板；无法取词处请用截图翻译",
+                infoTip: "需要辅助功能权限"
+            ) {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.translation.showSelectionButton },
                         set: { enabled in app.updateConfig { $0.translation.showSelectionButton = enabled } }
                     )
                 )
-                SettingsRowDivider()
-                HStack(spacing: 12) {
-                    Button {
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(
+                title: "快捷翻译入口",
+                subtitle: "划词翻译 \(app.config.hotkeys.translateSelection.displayString)  ·  截图翻译 \(app.config.hotkeys.translateCapture.displayString)"
+            ) {
+                HStack(spacing: 10) {
+                    Text("\(app.config.hotkeys.translateSelection.displayString) / \(app.config.hotkeys.translateCapture.displayString)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
+
+                    Button("截图翻译") {
                         app.settingsController?.hide()
                         Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 180_000_000)
                             app.triggerOCRTranslation()
                         }
-                    } label: {
-                        Label("截图翻译", systemImage: "character.viewfinder")
                     }
-                    .buttonStyle(.borderedProminent)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text("划词翻译  \(app.config.hotkeys.translateSelection.displayString)")
-                        Text("截图翻译  \(app.config.hotkeys.translateCapture.displayString)")
-                    }
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary)
+                    .buttonStyle(MagpiePillButtonStyle(role: .bordered, compact: true))
                 }
-                .padding(14)
-                Text("划词取词需要辅助功能权限。远程桌面或无法取词的应用，请用「截图翻译」。\n使用 macOS 15+ 系统翻译，无需 API Key；首次使用可能需要下载语言包。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding([.horizontal, .bottom], 14)
             }
         }
     }
 }
 
-// MARK: - 7. About
+// MARK: - 7. About (关于 — Direct Homage to Reference Layout)
 
 private struct AboutSettingsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var app: AirSnipAppController
-    @State private var checkingUpdate = false
-    @State private var updateStatusText = ""
-    @State private var latestRelease: UpdateReleaseInfo?
+    @ObservedObject var updateState: SettingsUpdateState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("关于")
+        let p = MagpiePalette(colorScheme: colorScheme)
+        let configDirURL = app.configURL.deletingLastPathComponent()
+        let configDisplayPath = OutputService.displayPath(for: configDirURL)
+        let saveDirURL = OutputService.defaultSaveDirectoryURL(for: app.config)
+        let saveDisplayPath = OutputService.displayPath(for: saveDirURL)
+        let repoURL = URL(string: "https://github.com/zzusec/isnip")!
+        let releasesURL = URL(string: "https://github.com/zzusec/isnip/releases")!
 
-            HStack(spacing: 14) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 52, height: 52)
-                    .shadow(color: .black.opacity(0.16), radius: 4, x: 0, y: 2)
+        MagpieCard {
+            MagpieSettingRow(
+                title: "版本",
+                subtitle: updateState.statusText.isEmpty ? nil : updateState.statusText
+            ) {
+                HStack(spacing: 12) {
+                    Text(UpdateChecker.currentVersion)
+                        .font(.system(size: 13, weight: .regular, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
 
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("iSnip")
-                        .font(.system(size: 20, weight: .bold))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                    Text("v\(UpdateChecker.currentVersion)")
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.accentColor)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 7.5)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    if let rel = updateState.latestRelease {
+                        MagpieTextAction("下载 v\(rel.version)", prominent: true) {
+                            NSWorkspace.shared.open(rel.downloadURL ?? rel.htmlURL)
+                        }
+                    } else {
+                        MagpieTextAction(updateState.isChecking ? "检查中…" : "检查更新") {
+                            updateState.checkNow()
+                        }
+                        .disabled(updateState.isChecking)
+                    }
                 }
-
-                Spacer()
             }
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
-            )
 
-            SettingsSectionCard("更新") {
-                SettingsSwitchRow(
-                    title: "自动检查更新",
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "更新内容") {
+                MagpieTextAction("打开") {
+                    NSWorkspace.shared.open(releasesURL)
+                }
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(
+                title: "自动更新检查",
+                infoTip: "应用启动 3 秒后静默检查一次最新版本，无后台轮询，常驻 0% CPU"
+            ) {
+                MagpieBooleanSwitch(
                     isOn: Binding(
                         get: { app.config.autoCheckUpdate },
                         set: { v in app.updateConfig { $0.autoCheckUpdate = v } }
                     )
                 )
+            }
 
-                SettingsRowDivider()
+            MagpieRowDivider()
 
+            MagpieSettingRow(title: "操作完成提示") {
+                MagpieBooleanSwitch(
+                    isOn: Binding(
+                        get: { app.config.showCompletionToast },
+                        set: { v in app.updateConfig { $0.showCompletionToast = v } }
+                    )
+                )
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "下载源") {
                 HStack(spacing: 10) {
-                    Text(updateStatusText.isEmpty ? "版本检查" : updateStatusText)
-                        .font(.system(size: 13, weight: updateStatusText.isEmpty ? .medium : .regular))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Spacer(minLength: 8)
-
-                    if let rel = latestRelease {
-                        Button("下载 v\(rel.version)") {
-                            NSWorkspace.shared.open(rel.downloadURL ?? rel.htmlURL)
-                        }
-                        .controlSize(.small)
-                        .buttonStyle(.borderedProminent)
-                        .fixedSize(horizontal: true, vertical: false)
+                    Text("github.com/zzusec/isnip")
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
+                    MagpieTextAction("打开") {
+                        NSWorkspace.shared.open(repoURL)
                     }
+                }
+            }
 
-                    Button(checkingUpdate ? "检查中…" : "检查更新") {
-                        checkingUpdate = true
-                        updateStatusText = ""
-                        Task { @MainActor in
-                            let res = await UpdateChecker.checkLatest()
-                            checkingUpdate = false
-                            switch res {
-                            case .success(let info?):
-                                latestRelease = info
-                                updateStatusText = "发现新版本 v\(info.version)"
-                            case .success(nil):
-                                latestRelease = nil
-                                updateStatusText = "已是最新版本"
-                            case .failure(let err):
-                                updateStatusText = "检查失败：\(err.localizedDescription)"
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "配置目录") {
+                HStack(spacing: 6) {
+                    Text(configDisplayPath)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 340, alignment: .trailing)
+                    MagpieCopyButton(value: configDirURL.path, helpText: "复制配置目录路径")
+                    MagpieTextAction("打开") {
+                        try? FileManager.default.createDirectory(at: configDirURL, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(configDirURL)
+                    }
+                }
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "默认保存目录") {
+                HStack(spacing: 6) {
+                    Text(saveDisplayPath)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 340, alignment: .trailing)
+                    MagpieCopyButton(value: saveDirURL.path, helpText: "复制保存目录路径")
+                    MagpieTextAction("打开") {
+                        try? FileManager.default.createDirectory(at: saveDirURL, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(saveDirURL)
+                    }
+                }
+            }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: "开源协议") {
+                HStack(spacing: 10) {
+                    Text("GPL-3.0-only")
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(p.inkMono)
+                    MagpieTextAction("查看") {
+                        NSWorkspace.shared.open(URL(string: "https://github.com/zzusec/isnip/blob/main/LICENSE")!)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Live Cross-Tab Search ("查找设置")
+
+private struct SettingsSearchResultsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject var app: AirSnipAppController
+    let query: String
+    @ObservedObject var updateState: SettingsUpdateState
+    @Binding var recordingSlot: String?
+    let onSelectTab: (SettingsTab) -> Void
+
+    private struct SearchEntry: Identifiable {
+        let id: String
+        let tab: SettingsTab
+        let keywords: String
+        let render: () -> AnyView
+    }
+
+    private func matches(_ keywords: String) -> Bool {
+        let needle = query.lowercased()
+        return keywords.lowercased().contains(needle)
+    }
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        let saveDirURL = OutputService.defaultSaveDirectoryURL(for: app.config)
+        let configDirURL = app.configURL.deletingLastPathComponent()
+
+        let allEntries: [SearchEntry] = [
+            SearchEntry(id: "gen.autostart", tab: .general, keywords: "通用 开机自动启动 登录启动 autostart launch") {
+                AnyView(MagpieSettingRow(title: "开机自动启动", subtitle: "通用") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.autoStart },
+                        set: { val in
+                            _ = LaunchAtLoginManager.setEnabled(val)
+                            app.updateConfig { $0.autoStart = val }
+                        }
+                    ))
+                })
+            },
+            SearchEntry(id: "gen.theme", tab: .general, keywords: "通用 外观 主题 深色 浅色 跟随系统 theme dark light") {
+                AnyView(MagpieSettingRow(title: "外观", subtitle: "通用") {
+                    MagpieSegmentedPicker(
+                        options: ThemeSetting.allCases.map { ($0, $0.title) },
+                        selection: Binding(
+                            get: { app.config.theme },
+                            set: { t in
+                                app.updateConfig { $0.theme = t }
+                                app.settingsController?.refreshTheme()
+                            }
+                        )
+                    )
+                })
+            },
+            SearchEntry(id: "gen.scale", tab: .general, keywords: "通用 工具栏缩放 大小 比例 scale 100% 125% 150%") {
+                AnyView(MagpieSettingRow(title: "工具栏缩放", subtitle: "通用") {
+                    MagpieSegmentedPicker(
+                        options: UiScaleSetting.allCases.map { ($0, $0.title) },
+                        selection: Binding(
+                            get: { app.config.uiScale },
+                            set: { s in app.updateConfig { $0.uiScale = s } }
+                        )
+                    )
+                })
+            },
+            SearchEntry(id: "gen.esc", tab: .general, keywords: "通用 有标注时按两次 Esc 退出 取消 确认") {
+                AnyView(MagpieSettingRow(title: "有标注时按两次 Esc 退出", subtitle: "通用") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.confirmCancel },
+                        set: { v in app.updateConfig { $0.confirmCancel = v } }
+                    ))
+                })
+            },
+            SearchEntry(id: "gen.toast", tab: .general, keywords: "通用 操作完成提示 toast 通知 已复制 已保存") {
+                AnyView(MagpieSettingRow(title: "操作完成提示", subtitle: "通用") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.showCompletionToast },
+                        set: { v in app.updateConfig { $0.showCompletionToast = v } }
+                    ))
+                })
+            },
+            SearchEntry(id: "gen.perm.screen", tab: .general, keywords: "通用 权限 屏幕录制 录屏 授权 重置权限") {
+                AnyView(MagpieSettingRow(title: "屏幕录制权限", subtitle: "通用") {
+                    MagpieTextAction("前往通用查看") { onSelectTab(.general) }
+                })
+            },
+            SearchEntry(id: "gen.perm.ax", tab: .general, keywords: "通用 权限 辅助功能 授权 长截图 划词") {
+                AnyView(MagpieSettingRow(title: "辅助功能权限", subtitle: "通用") {
+                    MagpieTextAction("前往通用查看") { onSelectTab(.general) }
+                })
+            },
+            SearchEntry(id: "cap.compress", tab: .captureAndPin, keywords: "截图 智能无损压缩 pngquant oxipng png 体积") {
+                AnyView(MagpieSettingRow(title: "智能无损压缩", subtitle: "截图") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.smartPngCompression },
+                        set: { v in app.updateConfig { $0.smartPngCompression = v } }
+                    ))
+                })
+            },
+            SearchEntry(id: "cap.quality", tab: .captureAndPin, keywords: "截图 压缩档位 视觉无损 均衡 高压缩") {
+                AnyView(MagpieSettingRow(title: "压缩档位", subtitle: "截图") {
+                    MagpieSegmentedPicker(
+                        options: PngCompressionQualityPreset.allCases.map { ($0, $0.title) },
+                        selection: Binding(
+                            get: { app.config.pngCompressionQuality },
+                            set: { q in app.updateConfig { $0.pngCompressionQuality = q } }
+                        )
+                    )
+                })
+            },
+            SearchEntry(id: "cap.clipcompress", tab: .captureAndPin, keywords: "截图 压缩剪贴板图片 复制") {
+                AnyView(MagpieSettingRow(title: "压缩剪贴板图片", subtitle: "截图") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.compressClipboardPng },
+                        set: { v in app.updateConfig { $0.compressClipboardPng = v } }
+                    ))
+                })
+            },
+            SearchEntry(id: "cap.savedir", tab: .captureAndPin, keywords: "截图 保存位置 目录 路径 下载 downloads") {
+                AnyView(MagpieSettingRow(title: "保存位置", subtitle: "截图") {
+                    HStack(spacing: 6) {
+                        Text(OutputService.displayPath(for: saveDirURL))
+                            .font(.system(size: 12.5, design: .monospaced))
+                            .foregroundStyle(p.inkMono)
+                        MagpieTextAction("更改…") {
+                            if let chosen = OutputService.chooseSaveDirectory(initial: saveDirURL) {
+                                app.updateConfig { $0.lastSaveDirectory = chosen.path }
                             }
                         }
                     }
-                    .controlSize(.small)
-                    .disabled(checkingUpdate)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9.5)
+                })
+            },
+            SearchEntry(id: "cap.format", tab: .captureAndPin, keywords: "截图 默认格式 PNG JPEG WebP 导出") {
+                AnyView(MagpieSettingRow(title: "默认格式", subtitle: "截图") {
+                    MagpieSegmentedPicker(
+                        options: ExportImageFormat.allCases.map { ($0, $0.displayName) },
+                        selection: Binding(
+                            get: { app.config.lastSaveFormat },
+                            set: { f in app.updateConfig { $0.lastSaveFormat = f } }
+                        )
+                    )
+                })
+            },
+            SearchEntry(id: "cap.shadow", tab: .captureAndPin, keywords: "截图 窗体截图保留阴影 窗口 自动识别窗口") {
+                AnyView(MagpieSettingRow(title: "窗体截图保留阴影", subtitle: "截图") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.windowCaptureShadow },
+                        set: { v in app.updateConfig { $0.windowCaptureShadow = v } }
+                    ))
+                })
+            },
+            SearchEntry(id: "cap.longshot", tab: .captureAndPin, keywords: "截图 页面长截图 自动翻页 翻页速度 高度上限 滚动拼接") {
+                AnyView(MagpieSettingRow(title: "页面长截图自动翻页", subtitle: "截图") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.longshotAutoScroll },
+                        set: { v in app.updateConfig { $0.longshotAutoScroll = v } }
+                    ))
+                })
+            },
+            SearchEntry(id: "cap.pin", tab: .captureAndPin, keywords: "截图 贴图 边框 初始位置 数量上限 pin") {
+                AnyView(MagpieSettingRow(title: "贴图显示边框", subtitle: "截图") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.pinBorder },
+                        set: { b in app.updateConfig { $0.pinBorder = b } }
+                    ))
+                })
+            },
+            SearchEntry(id: "tb.slots", tab: .toolbar, keywords: "工具栏 槽位 隐藏 显示 按钮 矩形 箭头 模糊 聚光灯") {
+                AnyView(MagpieSettingRow(title: "悬浮工具栏槽位定制", subtitle: "工具栏") {
+                    MagpieTextAction("打开工具栏设置", prominent: true) { onSelectTab(.toolbar) }
+                })
+            },
+            SearchEntry(id: "hk.shot", tab: .hotkeys, keywords: "快捷键 热键 开始截图 F1 screenshot") {
+                AnyView(HotkeyRow(title: "开始截图", subtitle: "快捷键 · 全局", slotID: "s.global.screenshot", binding: app.config.hotkeys.screenshot, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.screenshot = b }
+                })
+            },
+            SearchEntry(id: "hk.win", tab: .hotkeys, keywords: "快捷键 热键 窗体截图 F5 window") {
+                AnyView(HotkeyRow(title: "独立窗体截图", subtitle: "快捷键 · 全局", slotID: "s.global.window", binding: app.config.hotkeys.windowCapture, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.windowCapture = b }
+                })
+            },
+            SearchEntry(id: "hk.ls", tab: .hotkeys, keywords: "快捷键 热键 页面长截图 F4 longshot") {
+                AnyView(HotkeyRow(title: "页面长截图", subtitle: "快捷键 · 全局", slotID: "s.global.ls", binding: app.config.hotkeys.longshotCapture, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.longshotCapture = b }
+                })
+            },
+            SearchEntry(id: "hk.ocr", tab: .hotkeys, keywords: "快捷键 热键 截图识字 F2 ocr") {
+                AnyView(HotkeyRow(title: "截图识字", subtitle: "快捷键 · 全局", slotID: "s.global.ocr", binding: app.config.hotkeys.ocrCapture, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.ocrCapture = b }
+                })
+            },
+            SearchEntry(id: "hk.trans", tab: .hotkeys, keywords: "快捷键 热键 划词翻译 截图翻译 Option D S") {
+                AnyView(HotkeyRow(title: "划词翻译", subtitle: "快捷键 · 全局", slotID: "s.global.trans", binding: app.config.hotkeys.translateSelection, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.translateSelection = b }
+                })
+            },
+            SearchEntry(id: "ed.style", tab: .editor, keywords: "标注 线宽 模糊强度 字号 填充 调色板 颜色") {
+                AnyView(MagpieSettingRow(title: "标注默认线宽 / 模糊 / 字号 / 颜色", subtitle: "标注") {
+                    MagpieTextAction("打开标注设置", prominent: true) { onSelectTab(.editor) }
+                })
+            },
+            SearchEntry(id: "ocr.lang", tab: .ocr, keywords: "OCR 与翻译 识别语言 中文 英文 日语 韩语 离线识字") {
+                AnyView(MagpieSettingRow(title: "识别语言", subtitle: "OCR 与翻译") {
+                    MagpieMenuPicker(
+                        "识别语言",
+                        options: OcrConfig.supportedOptions.map { ($0.tag, $0.label) },
+                        selection: Binding(
+                            get: { app.config.ocr.language },
+                            set: { lang in app.updateConfig { $0.ocr.language = lang } }
+                        )
+                    )
+                })
+            },
+            SearchEntry(id: "ocr.qr", tab: .ocr, keywords: "OCR 与翻译 二维码 条码 自动复制 合并换行") {
+                AnyView(MagpieSettingRow(title: "识别二维码与条码", subtitle: "OCR 与翻译") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.ocr.detectBarcodes },
+                        set: { db in app.updateConfig { $0.ocr.detectBarcodes = db } }
+                    ))
+                })
+            },
+            SearchEntry(id: "ocr.selbtn", tab: .ocr, keywords: "OCR 与翻译 划词后显示翻译按钮 目标语言 翻译") {
+                AnyView(MagpieSettingRow(title: "划词后显示翻译按钮", subtitle: "OCR 与翻译") {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.translation.showSelectionButton },
+                        set: { enabled in app.updateConfig { $0.translation.showSelectionButton = enabled } }
+                    ))
+                })
+            },
+            SearchEntry(id: "ab.ver", tab: .about, keywords: "关于 版本 更新 检查更新 自动更新 version update") {
+                AnyView(MagpieSettingRow(title: "版本", subtitle: "关于") {
+                    HStack(spacing: 12) {
+                        Text(UpdateChecker.currentVersion)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(p.inkMono)
+                        MagpieTextAction("检查更新") { updateState.checkNow() }
+                    }
+                })
+            },
+            SearchEntry(id: "ab.cfg", tab: .about, keywords: "关于 配置目录 config.json 路径 协议 github") {
+                AnyView(MagpieSettingRow(title: "配置目录", subtitle: "关于") {
+                    HStack(spacing: 6) {
+                        Text(OutputService.displayPath(for: configDirURL))
+                            .font(.system(size: 12.5, design: .monospaced))
+                            .foregroundStyle(p.inkMono)
+                        MagpieCopyButton(value: configDirURL.path)
+                        MagpieTextAction("打开") { NSWorkspace.shared.open(configDirURL) }
+                    }
+                })
             }
+        ]
 
-            HStack(spacing: 6) {
-                Text("GPL-3.0 ·")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                Link("GitHub", destination: URL(string: "https://github.com/zzusec/isnip")!)
-                    .font(.system(size: 11.5))
+        let matched = allEntries.filter { matches($0.keywords) }
+
+        MagpieCard {
+            if matched.isEmpty {
+                VStack(spacing: 6) {
+                    Text("未找到与「\(query)」匹配的设置项")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(p.inkPrimary)
+                    Text("请尝试输入关键词，如：压缩、阴影、长截图、翻译、快捷键、配置目录")
+                        .font(.system(size: 12))
+                        .foregroundStyle(p.inkSecondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 42)
+            } else {
+                ForEach(Array(matched.enumerated()), id: \.element.id) { idx, item in
+                    if idx > 0 {
+                        MagpieRowDivider()
+                    }
+                    item.render()
+                }
             }
-            .padding(.leading, 4)
         }
     }
 }

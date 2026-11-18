@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import SwiftUI
 
 enum SelectedTextService {
     enum SelectionError: LocalizedError {
@@ -123,7 +124,7 @@ final class SelectionTranslationController {
     }
 
     private func showButton(near point: NSPoint) {
-        let size = NSSize(width: 70, height: 30)
+        let size = NSSize(width: 74, height: 30)
         let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
         guard let bounds = screen?.visibleFrame else { return }
         let frame = NSRect(
@@ -139,13 +140,12 @@ final class SelectionTranslationController {
             bubble.backgroundColor = .clear
             bubble.hasShadow = true
             bubble.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            let button = NSButton(title: "翻译", target: self, action: #selector(translateSelection))
-            button.image = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: nil)
-            button.bezelStyle = .rounded
-            button.frame = NSRect(origin: .zero, size: size)
-            button.toolTip = "翻译选中文字"
-            button.setAccessibilityLabel("翻译选中文字")
-            bubble.contentView = button
+            let root = SelectionTranslatePillView { [weak self] in
+                self?.translateSelection()
+            }
+            let host = FirstMouseHostingView(rootView: root)
+            host.frame = NSRect(origin: .zero, size: size)
+            bubble.contentView = host
             panel = bubble
         }
         panel?.setFrame(frame, display: true)
@@ -157,5 +157,39 @@ final class SelectionTranslationController {
         guard !selectedText.isEmpty,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == selectedProcessID else { return }
         onTranslate?(selectedText, NSEvent.mouseLocation)
+    }
+}
+
+private struct SelectionTranslatePillView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "character.bubble")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(p.inkPrimary)
+                Text("翻译")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(p.inkPrimary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovered ? p.segmentedTrack : p.cardBg)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(p.cardBorder, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("翻译选中文字")
+        .accessibilityLabel("翻译选中文字")
     }
 }

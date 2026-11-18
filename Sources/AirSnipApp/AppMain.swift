@@ -20,7 +20,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private var isCapturingSnapshots = false
     private let selectionTranslation = SelectionTranslationController()
     private var selectionSourceApplication: NSRunningApplication?
-    private let configURL: URL
+    public let configURL: URL
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
@@ -115,7 +115,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 guard let self else { return }
                 if case .success(let rel?) = await UpdateChecker.checkLatest(),
                    self.config.skippedVersion != rel.version {
-                    ToastHUD.show("发现新版本 v\(rel.version)", symbol: "arrow.down.circle.fill", tint: .systemCyan, duration: 3.0)
+                    ToastHUD.show("发现新版本 v\(rel.version)", symbol: "arrow.down.circle", duration: 3.0)
                 }
             }
         }

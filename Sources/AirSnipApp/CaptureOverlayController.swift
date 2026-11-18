@@ -1003,54 +1003,21 @@ final class OverlayCanvasView: NSView {
             ctx.restoreGState()
         }
 
-        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        let glassTop = dark
-            ? CGColor(srgbRed: 0.16, green: 0.17, blue: 0.20, alpha: 0.78)
-            : CGColor(srgbRed: 0.985, green: 0.988, blue: 0.994, alpha: 0.80)
-        let glassBottom = dark
-            ? CGColor(srgbRed: 0.11, green: 0.12, blue: 0.14, alpha: 0.85)
-            : CGColor(srgbRed: 0.945, green: 0.952, blue: 0.965, alpha: 0.86)
-        if let grad = CGGradient(colorsSpace: cs, colors: [glassTop, glassBottom] as CFArray, locations: [0.0, 1.0]) {
-            ctx.drawLinearGradient(
-                grad,
-                start: CGPoint(x: bbox.midX, y: bbox.minY),
-                end: CGPoint(x: bbox.midX, y: bbox.maxY),
-                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
-            )
-        } else {
-            ctx.setFillColor(glassBottom)
-            ctx.fill(bbox)
-        }
-
-        // 3. Directional top-lit specular glass inner bevel
-        ctx.addPath(path)
-        ctx.setLineWidth(1.3)
-        ctx.replacePathWithStrokedPath()
-        ctx.clip()
-        let rimTop = dark
-            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.22)
-            : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.92)
-        let rimBottom = dark
-            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.06)
-            : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.45)
-        if let rimGrad = CGGradient(colorsSpace: cs, colors: [rimTop, rimBottom] as CFArray, locations: [0.0, 1.0]) {
-            ctx.drawLinearGradient(
-                rimGrad,
-                start: CGPoint(x: bbox.midX, y: bbox.minY),
-                end: CGPoint(x: bbox.midX, y: bbox.maxY),
-                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
-            )
-        }
+        let glassFill = dark
+            ? CGColor(srgbRed: 0.110, green: 0.110, blue: 0.125, alpha: 0.95)
+            : CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.96)
+        ctx.setFillColor(glassFill)
+        ctx.fill(bbox)
         ctx.restoreGState()
 
-        // 4. Crisp outer hairline edge
+        // 3. Crisp Magpie 1px outer card hairline border
         let outerRim = dark
-            ? CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.52)
-            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.11)
+            ? CGColor(srgbRed: 0.185, green: 0.185, blue: 0.212, alpha: 1.0)
+            : CGColor(srgbRed: 0.886, green: 0.886, blue: 0.906, alpha: 1.0)
         ctx.saveGState()
         ctx.addPath(path)
         ctx.setStrokeColor(outerRim)
-        ctx.setLineWidth(0.6)
+        ctx.setLineWidth(1.0)
         ctx.strokePath()
         ctx.restoreGState()
     }
@@ -1189,11 +1156,15 @@ final class OverlayCanvasView: NSView {
                     : CGPath(rect: snapped, transform: nil)
                 ctx.saveGState()
                 ctx.addPath(strokePath)
-                ctx.setFillColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: windowPickerMode ? 0.07 : 0.04))
+                ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: windowPickerMode ? 0.04 : 0.02))
                 ctx.fillPath()
                 ctx.addPath(strokePath)
-                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.96))
-                ctx.setLineWidth(windowPickerMode ? 2.0 : 1.5)
+                ctx.setStrokeColor(CGColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 0.55))
+                ctx.setLineWidth(windowPickerMode ? 3.0 : 2.5)
+                ctx.strokePath()
+                ctx.addPath(strokePath)
+                ctx.setStrokeColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.96))
+                ctx.setLineWidth(windowPickerMode ? 1.6 : 1.2)
                 ctx.strokePath()
                 ctx.restoreGState()
 
@@ -1250,21 +1221,21 @@ final class OverlayCanvasView: NSView {
     }
 
     private func drawSelectionFrameAndHandles(in ctx: CGContext, selection sel: ASRect) {
-        let accent = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1.0)
+        let charcoalRim = CGColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 0.88)
+        let crispWhite = CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.98)
         let frameRect = pixelSnapRect(sel.cgRect, lineWidth: 1.0)
 
         ctx.saveGState()
-        // Subtle outer contrast hairline so blue border stays legible on white or cyan backgrounds
-        ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.22))
+        // Outer charcoal contrast hairline + inner crisp white hairline (high contrast on all backgrounds)
+        ctx.setStrokeColor(charcoalRim)
         ctx.setLineWidth(1.0)
-        ctx.stroke(frameRect.insetBy(dx: -0.6, dy: -0.6))
+        ctx.stroke(frameRect.insetBy(dx: -1.0, dy: -1.0))
 
-        // Crisp 1.0pt sky-blue selection hairline
-        ctx.setStrokeColor(accent)
+        ctx.setStrokeColor(crispWhite)
         ctx.setLineWidth(1.0)
         ctx.stroke(frameRect)
 
-        // 8 precision circular control knots (white core + sky-blue rim + subtle drop shadow)
+        // 8 precision circular control knots (white core + crisp charcoal rim + subtle drop shadow)
         if !selectionLocked {
             for h in visibleSelectionHandles(for: sel) {
                 let p = h.position(in: sel)
@@ -1280,13 +1251,13 @@ final class OverlayCanvasView: NSView {
                 ctx.setShadow(
                     offset: CGSize(width: 0, height: 1),
                     blur: 2.5,
-                    color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.28)
+                    color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.26)
                 )
                 ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
                 ctx.fillEllipse(in: knotRect)
                 ctx.restoreGState()
 
-                ctx.setStrokeColor(accent)
+                ctx.setStrokeColor(charcoalRim)
                 ctx.setLineWidth(isHovered ? 1.6 : 1.35)
                 ctx.strokeEllipse(in: knotRect)
             }
@@ -1296,30 +1267,34 @@ final class OverlayCanvasView: NSView {
 
     private func drawDimensionPill(in ctx: CGContext, selection: ASRect, text: String) {
         let scaleFactor = CGFloat(coordinator?.config.uiScale.factor ?? 1.0)
+        let dark = isDarkTheme
         let font = NSFont.monospacedDigitSystemFont(ofSize: 11.0 * scaleFactor, weight: .medium)
+        let fg = dark
+            ? NSColor(srgbRed: 0.957, green: 0.957, blue: 0.965, alpha: 1)
+            : NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: NSColor(calibratedWhite: 0.96, alpha: 1),
+            .foregroundColor: fg,
             .kern: 0.2
         ]
         let sz = (text as NSString).size(withAttributes: attrs)
         let w = (sz.width + 14 * scaleFactor).rounded()
-        let h = (sz.height + 5 * scaleFactor).rounded()
+        let h = (sz.height + 6 * scaleFactor).rounded()
         let x = max(6, min(bounds.width - w - 6, CGFloat(selection.minX)))
         let y = selection.minY >= Double(h + 10)
             ? CGFloat(selection.minY) - h - 6
             : CGFloat(selection.minY) + 7
         let pillRect = CGRect(x: x, y: y, width: w, height: h)
 
-        let path = CGPath(roundedRect: pillRect, cornerWidth: 5.0 * scaleFactor, cornerHeight: 5.0 * scaleFactor, transform: nil)
+        let path = CGPath(roundedRect: pillRect, cornerWidth: 5.5 * scaleFactor, cornerHeight: 5.5 * scaleFactor, transform: nil)
         drawFrostedMaterial(
             in: ctx,
             path: path,
             sampleRect: pillRect,
-            dark: true,
+            dark: dark,
             shadowOffsetY: 1.5,
             shadowBlur: 6,
-            shadowAlpha: 0.22
+            shadowAlpha: dark ? 0.28 : 0.14
         )
         (text as NSString).draw(
             at: NSPoint(x: pillRect.minX + (w - sz.width) * 0.5, y: pillRect.minY + (h - sz.height) * 0.5),
@@ -1389,7 +1364,7 @@ final class OverlayCanvasView: NSView {
             width: cellSize,
             height: cellSize
         )
-        ctx.setFillColor(CGColor(srgbRed: 0.14, green: 0.62, blue: 1.0, alpha: 0.16))
+        ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.14))
         ctx.fill(CGRect(x: centerRect.minX, y: gy0, width: cellSize, height: gridSide))
         ctx.fill(CGRect(x: gx0, y: centerRect.minY, width: gridSide, height: cellSize))
 
@@ -1504,38 +1479,44 @@ final class OverlayCanvasView: NSView {
         let cornerRadius: CGFloat = 8.5 * uis
 
         let dark = isDarkTheme
-        let iconNormal = dark ? NSColor(calibratedWhite: 0.93, alpha: 1) : NSColor(calibratedWhite: 0.14, alpha: 1)
-        let iconDisabled = dark ? NSColor(calibratedWhite: 0.40, alpha: 1) : NSColor(calibratedWhite: 0.62, alpha: 1)
+        let iconNormal = dark
+            ? NSColor(srgbRed: 0.94, green: 0.94, blue: 0.95, alpha: 1)
+            : NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1)
+        let iconDisabled = dark
+            ? NSColor(srgbRed: 0.40, green: 0.40, blue: 0.44, alpha: 1)
+            : NSColor(srgbRed: 0.65, green: 0.65, blue: 0.69, alpha: 1)
         let badgeKnockout = dark
-            ? NSColor(srgbRed: 0.14, green: 0.15, blue: 0.18, alpha: 1)
-            : NSColor(srgbRed: 0.97, green: 0.975, blue: 0.985, alpha: 1)
+            ? NSColor(srgbRed: 0.11, green: 0.11, blue: 0.125, alpha: 1)
+            : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1)
         let hoverBg = dark
-            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.11)
-            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.065)
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.08)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.05)
         let pressBg = dark
-            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.17)
-            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.11)
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.09)
         let cancelHoverBg = dark
-            ? CGColor(srgbRed: 0.96, green: 0.28, blue: 0.28, alpha: 0.22)
-            : CGColor(srgbRed: 0.94, green: 0.24, blue: 0.24, alpha: 0.12)
+            ? CGColor(srgbRed: 0.92, green: 0.28, blue: 0.28, alpha: 0.18)
+            : CGColor(srgbRed: 0.90, green: 0.22, blue: 0.22, alpha: 0.10)
         let copyHoverBg = dark
-            ? CGColor(srgbRed: 0.16, green: 0.78, blue: 0.48, alpha: 0.22)
-            : CGColor(srgbRed: 0.10, green: 0.68, blue: 0.40, alpha: 0.13)
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14)
+            : CGColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 0.10)
         let activeBg = dark
-            ? CGColor(srgbRed: 0.14, green: 0.58, blue: 1.0, alpha: 0.25)
-            : CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.14)
-        let activeBorder = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: dark ? 0.48 : 0.30)
+            ? CGColor(srgbRed: 0.212, green: 0.212, blue: 0.243, alpha: 1.0)
+            : CGColor(srgbRed: 0.925, green: 0.925, blue: 0.941, alpha: 1.0)
+        let activeBorder = dark
+            ? CGColor(srgbRed: 0.295, green: 0.295, blue: 0.335, alpha: 1.0)
+            : CGColor(srgbRed: 0.835, green: 0.835, blue: 0.865, alpha: 1.0)
         let activeAccent = dark
-            ? NSColor(srgbRed: 0.40, green: 0.75, blue: 1.0, alpha: 1)
-            : NSColor(srgbRed: 0.05, green: 0.47, blue: 0.92, alpha: 1)
+            ? NSColor(srgbRed: 0.98, green: 0.98, blue: 0.99, alpha: 1)
+            : NSColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 1)
         let cancelHoverTint = dark
-            ? NSColor(srgbRed: 1.0, green: 0.42, blue: 0.42, alpha: 1)
-            : NSColor(srgbRed: 0.88, green: 0.20, blue: 0.22, alpha: 1)
+            ? NSColor(srgbRed: 0.98, green: 0.44, blue: 0.44, alpha: 1)
+            : NSColor(srgbRed: 0.82, green: 0.20, blue: 0.22, alpha: 1)
         let copyTint = dark
-            ? NSColor(srgbRed: 0.26, green: 0.86, blue: 0.54, alpha: 1)
-            : NSColor(srgbRed: 0.08, green: 0.62, blue: 0.36, alpha: 1)
+            ? NSColor(srgbRed: 0.98, green: 0.98, blue: 0.99, alpha: 1)
+            : NSColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 1)
         let dividerStroke = dark
-            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.10)
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.11)
             : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.085)
 
         struct BarButtonSpec {
@@ -2181,9 +2162,11 @@ final class OverlayCanvasView: NSView {
             ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.09)
             : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.06)
         let activeHalo = dark
-            ? CGColor(srgbRed: 0.12, green: 0.56, blue: 1.0, alpha: 0.24)
-            : CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.15)
-        let activeDot = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1.0)
+            ? CGColor(srgbRed: 0.212, green: 0.212, blue: 0.243, alpha: 1.0)
+            : CGColor(srgbRed: 0.918, green: 0.918, blue: 0.937, alpha: 1.0)
+        let activeDot = dark
+            ? CGColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 1.0)
+            : CGColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 1.0)
         var curX = rect.minX + 7 * uis
 
         switch mode {
@@ -2365,7 +2348,7 @@ final class OverlayCanvasView: NSView {
                 ctx.addPath(CGPath(roundedRect: bRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
                 ctx.fillPath()
             }
-            drawSymbol("bold", in: bRect, pointSize: 11.0 * uis, color: effectiveState.bold ? NSColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1) : textColor)
+            drawSymbol("bold", in: bRect, pointSize: 11.0 * uis, color: effectiveState.bold ? (dark ? .white : NSColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 1)) : textColor)
             toolbarHitItems.append(ToolbarHitItem(id: "text.bold", rect: bRect, tooltip: "粗体", action: { [weak self] in self?.toggleBold() }, doubleClickAction: nil))
 
             let iRect = CGRect(x: bRect.maxX + 2 * uis, y: rect.minY + 4 * uis, width: 24 * uis, height: height - 8 * uis)
@@ -2374,7 +2357,7 @@ final class OverlayCanvasView: NSView {
                 ctx.addPath(CGPath(roundedRect: iRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
                 ctx.fillPath()
             }
-            drawSymbol("italic", in: iRect, pointSize: 11.0 * uis, color: effectiveState.italic ? NSColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1) : textColor)
+            drawSymbol("italic", in: iRect, pointSize: 11.0 * uis, color: effectiveState.italic ? (dark ? .white : NSColor(srgbRed: 0.08, green: 0.08, blue: 0.10, alpha: 1)) : textColor)
             toolbarHitItems.append(ToolbarHitItem(id: "text.italic", rect: iRect, tooltip: "斜体", action: { [weak self] in self?.toggleItalic() }, doubleClickAction: nil))
 
             // 3. Unified `- 24 +` stepper capsule
@@ -2486,7 +2469,7 @@ final class OverlayCanvasView: NSView {
 
             if isActive {
                 let ring = swRect.insetBy(dx: -2.4 * uis, dy: -2.4 * uis)
-                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.95))
+                ctx.setStrokeColor(dark ? CGColor(srgbRed: 0.94, green: 0.94, blue: 0.96, alpha: 0.92) : CGColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 0.90))
                 ctx.setLineWidth(1.4 * uis)
                 ctx.strokeEllipse(in: ring)
 
@@ -2681,7 +2664,7 @@ final class OverlayCanvasView: NSView {
             ctx.strokeEllipse(in: qr)
             if qc == liveColor {
                 let ring = qr.insetBy(dx: -1.8, dy: -1.8)
-                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.92))
+                ctx.setStrokeColor(dark ? CGColor(srgbRed: 0.94, green: 0.94, blue: 0.96, alpha: 0.90) : CGColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 0.88))
                 ctx.setLineWidth(1.3)
                 ctx.strokeEllipse(in: ring)
             }
@@ -2692,11 +2675,15 @@ final class OverlayCanvasView: NSView {
     }
 
     private func drawTooltipBubble(in ctx: CGContext, text: String, anchor: CGRect) {
+        let dark = isDarkTheme
         let font = NSFont.systemFont(ofSize: 11.0, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(calibratedWhite: 0.97, alpha: 1)]
+        let fg = dark
+            ? NSColor(srgbRed: 0.957, green: 0.957, blue: 0.965, alpha: 1)
+            : NSColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 1)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
         let sz = (text as NSString).size(withAttributes: attrs)
         let w = (sz.width + 14).rounded()
-        let h = (sz.height + 7).rounded()
+        let h = (sz.height + 8).rounded()
         let x = max(6, min(bounds.width - w - 6, (anchor.midX - w * 0.5).rounded()))
         var placedBelow = true
         var y = (anchor.maxY + 7).rounded()
@@ -2707,7 +2694,7 @@ final class OverlayCanvasView: NSView {
         let rect = CGRect(x: x, y: y, width: w, height: h)
         let path = makeCalloutBubblePath(
             rect: rect,
-            cornerRadius: 5.5,
+            cornerRadius: 6.0,
             arrowX: anchor.midX,
             arrowOnTop: placedBelow,
             arrowWidth: 8.5,
@@ -2717,10 +2704,10 @@ final class OverlayCanvasView: NSView {
             in: ctx,
             path: path,
             sampleRect: rect,
-            dark: true,
+            dark: dark,
             shadowOffsetY: 2.0,
             shadowBlur: 8.0,
-            shadowAlpha: 0.26
+            shadowAlpha: dark ? 0.30 : 0.14
         )
         (text as NSString).draw(
             at: NSPoint(x: rect.minX + (w - sz.width) * 0.5, y: rect.minY + (h - sz.height) * 0.5),
@@ -2729,21 +2716,25 @@ final class OverlayCanvasView: NSView {
     }
 
     private func drawCancelConfirmBanner(in ctx: CGContext, message: String) {
+        let dark = isDarkTheme
         let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(calibratedWhite: 0.98, alpha: 1)]
+        let fg = dark
+            ? NSColor(srgbRed: 0.957, green: 0.957, blue: 0.965, alpha: 1)
+            : NSColor(srgbRed: 0.094, green: 0.094, blue: 0.106, alpha: 1)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
         let sz = (message as NSString).size(withAttributes: attrs)
         let w = (sz.width + 28).rounded()
-        let h = (sz.height + 13).rounded()
+        let h = (sz.height + 14).rounded()
         let rect = CGRect(x: (bounds.midX - w * 0.5).rounded(), y: 32, width: w, height: h)
-        let path = CGPath(roundedRect: rect, cornerWidth: h * 0.5, cornerHeight: h * 0.5, transform: nil)
+        let path = CGPath(roundedRect: rect, cornerWidth: 8.5, cornerHeight: 8.5, transform: nil)
         drawFrostedMaterial(
             in: ctx,
             path: path,
             sampleRect: rect,
-            dark: true,
+            dark: dark,
             shadowOffsetY: 3.0,
             shadowBlur: 12.0,
-            shadowAlpha: 0.28
+            shadowAlpha: dark ? 0.32 : 0.16
         )
         (message as NSString).draw(
             at: NSPoint(x: rect.minX + (w - sz.width) * 0.5, y: rect.minY + (h - sz.height) * 0.5),
