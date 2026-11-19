@@ -1369,6 +1369,12 @@ public enum SmokeTestRunner {
             }
             guard pinRestoreOK else { return false }
 
+            guard MainActor.assumeIsolated({
+                checkUnfocusedPinAcceptsFirstMouse(image: baseCG)
+            }) else {
+                return false
+            }
+
             print("smoke-test: ok (iSnip v\(UpdateChecker.currentVersion))")
             return true
         } catch {
@@ -1568,5 +1574,42 @@ public enum SmokeTestRunner {
             view.mouseDown(with: down)
             view.mouseUp(with: up)
         }
+    }
+
+    @MainActor
+    private static func checkUnfocusedPinAcceptsFirstMouse(image: CGImage) -> Bool {
+        _ = NSApplication.shared
+        let pinManager = PinManager()
+        let size = NSSize(width: image.width, height: image.height)
+        let pin = PinWindowController(
+            cgImage: image,
+            baseSize: size,
+            backingScale: 1,
+            origin: .zero,
+            showBorder: true,
+            manager: pinManager
+        )
+        let window = pin.window
+        guard !window.isKeyWindow, let pinView = window.contentView else {
+            fputs("FAIL: First-mouse check needs an unfocused pin with a content view\n", stderr)
+            return false
+        }
+        guard let mouseDown = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: size.width / 2, y: size.height / 2),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        ) else {
+            fputs("FAIL: Could not create the pin's first mouse-down event\n", stderr)
+            return false
+        }
+        guard pinView.acceptsFirstMouse(for: mouseDown) else {
+            fputs("FAIL: An unfocused pin should accept the first mouse press\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 失焦贴图接收首次鼠标按下")
+        return true
     }
 }
