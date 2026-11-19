@@ -1762,6 +1762,15 @@ private struct EditorDefaultsPane: View {
                     }
                 }
             }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: L10n.tr("贴图标注时遮住桌面", "Cover Desktop When Annotating Pins", in: lang)) {
+                MagpieBooleanSwitch(isOn: Binding(
+                    get: { app.config.pinAnnotationCoversDesktop },
+                    set: { enabled in app.updateConfig { $0.pinAnnotationCoversDesktop = enabled } }
+                ))
+            }
         }
     }
 }

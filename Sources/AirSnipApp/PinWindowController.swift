@@ -8,6 +8,7 @@ public final class PinManager: ObservableObject {
     private var closedPins: [PinWindowController] = []
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
+    var onWillCloseAll: (() -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
@@ -91,6 +92,7 @@ public final class PinManager: ObservableObject {
     }
 
     public func closeAll() {
+        onWillCloseAll?()
         let pins = windows
         for pin in pins {
             pin.window.orderOut(nil)
@@ -179,16 +181,25 @@ public final class PinWindowController: NSObject {
         window.makeFirstResponder(contentView)
     }
 
-    func finishInlineEdit(image: CGImage? = nil) {
+    func finishAnnotation(image: CGImage? = nil, preserveGeometry: Bool = false) {
         guard manager?.windows.contains(where: { $0 === self }) == true else { return }
         if let image {
-            updateImage(image)
+            if preserveGeometry {
+                applyAnnotatedImage(image)
+            } else {
+                updateImage(image)
+            }
         }
         show()
     }
 
+    private func applyAnnotatedImage(_ image: CGImage) {
+        cgImage = image
+        contentView.needsDisplay = true
+    }
+
     public func updateImage(_ newImage: CGImage) {
-        self.cgImage = newImage
+        applyAnnotatedImage(newImage)
         self.baseSize = NSSize(
             width: max(32.0, Double(newImage.width) / max(1.0, backingScale)),
             height: max(32.0, Double(newImage.height) / max(1.0, backingScale))
@@ -200,7 +211,6 @@ public final class PinWindowController: NSObject {
         frame.origin = NSPoint(x: center.x - baseSize.width * 0.5, y: center.y - baseSize.height * 0.5)
         window.setFrame(frame, display: true)
         contentView.frame = NSRect(origin: .zero, size: baseSize)
-        contentView.needsDisplay = true
     }
 
     public func setShowBorder(_ on: Bool) {
@@ -258,7 +268,7 @@ public final class PinWindowController: NSObject {
         contentView.needsDisplay = true
     }
 
-    public func requestInlineAnnotate() {
+    public func requestAnnotation() {
         manager?.onRequestAnnotatePin?(self)
     }
 
@@ -429,7 +439,7 @@ private final class PinCanvasView: NSView {
         case kVK_Escape:
             owner.closeSelf()
         case kVK_Space:
-            owner.requestInlineAnnotate()
+            owner.requestAnnotation()
         case kVK_ANSI_T:
             owner.requestOCR()
         case kVK_LeftArrow:
@@ -519,7 +529,7 @@ private final class PinCanvasView: NSView {
         return menu
     }
 
-    @objc private func onEdit() { owner?.requestInlineAnnotate() }
+    @objc private func onEdit() { owner?.requestAnnotation() }
     @objc private func onOCR() { owner?.requestOCR() }
     @objc private func onCopy() { owner?.copyToClipboard() }
     @objc private func onSave() { owner?.savePin(forceDialog: false) }

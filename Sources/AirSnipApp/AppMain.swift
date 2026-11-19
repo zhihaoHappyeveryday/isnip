@@ -42,7 +42,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             self?.updateConfig(block)
         }
         pinManager.onRequestAnnotatePin = { [weak self] pin in
-            self?.startPinInlineEditSession(pin: pin)
+            self?.startPinAnnotation(pin: pin)
+        }
+        pinManager.onWillCloseAll = { [weak self] in
+            self?.activeCaptureSession?.closeWithAllPins()
         }
         pinManager.onRequestOCRPin = { [weak self] pin in
             guard let self else { return }
@@ -158,6 +161,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if config.pinHistoryLimit != oldPinHistoryLimit {
             pinManager.trimClosedHistory(to: config.pinHistoryLimit)
         }
+        activeCaptureSession?.refreshWindowedPinConfig(config)
         L10n.current = config.language
         try? config.save(to: configURL)
         if config.language != oldLang {
@@ -552,12 +556,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         }
     }
 
-    private func startPinInlineEditSession(pin: PinWindowController) {
+    private func startPinAnnotation(pin: PinWindowController) {
         cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil, activeLongshotSession == nil else { return }
-        let coordinator = makeSessionCoordinator(mode: .inlinePinEdit(pin))
+        let coordinator = makeSessionCoordinator(mode: .pinAnnotation(pin))
         activeCaptureSession = coordinator
-        coordinator.startPinInlineEdit(pin: pin)
+        coordinator.startPinAnnotation()
     }
 
     private func startStandaloneAnnotateSession(image: CGImage, scale: Double, screen: NSScreen) {

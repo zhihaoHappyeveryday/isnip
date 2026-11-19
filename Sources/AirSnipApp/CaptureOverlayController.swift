@@ -82,6 +82,29 @@ struct ToolbarVerificationSample {
     var buttonIDs: [String] { buttons.map { $0.id } }
 }
 
+fileprivate enum OverlayPresentation {
+    case fullscreen
+    case windowedPin(level: NSWindow.Level, opacity: CGFloat, toolbarScale: CGFloat)
+
+    var windowedToolbarScale: CGFloat? {
+        guard case .windowedPin(_, _, let scale) = self else { return nil }
+        return scale
+    }
+}
+
+fileprivate struct AnnotationImage {
+    let cgImage: CGImage
+    let rawBuffer: PixelBufferRGBA
+    let pixelsPerPoint: CGSize
+    let outputScale: Double
+    let window: (ownerName: String, includeShadow: Bool)?
+}
+
+fileprivate enum OverlayCanvasSource {
+    case screen(CapturedScreenSnapshot, lockedSelection: ASRect? = nil)
+    case fixedImage(AnnotationImage, displayRect: ASRect)
+}
+
 @MainActor
 public final class CaptureSessionCoordinator {
     public enum SessionMode {
@@ -89,7 +112,7 @@ public final class CaptureSessionCoordinator {
         case directWindowCapture
         case directOCRCapture
         case directLongshotCapture
-        case inlinePinEdit(PinWindowController)
+        case pinAnnotation(PinWindowController)
         case standaloneImageEdit(CGImage, Double, NSScreen)
     }
 
@@ -108,9 +131,13 @@ public final class CaptureSessionCoordinator {
         return false
     }
 
-    public var isInlinePinEdit: Bool {
-        if case .inlinePinEdit = mode { return true }
-        return false
+    public var isPinAnnotation: Bool {
+        pinBeingAnnotated != nil
+    }
+
+    private var pinBeingAnnotated: PinWindowController? {
+        guard case .pinAnnotation(let pin) = mode else { return nil }
+        return pin
     }
 
     public var canToggleWindowPickerWithSpace: Bool {
@@ -124,6 +151,7 @@ public final class CaptureSessionCoordinator {
 
     private var screenControllers: [OverlayScreenController] = []
     private(set) var config: AirSnipConfig
+    fileprivate let presentation: OverlayPresentation
     public let mode: SessionMode
 
     public var onCompleteCopy: ((CGImage, Double) -> Void)?
@@ -137,6 +165,16 @@ public final class CaptureSessionCoordinator {
     public init(config: AirSnipConfig, mode: SessionMode = .normalCapture) {
         self.config = config
         self.mode = mode
+        if case .pinAnnotation(let pin) = mode, !config.pinAnnotationCoversDesktop {
+            // Keep panel geometry and toolbar scale in sync throughout the session.
+            presentation = .windowedPin(
+                level: pin.window.level,
+                opacity: pin.opacity,
+                toolbarScale: CGFloat(config.uiScale.factor)
+            )
+        } else {
+            presentation = .fullscreen
+        }
     }
 
     public var activeWindowNumbers: Set<Int> {
@@ -199,12 +237,18 @@ public final class CaptureSessionCoordinator {
         (targetController ?? screenControllers.first)?.focusWindow()
     }
 
-    public func startPinInlineEdit(pin: PinWindowController) {
-        guard let screen = pin.window.screen ?? NSScreen.main ?? NSScreen.screens.first,
+    public func startPinAnnotation() {
+        guard let pin = pinBeingAnnotated,
+              let screen = pin.window.screen ?? NSScreen.main ?? NSScreen.screens.first,
               let rawBuf = PixelBufferRGBA(cgImage: pin.cgImage) else {
             onSessionEnded?()
             return
         }
+        if case .windowedPin(_, _, let toolbarScale) = presentation {
+            startWindowedPinAnnotation(pin: pin, screen: screen, rawBuffer: rawBuf, toolbarScale: toolbarScale)
+            return
+        }
+
         // Build a synthetic full-screen snapshot with the pin's image placed at its current window position
         let sFrame = screen.frame
         let scale = pin.backingScale
@@ -268,6 +312,53 @@ public final class CaptureSessionCoordinator {
         let ctrl = OverlayScreenController(snapshot: snap, coordinator: self, lockedInitialSelection: selTopDown)
         screenControllers.append(ctrl)
         ctrl.show()
+        ctrl.focusWindow()
+    }
+
+    private func startWindowedPinAnnotation(
+        pin: PinWindowController, screen: NSScreen, rawBuffer: PixelBufferRGBA, toolbarScale: CGFloat
+    ) {
+        let pinFrame = pin.window.frame
+        let visible = screen.visibleFrame
+        // Reserve room for the toolbar, its style row and the color picker.
+        let width = min(visible.width, 520 * toolbarScale)
+        let height = 110 * toolbarScale + 224
+        let x = min(max(visible.minX, pinFrame.maxX - width), visible.maxX - width)
+        let spaceBelow = pinFrame.minY - visible.minY
+        let spaceAbove = visible.maxY - pinFrame.maxY
+        let below = spaceBelow >= height || spaceBelow >= spaceAbove
+        let extra = min(height, max(0, below ? spaceBelow : spaceAbove))
+        let chrome = CGRect(
+            x: x,
+            y: pinFrame.minY - (below ? extra : 0),
+            width: width,
+            height: pinFrame.height + extra
+        )
+        let frame = pinFrame.union(chrome)
+        let selection = ASRect(
+            x: pinFrame.minX - frame.minX,
+            y: frame.maxY - pinFrame.maxY,
+            width: pinFrame.width,
+            height: pinFrame.height
+        )
+        let image = AnnotationImage(
+            cgImage: pin.cgImage,
+            rawBuffer: rawBuffer,
+            pixelsPerPoint: CGSize(
+                width: CGFloat(rawBuffer.width) / pinFrame.width,
+                height: CGFloat(rawBuffer.height) / pinFrame.height
+            ),
+            outputScale: pin.backingScale,
+            window: nil
+        )
+        let ctrl = OverlayScreenController(
+            screen: screen,
+            frameInGlobalAppKit: frame,
+            source: .fixedImage(image, displayRect: selection),
+            coordinator: self
+        )
+        pin.window.orderOut(nil)
+        screenControllers.append(ctrl)
         ctrl.focusWindow()
     }
 
@@ -357,15 +448,18 @@ public final class CaptureSessionCoordinator {
         onUpdatePreferences?(change)
     }
 
-    func finishWithCopy(image: CGImage, scale: Double) {
-        if case .inlinePinEdit(let pin) = mode {
-            closeAllWindows()
-            pin.finishInlineEdit(image: image)
-            onSessionEnded?()
-            return
-        }
+    func refreshWindowedPinConfig(_ config: AirSnipConfig) {
+        guard case .windowedPin = presentation else { return }
+        self.config = config
+    }
+
+    func finishPrimaryAction(image: CGImage, scale: Double) {
         closeAllWindows()
-        onCompleteCopy?(image, scale)
+        if let pin = pinBeingAnnotated {
+            applyAnnotation(image, to: pin)
+        } else {
+            onCompleteCopy?(image, scale)
+        }
         onSessionEnded?()
     }
 
@@ -373,9 +467,7 @@ public final class CaptureSessionCoordinator {
         if !forceDialog && !config.askBeforeSave {
             closeAllWindows()
             _ = onSaveImage?(image, scale, false, config)
-            if case .inlinePinEdit(let pin) = mode {
-                pin.finishInlineEdit(image: image)
-            }
+            if let pin = pinBeingAnnotated { applyAnnotation(image, to: pin) }
             onSessionEnded?()
             return
         }
@@ -386,9 +478,7 @@ public final class CaptureSessionCoordinator {
         }
         let saved = onSaveImage?(image, scale, true, config) ?? false
         if saved {
-            if case .inlinePinEdit(let pin) = mode {
-                pin.finishInlineEdit(image: image)
-            }
+            if let pin = pinBeingAnnotated { applyAnnotation(image, to: pin) }
             closeAllWindows()
             onSessionEnded?()
         } else {
@@ -400,21 +490,21 @@ public final class CaptureSessionCoordinator {
     }
 
     func finishWithPin(image: CGImage, scale: Double, appKitOrigin: CGPoint?) {
-        if case .inlinePinEdit(let pin) = mode {
-            closeAllWindows()
-            pin.finishInlineEdit(image: image)
-            onSessionEnded?()
-            return
-        }
         closeAllWindows()
-        onCompletePin?(image, scale, appKitOrigin)
+        if let pin = pinBeingAnnotated {
+            applyAnnotation(image, to: pin)
+        } else {
+            onCompletePin?(image, scale, appKitOrigin)
+        }
         onSessionEnded?()
     }
 
+    private func applyAnnotation(_ image: CGImage, to pin: PinWindowController) {
+        pin.finishAnnotation(image: image, preserveGeometry: presentation.windowedToolbarScale != nil)
+    }
+
     func finishWithOCR(rawImage: CGImage, anchorScreenPoint: NSPoint?) {
-        if case .inlinePinEdit(let pin) = mode {
-            pin.finishInlineEdit()
-        }
+        pinBeingAnnotated?.finishAnnotation()
         closeAllWindows()
         onStartOCR?(rawImage, anchorScreenPoint)
         onSessionEnded?()
@@ -432,12 +522,13 @@ public final class CaptureSessionCoordinator {
     }
 
     public func cancelSession() {
-        if case .inlinePinEdit(let pin) = mode {
-            closeAllWindows()
-            pin.finishInlineEdit()
-            onSessionEnded?()
-            return
-        }
+        closeAllWindows()
+        pinBeingAnnotated?.finishAnnotation()
+        onSessionEnded?()
+    }
+
+    func closeWithAllPins() {
+        guard isPinAnnotation else { return }
         closeAllWindows()
         onSessionEnded?()
     }
@@ -457,15 +548,29 @@ final class OverlayScreenController {
     let canvasView: OverlayCanvasView
     weak var coordinator: CaptureSessionCoordinator?
 
-    init(
+    convenience init(
         snapshot: CapturedScreenSnapshot,
         coordinator: CaptureSessionCoordinator,
         lockedInitialSelection: ASRect? = nil
     ) {
+        self.init(
+            screen: snapshot.screen,
+            frameInGlobalAppKit: snapshot.frameInGlobalAppKit,
+            source: .screen(snapshot, lockedSelection: lockedInitialSelection),
+            coordinator: coordinator
+        )
+    }
+
+    fileprivate init(
+        screen: NSScreen,
+        frameInGlobalAppKit: CGRect,
+        source: OverlayCanvasSource,
+        coordinator: CaptureSessionCoordinator
+    ) {
         self.coordinator = coordinator
-        self.expectedFrame = snapshot.frameInGlobalAppKit
+        self.expectedFrame = frameInGlobalAppKit
         let p = OverlayPanel(
-            contentRect: snapshot.frameInGlobalAppKit,
+            contentRect: frameInGlobalAppKit,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -474,18 +579,26 @@ final class OverlayScreenController {
         p.hidesOnDeactivate = false
         p.isFloatingPanel = true
         p.becomesKeyOnlyIfNeeded = false
-        p.isOpaque = true
+        switch coordinator.presentation {
+        case .windowedPin(let level, let opacity, _):
+            p.isOpaque = false
+            p.backgroundColor = .clear
+            p.level = level
+            p.alphaValue = opacity
+        case .fullscreen:
+            p.isOpaque = true
+            p.level = .screenSaver
+        }
         p.hasShadow = false
-        p.level = .screenSaver
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         p.acceptsMouseMovedEvents = true
-        p.setFrame(snapshot.frameInGlobalAppKit, display: false)
+        p.setFrame(frameInGlobalAppKit, display: false)
 
         let view = OverlayCanvasView(
-            frame: NSRect(origin: .zero, size: snapshot.frameInGlobalAppKit.size),
-            snapshot: snapshot,
-            coordinator: coordinator,
-            lockedInitialSelection: lockedInitialSelection
+            screen: screen,
+            frameInGlobalAppKit: frameInGlobalAppKit,
+            source: source,
+            coordinator: coordinator
         )
         p.contentView = view
         self.panel = p
@@ -517,23 +630,40 @@ final class OverlayCanvasView: NSView {
 
     weak var ownerController: OverlayScreenController?
     weak var coordinator: CaptureSessionCoordinator?
-
-    private struct IsolatedWindowCapture {
-        let rawImage: CGImage
-        let rawBuffer: PixelBufferRGBA
-        let pixelScale: Double
-        var includeShadow: Bool
-        let ownerName: String
-        var isWindowCapture: Bool = true
+    private let presentation: OverlayPresentation
+    private var isWindowedPinAnnotation: Bool {
+        if case .windowedPin = presentation { return true }
+        return false
     }
 
-    private var snapshot: CapturedScreenSnapshot
+    private let screen: NSScreen
+    private let frameInGlobalAppKit: CGRect
+    private var source: OverlayCanvasSource
+    private var foregroundImage: AnnotationImage?
+
+    private var screenSnapshot: CapturedScreenSnapshot? {
+        if case .screen(let snapshot, _) = source { return snapshot }
+        return nil
+    }
+
+    private var annotationImage: AnnotationImage? {
+        if case .fixedImage(let image, _) = source { return image }
+        return foregroundImage
+    }
+
+    private var canvasBackingScale: Double {
+        switch source {
+        case .screen(let snapshot, _): return snapshot.backingScale
+        case .fixedImage(let image, _): return image.outputScale
+        }
+    }
+
+    private var windowCandidates: [WindowSnapCandidate] { screenSnapshot?.windowsLocalTopDown ?? [] }
     private var selection: ASRect?
     private var selectionLocked: Bool
     private var windowPickerMode: Bool
     private var windowDepthIndex: Int = 0
     private var hoveredWindowCandidate: WindowSnapCandidate?
-    private var isolatedWindowCapture: IsolatedWindowCapture?
     private var isCapturingIsolatedWindow: Bool = false
     private var cursorPoint: ASPoint = ASPoint(200, 200)
 
@@ -580,6 +710,19 @@ final class OverlayCanvasView: NSView {
     private var mainToolbarRect: CGRect = .zero
     private var secondRowRect: CGRect = .zero
 
+    private var toolbarBounds: CGRect {
+        guard isWindowedPinAnnotation else { return bounds }
+        let visible = screen.visibleFrame
+        let frame = frameInGlobalAppKit
+        let local = bounds.intersection(CGRect(
+            x: visible.minX - frame.minX,
+            y: frame.maxY - visible.maxY,
+            width: visible.width,
+            height: visible.height
+        ))
+        return local.isEmpty ? bounds : local
+    }
+
     // Hover & press state + tooltip (EDT-10: 400ms delay)
     private var hoveredItemID: String?
     private var pressedItemID: String?
@@ -616,6 +759,7 @@ final class OverlayCanvasView: NSView {
 
     // Cached full-screen Gaussian-approximated backdrop for 120Hz Liquid Glass translucency
     private lazy var blurredBackdropCGImage: CGImage? = {
+        guard let snapshot = screenSnapshot else { return nil }
         let srcW = snapshot.cgImage.width
         let srcH = snapshot.cgImage.height
         let dsW = max(64, srcW / 4)
@@ -639,14 +783,17 @@ final class OverlayCanvasView: NSView {
         return BoxBlurEngine.blur(downsampled, radius: 10).makeCGImage()
     }()
 
-    init(
-        frame: NSRect,
-        snapshot: CapturedScreenSnapshot,
-        coordinator: CaptureSessionCoordinator,
-        lockedInitialSelection: ASRect?
+    fileprivate init(
+        screen: NSScreen,
+        frameInGlobalAppKit: CGRect,
+        source: OverlayCanvasSource,
+        coordinator: CaptureSessionCoordinator
     ) {
-        self.snapshot = snapshot
+        self.screen = screen
+        self.frameInGlobalAppKit = frameInGlobalAppKit
+        self.source = source
         self.coordinator = coordinator
+        self.presentation = coordinator.presentation
         let cfg = coordinator.config
         self.activeTool = nil
         self.activeColorIndex = cfg.toolbar.settleColorIndex(cfg.activeColorIndex)
@@ -658,17 +805,22 @@ final class OverlayCanvasView: NSView {
         self.currentFontFamily = cfg.defaultFontFamily
         self.textBold = cfg.defaultFontBold
         self.textItalic = cfg.defaultFontItalic
-        self.selection = lockedInitialSelection
-        self.selectionLocked = (lockedInitialSelection != nil)
-        self.windowPickerMode = (lockedInitialSelection == nil) && coordinator.isDirectWindowCapture
+        let initialSelection: ASRect?
+        switch source {
+        case .screen(_, let lockedSelection): initialSelection = lockedSelection
+        case .fixedImage(_, let displayRect): initialSelection = displayRect
+        }
+        self.selection = initialSelection
+        self.selectionLocked = initialSelection != nil
+        self.windowPickerMode = initialSelection == nil && coordinator.isDirectWindowCapture
 
         let globalMouse = NSEvent.mouseLocation
-        let sf = snapshot.frameInGlobalAppKit
+        let sf = frameInGlobalAppKit
         let initX = max(0, min(Double(sf.width), Double(globalMouse.x - sf.minX)))
         let initY = max(0, min(Double(sf.height), Double(sf.maxY - globalMouse.y)))
         let initPt = ASPoint(initX, initY)
         self.cursorPoint = initPt
-        if lockedInitialSelection == nil && (coordinator.isDirectWindowCapture || cfg.windowSnap) {
+        if case .screen(let snapshot, nil) = source, coordinator.isDirectWindowCapture || cfg.windowSnap {
             self.hoveredWindowCandidate = WindowSnapResolver.resolveCandidate(
                 at: initPt,
                 candidatesFrontToBack: snapshot.windowsLocalTopDown,
@@ -678,7 +830,7 @@ final class OverlayCanvasView: NSView {
             self.hoveredWindowCandidate = nil
         }
 
-        super.init(frame: frame)
+        super.init(frame: NSRect(origin: .zero, size: frameInGlobalAppKit.size))
 
         let area = NSTrackingArea(
             rect: bounds,
@@ -691,10 +843,14 @@ final class OverlayCanvasView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        isWindowedPinAnnotation || super.acceptsFirstMouse(for: event)
+    }
+
     func resetSelectionState() {
         guard !selectionLocked else { return }
         commitInlineEditorsIfNeeded()
-        isolatedWindowCapture = nil
+        foregroundImage = nil
         selection = nil
         activeTool = nil
         pressedItemID = nil
@@ -704,14 +860,17 @@ final class OverlayCanvasView: NSView {
         needsDisplay = true
     }
 
-    func attachStandaloneSourceImage(cgImage: CGImage, rawBuffer: PixelBufferRGBA, pixelScale: Double) {
-        isolatedWindowCapture = IsolatedWindowCapture(
-            rawImage: cgImage,
+    func attachStandaloneSourceImage(
+        cgImage: CGImage,
+        rawBuffer: PixelBufferRGBA,
+        pixelScale: Double
+    ) {
+        foregroundImage = AnnotationImage(
+            cgImage: cgImage,
             rawBuffer: rawBuffer,
-            pixelScale: pixelScale,
-            includeShadow: false,
-            ownerName: "",
-            isWindowCapture: false
+            pixelsPerPoint: CGSize(width: pixelScale, height: pixelScale),
+            outputScale: canvasBackingScale,
+            window: nil
         )
         needsDisplay = true
     }
@@ -734,15 +893,19 @@ final class OverlayCanvasView: NSView {
         return bakeCurrentSelectionOutput(applyWindowShadow: true)
     }
 
+    func toolbarItemRect(id: String) -> CGRect? {
+        toolbarHitItems.first { $0.id == id }?.rect
+    }
+
     func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
         guard let rawBuf = PixelBufferRGBA(cgImage: windowImage) else { return nil }
         let pxScale = Double(windowImage.width) / max(1.0, rect.width)
-        isolatedWindowCapture = IsolatedWindowCapture(
-            rawImage: windowImage,
+        foregroundImage = AnnotationImage(
+            cgImage: windowImage,
             rawBuffer: rawBuf,
-            pixelScale: pxScale,
-            includeShadow: includeShadow,
-            ownerName: "SampleApp"
+            pixelsPerPoint: CGSize(width: pxScale, height: pxScale),
+            outputScale: pxScale,
+            window: (ownerName: "SampleApp", includeShadow: includeShadow)
         )
         selection = rect
         selectionLocked = true
@@ -760,7 +923,7 @@ final class OverlayCanvasView: NSView {
             select: false
         )
         let out = bakeCurrentSelectionOutput(applyWindowShadow: true)
-        isolatedWindowCapture = nil
+        foregroundImage = nil
         selection = nil
         selectionLocked = false
         document.clearAll()
@@ -869,7 +1032,7 @@ final class OverlayCanvasView: NSView {
     // MARK: - Pixel Snapping & Frosted Glass Material Helpers
 
     private func pixelSnap(_ value: CGFloat, lineWidth: CGFloat) -> CGFloat {
-        let s = CGFloat(max(1.0, snapshot.backingScale))
+        let s = CGFloat(max(1.0, canvasBackingScale))
         let pxW = max(1, Int((lineWidth * s).rounded()))
         if pxW % 2 == 0 {
             return (value * s).rounded() / s
@@ -953,36 +1116,39 @@ final class OverlayCanvasView: NSView {
             ? CGColor(srgbRed: 0.11, green: 0.12, blue: 0.14, alpha: 1.0)
             : CGColor(srgbRed: 0.96, green: 0.97, blue: 0.98, alpha: 1.0)
 
-        // 1. Dual physical shadow (ambient + crisp contact shadow) clipped OUTSIDE the glass body
-        ctx.saveGState()
-        let outside = CGMutablePath()
-        outside.addRect(bounds)
-        outside.addPath(path)
-        ctx.addPath(outside)
-        ctx.clip(using: .evenOdd)
+        // A shadow drawn into the pin panel would intercept clicks outside the toolbar.
+        if !isWindowedPinAnnotation {
+            // 1. Dual physical shadow (ambient + crisp contact shadow) clipped OUTSIDE the glass body
+            ctx.saveGState()
+            let outside = CGMutablePath()
+            outside.addRect(bounds)
+            outside.addPath(path)
+            ctx.addPath(outside)
+            ctx.clip(using: .evenOdd)
 
-        ctx.saveGState()
-        ctx.setShadow(
-            offset: CGSize(width: 0, height: shadowOffsetY),
-            blur: shadowBlur,
-            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: shadowAlpha)
-        )
-        ctx.addPath(path)
-        ctx.setFillColor(solidShadowFill)
-        ctx.fillPath()
-        ctx.restoreGState()
+            ctx.saveGState()
+            ctx.setShadow(
+                offset: CGSize(width: 0, height: shadowOffsetY),
+                blur: shadowBlur,
+                color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: shadowAlpha)
+            )
+            ctx.addPath(path)
+            ctx.setFillColor(solidShadowFill)
+            ctx.fillPath()
+            ctx.restoreGState()
 
-        ctx.saveGState()
-        ctx.setShadow(
-            offset: CGSize(width: 0, height: 1.0),
-            blur: 2.5,
-            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: dark ? 0.28 : 0.12)
-        )
-        ctx.addPath(path)
-        ctx.setFillColor(solidShadowFill)
-        ctx.fillPath()
-        ctx.restoreGState()
-        ctx.restoreGState()
+            ctx.saveGState()
+            ctx.setShadow(
+                offset: CGSize(width: 0, height: 1.0),
+                blur: 2.5,
+                color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: dark ? 0.28 : 0.12)
+            )
+            ctx.addPath(path)
+            ctx.setFillColor(solidShadowFill)
+            ctx.fillPath()
+            ctx.restoreGState()
+            ctx.restoreGState()
+        }
 
         // 2. Real underlying screen optical blur + vertical Liquid Glass tint wash
         ctx.saveGState()
@@ -1022,23 +1188,30 @@ final class OverlayCanvasView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        // 1. Draw frozen full-screen background upright in flipped coordinates
-        ctx.saveGState()
-        ctx.translateBy(x: 0, y: bounds.height)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(snapshot.cgImage, in: CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
-        ctx.restoreGState()
+        if let snapshot = screenSnapshot {
+            // 1. Draw frozen full-screen background upright in flipped coordinates
+            ctx.saveGState()
+            ctx.translateBy(x: 0, y: bounds.height)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(snapshot.cgImage, in: CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
+            ctx.restoreGState()
+        } else {
+            ctx.clear(dirtyRect)
+        }
 
         if let sel = selection, sel.width >= 1 && sel.height >= 1 {
-            if let iso = isolatedWindowCapture {
-                // Isolated Window Capture stage: dim frozen desktop softly and present the unoccluded window
-                ctx.saveGState()
-                ctx.setFillColor(CGColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 0.62))
-                ctx.fill(bounds)
-
+            if let image = annotationImage {
                 let r = sel.cgRect
+                if isWindowedPinAnnotation {
+                    // Transparent parts of the pin still need to receive drawing gestures.
+                    ctx.setFillColor(CGColor(gray: 0, alpha: 0.02))
+                    ctx.fill(r)
+                } else {
+                    ctx.setFillColor(CGColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 0.62))
+                    ctx.fill(bounds)
+                }
                 ctx.saveGState()
-                if iso.includeShadow {
+                if image.window?.includeShadow == true {
                     ctx.setShadow(
                         offset: CGSize(width: 0, height: 10.0),
                         blur: 26.0,
@@ -1048,16 +1221,15 @@ final class OverlayCanvasView: NSView {
                 ctx.translateBy(x: r.minX, y: r.maxY)
                 ctx.scaleBy(x: 1, y: -1)
                 ctx.interpolationQuality = .high
-                ctx.draw(iso.rawImage, in: CGRect(x: 0, y: 0, width: r.width, height: r.height))
-                ctx.restoreGState()
+                ctx.draw(image.cgImage, in: CGRect(x: 0, y: 0, width: r.width, height: r.height))
                 ctx.restoreGState()
 
                 AnnotationRenderer.drawAnnotations(
                     in: ctx,
                     objects: document.objects,
-                    rawBuffer: iso.rawBuffer,
+                    rawBuffer: image.rawBuffer,
                     rawOrigin: ASPoint(sel.minX, sel.minY),
-                    pixelScale: iso.pixelScale,
+                    pixelsPerPoint: image.pixelsPerPoint,
                     clipBounds: sel
                 )
 
@@ -1066,12 +1238,14 @@ final class OverlayCanvasView: NSView {
                     AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
                 }
 
-                let shadowTag = (iso.isWindowCapture && !iso.includeShadow) ? L10n.tr(" · 无阴影", " · No Shadow") : ""
-                let pillText = iso.ownerName.isEmpty
-                    ? "\(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
-                    : "\(iso.ownerName) · \(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
-                drawDimensionPill(in: ctx, selection: sel, text: pillText)
-            } else {
+                if !isWindowedPinAnnotation {
+                    let shadowTag = image.window?.includeShadow == false ? L10n.tr(" · 无阴影", " · No Shadow") : ""
+                    let ownerName = image.window?.ownerName ?? ""
+                    let dimensions = "\(image.cgImage.width) × \(image.cgImage.height)\(shadowTag)"
+                    let pillText = ownerName.isEmpty ? dimensions : "\(ownerName) · \(dimensions)"
+                    drawDimensionPill(in: ctx, selection: sel, text: pillText)
+                }
+            } else if let snapshot = screenSnapshot {
                 // 2. Dim outside selection
                 ctx.saveGState()
                 let dimPath = CGMutablePath()
@@ -1124,7 +1298,7 @@ final class OverlayCanvasView: NSView {
                     drawTooltipBubble(in: ctx, text: tip.text, anchor: tip.anchorRect)
                 }
             }
-        } else {
+        } else if let snapshot = screenSnapshot {
             toolbarHitItems.removeAll()
             // Unselected state: keep frozen screen completely still at 100% original brightness;
             // only dim outside a hovered window when window-snap or windowPickerMode highlights one.
@@ -1298,6 +1472,7 @@ final class OverlayCanvasView: NSView {
     }
 
     private func drawMagnifierHUD(in ctx: CGContext, at point: ASPoint) {
+        guard let snapshot = screenSnapshot else { return }
         let pxX = max(0, min(snapshot.rawBuffer.width - 1, Int((point.x * snapshot.backingScale).rounded())))
         let pxY = max(0, min(snapshot.rawBuffer.height - 1, Int((point.y * snapshot.backingScale).rounded())))
         let centerColor = snapshot.rawBuffer.pixel(x: pxX, y: pxY)
@@ -1464,7 +1639,7 @@ final class OverlayCanvasView: NSView {
         let vis = cfg.toolbar
         if vis.isEntireToolbarHidden { return }
 
-        let uis = CGFloat(cfg.uiScale.factor)
+        let uis = presentation.windowedToolbarScale ?? CGFloat(cfg.uiScale.factor)
         let btnSide: CGFloat = 28 * uis
         let padX: CGFloat = 9.5 * uis
         let padY: CGFloat = 4.5 * uis
@@ -1537,7 +1712,7 @@ final class OverlayCanvasView: NSView {
             )
         }
 
-        if vis.isVisible(.pin), !(coordinator?.isInlinePinEdit ?? false) {
+        if vis.isVisible(.pin), !(coordinator?.isPinAnnotation ?? false) {
             let pinKey = cfg.hotkeys.pin.isUnbound ? "" : " · \(cfg.hotkeys.pin.displayString(in: lang))"
             buttonsBySlot[.pin] = BarButtonSpec(
                 defaultZone: 1,
@@ -1611,7 +1786,7 @@ final class OverlayCanvasView: NSView {
                 selected: false,
                 enabled: true,
                 tooltip: L10n.tr("完成 · Enter", "Done · Enter", in: lang),
-                action: { [weak self] in self?.triggerCopyOutput() }
+                action: { [weak self] in self?.finishPrimaryAction() }
             )
         }
 
@@ -1625,8 +1800,9 @@ final class OverlayCanvasView: NSView {
         }
         let totalWidth = (padX * 2 + CGFloat(items.count) * btnSide + CGFloat(items.count - 1) * gap
             + CGFloat(dividerIndices.count) * groupDividerExtra).rounded()
+        let area = toolbarBounds
         var barX = (CGFloat(selection.maxX) - totalWidth).rounded()
-        barX = max(8, min(bounds.width - totalWidth - 8, barX))
+        barX = max(area.minX + 8, min(area.maxX - totalWidth - 8, barX))
 
         let subMode = currentStyleSubBarMode(vis: vis)
         let secondRowH: CGFloat = (subMode == .none) ? 0 : (33 * uis).rounded()
@@ -1634,15 +1810,15 @@ final class OverlayCanvasView: NSView {
         let totalStackH = barH + ((subMode == .none) ? 0 : (secondRowH + calloutGap))
 
         var barY = (CGFloat(selection.maxY) + 8.5).rounded()
-        if barY + totalStackH > bounds.height - 8 {
+        if barY + totalStackH > area.maxY - 8 {
             let aboveY = (CGFloat(selection.minY) - totalStackH - 8.5).rounded()
-            if aboveY >= 8 {
+            if aboveY >= area.minY + 8 {
                 barY = aboveY
             } else {
                 barY = (CGFloat(selection.maxY) - totalStackH - 8.5).rounded()
             }
         }
-        barY = max(8, min(bounds.height - barH - 8, barY))
+        barY = max(area.minY + 8, min(area.maxY - barH - 8, barY))
 
         let barRect = CGRect(x: barX, y: barY, width: totalWidth, height: barH)
         mainToolbarRect = barRect
@@ -1824,7 +2000,7 @@ final class OverlayCanvasView: NSView {
     ) {
         let cx = rect.midX
         let cy = rect.midY
-        let backing = CGFloat(max(1.0, snapshot.backingScale))
+        let backing = CGFloat(max(1.0, canvasBackingScale))
         // Snap stroke weight to exact integer physical pixels (2px on 2x Retina at 1.0x scale)
         let lw = max(1.0, (1.0 * uis * backing).rounded()) / backing
 
@@ -2111,13 +2287,14 @@ final class OverlayCanvasView: NSView {
         let targetCenter = anchorX ?? (mainBar.minX + min(mainBar.width * 0.5, rowW * 0.5))
         var rowX = (targetCenter - rowW * 0.5).rounded()
         // Keep sub-bar comfortably within horizontal bounds and visually connected to mainBar
-        let minConnectedX = max(8, mainBar.minX - 24 * uis)
-        let maxConnectedX = min(bounds.width - rowW - 8, max(minConnectedX, mainBar.maxX - rowW + 24 * uis))
+        let area = toolbarBounds
+        let minConnectedX = max(area.minX + 8, mainBar.minX - 24 * uis)
+        let maxConnectedX = min(area.maxX - rowW - 8, max(minConnectedX, mainBar.maxX - rowW + 24 * uis))
         rowX = max(minConnectedX, min(maxConnectedX, rowX))
-        rowX = max(8, min(bounds.width - rowW - 8, rowX))
+        rowX = max(area.minX + 8, min(area.maxX - rowW - 8, rowX))
 
         let calloutGap: CGFloat = 7 * uis
-        let placedBelow = (mainBar.maxY + height + calloutGap <= bounds.height - 6)
+        let placedBelow = (mainBar.maxY + height + calloutGap <= area.maxY - 6)
         let rowY = (placedBelow ? (mainBar.maxY + calloutGap) : (mainBar.minY - height - calloutGap)).rounded()
         let rect = CGRect(x: rowX, y: rowY, width: rowW, height: height)
         secondRowRect = rect
@@ -2501,16 +2678,17 @@ final class OverlayCanvasView: NSView {
         let ph: CGFloat = 202
         let anchorBar = (secondRowRect != .zero) ? secondRowRect : mainToolbarRect
         let swatchItem = toolbarHitItems.first(where: { $0.id == "swatch.\(picker.swatchIndex)" })?.rect ?? anchorBar
+        let area = toolbarBounds
         var px = (swatchItem.midX - pw * 0.5).rounded()
-        px = max(8, min(bounds.width - pw - 8, px))
+        px = max(area.minX + 8, min(area.maxX - pw - 8, px))
 
         let stackBottom = max(mainToolbarRect.maxY, secondRowRect.maxY)
         let stackTop = (secondRowRect != .zero) ? min(mainToolbarRect.minY, secondRowRect.minY) : mainToolbarRect.minY
         let calloutGap: CGFloat = 8
         var placedBelow = true
         var py = (stackBottom + calloutGap).rounded()
-        if py + ph > bounds.height - 8 {
-            py = max(8, (stackTop - ph - calloutGap).rounded())
+        if py + ph > area.maxY - 8 {
+            py = max(area.minY + 8, (stackTop - ph - calloutGap).rounded())
             placedBelow = false
         }
 
@@ -2677,10 +2855,11 @@ final class OverlayCanvasView: NSView {
         let sz = (text as NSString).size(withAttributes: attrs)
         let w = (sz.width + 14).rounded()
         let h = (sz.height + 8).rounded()
-        let x = max(6, min(bounds.width - w - 6, (anchor.midX - w * 0.5).rounded()))
+        let area = toolbarBounds
+        let x = max(area.minX + 6, min(area.maxX - w - 6, (anchor.midX - w * 0.5).rounded()))
         var placedBelow = true
         var y = (anchor.maxY + 7).rounded()
-        if y + h > bounds.height - 6 {
+        if y + h > area.maxY - 6 {
             y = (anchor.minY - h - 7).rounded()
             placedBelow = false
         }
@@ -2718,7 +2897,8 @@ final class OverlayCanvasView: NSView {
         let sz = (message as NSString).size(withAttributes: attrs)
         let w = (sz.width + 28).rounded()
         let h = (sz.height + 14).rounded()
-        let rect = CGRect(x: (bounds.midX - w * 0.5).rounded(), y: 32, width: w, height: h)
+        let area = toolbarBounds
+        let rect = CGRect(x: (area.midX - w * 0.5).rounded(), y: area.minY + 32, width: w, height: h)
         let path = CGPath(roundedRect: rect, cornerWidth: 8.5, cornerHeight: 8.5, transform: nil)
         drawFrostedMaterial(
             in: ctx,
@@ -2790,12 +2970,12 @@ final class OverlayCanvasView: NSView {
             if hoveredResizeHandle != nil { hoveredResizeHandle = nil }
             let prevFrontID = WindowSnapResolver.resolveCandidate(
                 at: cursorPoint,
-                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                candidatesFrontToBack: windowCandidates,
                 allowMaximizedSnap: true
             )?.windowID
             let nextFrontID = WindowSnapResolver.resolveCandidate(
                 at: pt,
-                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                candidatesFrontToBack: windowCandidates,
                 allowMaximizedSnap: true
             )?.windowID
             if prevFrontID != nextFrontID {
@@ -2875,7 +3055,7 @@ final class OverlayCanvasView: NSView {
         if windowPickerMode {
             return WindowSnapResolver.resolveCandidate(
                 at: pt,
-                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                candidatesFrontToBack: windowCandidates,
                 allowMaximizedSnap: true,
                 depthIndex: windowDepthIndex
             )
@@ -2883,7 +3063,7 @@ final class OverlayCanvasView: NSView {
         guard coordinator?.config.windowSnap == true else { return nil }
         return WindowSnapResolver.resolveCandidate(
             at: pt,
-            candidatesFrontToBack: snapshot.windowsLocalTopDown,
+            candidatesFrontToBack: windowCandidates,
             allowMaximizedSnap: coordinator?.isDirectLongshotCapture == true
         )
     }
@@ -3096,7 +3276,7 @@ final class OverlayCanvasView: NSView {
                     break
                 }
             } else {
-                triggerCopyOutput()
+                finishPrimaryAction()
                 return
             }
         }
@@ -3499,7 +3679,7 @@ final class OverlayCanvasView: NSView {
         if kc == kVK_Tab, selection == nil, windowPickerMode {
             let hits = WindowSnapResolver.candidatesContaining(
                 at: cursorPoint,
-                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                candidatesFrontToBack: windowCandidates,
                 allowMaximizedSnap: true
             )
             if hits.count > 1 {
@@ -3516,7 +3696,7 @@ final class OverlayCanvasView: NSView {
             let pressedMods = HotkeyModifiers.fromNSEventFlags(flags)
             let candidateBinding = HotkeyBinding(keyCode: kc, modifiers: pressedMods)
 
-            if !cfg.hotkeys.recapture.isUnbound && candidateBinding == cfg.hotkeys.recapture {
+            if screenSnapshot != nil && !cfg.hotkeys.recapture.isUnbound && candidateBinding == cfg.hotkeys.recapture {
                 triggerRecaptureSelfUI()
                 return
             }
@@ -3529,7 +3709,7 @@ final class OverlayCanvasView: NSView {
                     triggerOCR()
                     return
                 }
-                if !cfg.hotkeys.pin.isUnbound && candidateBinding == cfg.hotkeys.pin && !(coordinator?.isInlinePinEdit ?? false) {
+                if !cfg.hotkeys.pin.isUnbound && candidateBinding == cfg.hotkeys.pin && !(coordinator?.isPinAnnotation ?? false) {
                     triggerPinOutput()
                     return
                 }
@@ -3544,7 +3724,7 @@ final class OverlayCanvasView: NSView {
         }
 
         // Unselected magnifier color copy: `C` -> HEX, `Shift+C` -> RGB
-        if selection == nil && !cmdOrCtrl && kc == kVK_ANSI_C {
+        if selection == nil && !cmdOrCtrl && kc == kVK_ANSI_C, let snapshot = screenSnapshot {
             let pxX = max(0, min(snapshot.rawBuffer.width - 1, Int((cursorPoint.x * snapshot.backingScale).rounded())))
             let pxY = max(0, min(snapshot.rawBuffer.height - 1, Int((cursorPoint.y * snapshot.backingScale).rounded())))
             let col = snapshot.rawBuffer.pixel(x: pxX, y: pxY)
@@ -3559,7 +3739,7 @@ final class OverlayCanvasView: NSView {
         if cmdOrCtrl {
             switch kc {
             case kVK_ANSI_C where selection != nil:
-                triggerCopyOutput()
+                finishPrimaryAction()
                 return
             case kVK_ANSI_S where selection != nil:
                 triggerSaveOutput(forceDialog: shift)
@@ -3577,7 +3757,7 @@ final class OverlayCanvasView: NSView {
 
         switch kc {
         case kVK_Return, kVK_ANSI_KeypadEnter:
-            if selection != nil { triggerCopyOutput() }
+            if selection != nil { finishPrimaryAction() }
         case kVK_Escape:
             if colorPicker != nil {
                 colorPicker = nil
@@ -3588,8 +3768,8 @@ final class OverlayCanvasView: NSView {
         case kVK_Delete, kVK_ForwardDelete:
             if document.deleteSelected() {
                 needsDisplay = true
-            } else if let iso = isolatedWindowCapture, iso.isWindowCapture, document.isEmpty {
-                isolatedWindowCapture = nil
+            } else if foregroundImage?.window != nil, document.isEmpty {
+                foregroundImage = nil
                 selection = nil
                 selectionLocked = false
                 activeTool = nil
@@ -3979,6 +4159,7 @@ final class OverlayCanvasView: NSView {
     // MARK: - Recapture Self UI (Shift+F1, CAP-8 / ADR 0031)
 
     private func triggerRecaptureSelfUI() {
+        guard let snapshot = screenSnapshot else { return }
         commitInlineEditorsIfNeeded()
         guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else { return }
         cacheDisplay(in: bounds, to: bitmapRep)
@@ -3986,7 +4167,7 @@ final class OverlayCanvasView: NSView {
               let newBuf = PixelBufferRGBA(cgImage: cg) else {
             return
         }
-        snapshot = CapturedScreenSnapshot(
+        source = .screen(CapturedScreenSnapshot(
             screen: snapshot.screen,
             frameInGlobalAppKit: snapshot.frameInGlobalAppKit,
             frameTopDown: snapshot.frameTopDown,
@@ -3994,8 +4175,8 @@ final class OverlayCanvasView: NSView {
             rawBuffer: newBuf,
             backingScale: Double(cg.width) / max(1.0, Double(bounds.width)),
             windowsLocalTopDown: []
-        )
-        isolatedWindowCapture = nil
+        ))
+        foregroundImage = nil
         selection = nil
         selectionLocked = false
         windowPickerMode = false
@@ -4007,7 +4188,7 @@ final class OverlayCanvasView: NSView {
     }
 
     private func captureAndPresentIsolatedWindow(candidate: WindowSnapCandidate, includeShadow: Bool) {
-        guard !isCapturingIsolatedWindow else { return }
+        guard !isCapturingIsolatedWindow, let snapshot = screenSnapshot else { return }
         isCapturingIsolatedWindow = true
         let fallbackScale = snapshot.backingScale
         let screenW = Double(bounds.width)
@@ -4027,7 +4208,7 @@ final class OverlayCanvasView: NSView {
                     width: max(1, (candidate.rect.width * fallbackScale).rounded()),
                     height: max(1, (candidate.rect.height * fallbackScale).rounded())
                 )
-                guard let fallbackCG = self.snapshot.cgImage.cropping(to: pxRect) else { return }
+                guard let fallbackCG = self.screenSnapshot?.cgImage.cropping(to: pxRect) else { return }
                 capturedCG = fallbackCG
             }
             guard let rawBuf = PixelBufferRGBA(cgImage: capturedCG) else { return }
@@ -4063,12 +4244,12 @@ final class OverlayCanvasView: NSView {
             self.document.clearAll()
             self.activeTool = nil
             self.colorPicker = nil
-            self.isolatedWindowCapture = IsolatedWindowCapture(
-                rawImage: capturedCG,
+            self.foregroundImage = AnnotationImage(
+                cgImage: capturedCG,
                 rawBuffer: rawBuf,
-                pixelScale: effectiveScale,
-                includeShadow: includeShadow,
-                ownerName: candidate.ownerName
+                pixelsPerPoint: CGSize(width: effectiveScale, height: effectiveScale),
+                outputScale: effectiveScale,
+                window: (ownerName: candidate.ownerName, includeShadow: includeShadow)
             )
             self.selection = displayRect
             self.selectionLocked = true
@@ -4079,10 +4260,8 @@ final class OverlayCanvasView: NSView {
     // MARK: - Baking Raw vs Output & Finalizing
 
     private func cropRawSelectionImage() -> CGImage? {
-        if let iso = isolatedWindowCapture {
-            return iso.rawImage
-        }
-        guard let sel = selection, sel.width >= 1 && sel.height >= 1 else { return nil }
+        if let image = annotationImage { return image.cgImage }
+        guard let snapshot = screenSnapshot, let sel = selection, sel.width >= 1 && sel.height >= 1 else { return nil }
         let pxRect = CGRect(
             x: (sel.minX * snapshot.backingScale).rounded(.down),
             y: (sel.minY * snapshot.backingScale).rounded(.down),
@@ -4094,8 +4273,9 @@ final class OverlayCanvasView: NSView {
 
     private func bakeCurrentSelectionOutput(applyWindowShadow: Bool = true) -> CGImage? {
         commitInlineEditorsIfNeeded()
-        if let iso = isolatedWindowCapture, let sel = selection {
-            let baseCG = iso.rawImage
+        guard let sel = selection else { return nil }
+        if let image = annotationImage {
+            let baseCG = image.cgImage
             let baked: CGImage
             if document.isEmpty {
                 baked = baseCG
@@ -4104,17 +4284,16 @@ final class OverlayCanvasView: NSView {
                     rawSelection: baseCG,
                     objects: document.objects,
                     selectionOrigin: ASPoint(sel.minX, sel.minY),
-                    pixelScale: iso.pixelScale
+                    pixelsPerPoint: image.pixelsPerPoint
                 ) ?? baseCG
             }
-            if applyWindowShadow && iso.includeShadow {
-                let shadowScale = iso.isWindowCapture ? iso.pixelScale : snapshot.backingScale
-                return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: shadowScale) ?? baked
+            if applyWindowShadow, image.window?.includeShadow == true {
+                return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: image.outputScale) ?? baked
             }
             return baked
         }
 
-        guard let sel = selection, let rawCG = cropRawSelectionImage() else { return nil }
+        guard let snapshot = screenSnapshot, let rawCG = cropRawSelectionImage() else { return nil }
         if document.isEmpty {
             return rawCG
         }
@@ -4127,15 +4306,12 @@ final class OverlayCanvasView: NSView {
     }
 
     private var outputBackingScale: Double {
-        if let iso = isolatedWindowCapture, iso.isWindowCapture {
-            return iso.pixelScale
-        }
-        return snapshot.backingScale
+        annotationImage?.outputScale ?? canvasBackingScale
     }
 
-    private func triggerCopyOutput() {
+    private func finishPrimaryAction() {
         guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
-        coordinator?.finishWithCopy(image: out, scale: outputBackingScale)
+        coordinator?.finishPrimaryAction(image: out, scale: outputBackingScale)
     }
 
     private func triggerSaveOutput(forceDialog: Bool = false) {
@@ -4145,7 +4321,7 @@ final class OverlayCanvasView: NSView {
 
     private func triggerPinOutput() {
         guard let sel = selection, let out = bakeCurrentSelectionOutput(applyWindowShadow: false) else { return }
-        let sFrame = snapshot.frameInGlobalAppKit
+        let sFrame = frameInGlobalAppKit
         let appKitOrigin = CGPoint(
             x: sFrame.minX + CGFloat(sel.minX),
             y: sFrame.maxY - CGFloat(sel.maxY)
@@ -4156,7 +4332,7 @@ final class OverlayCanvasView: NSView {
     private func triggerOCR() {
         // OCR-4: Strictly pass RAW selection (without annotations) so arrows/blurs never pollute OCR!
         guard let sel = selection, let raw = cropRawSelectionImage() else { return }
-        let sFrame = snapshot.frameInGlobalAppKit
+        let sFrame = frameInGlobalAppKit
         let centerScreen = NSPoint(
             x: sFrame.minX + CGFloat(sel.midX),
             y: sFrame.maxY - CGFloat(sel.midY)
@@ -4165,6 +4341,7 @@ final class OverlayCanvasView: NSView {
     }
 
     private func triggerLongshot(forceAutoScroll: Bool = false) {
+        guard let snapshot = screenSnapshot else { return }
         guard let sel = selection, sel.width >= 24 && sel.height >= 24 else {
             ToastHUD.show(L10n.tr("选区过小", "Selection too small"))
             return
