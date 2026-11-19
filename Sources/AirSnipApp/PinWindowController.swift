@@ -5,13 +5,16 @@ import AirSnipCore
 @MainActor
 public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
+    let pasteboard: NSPasteboard
     private var closedPins: [PinWindowController] = []
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
-    public init() {}
+    public init(pasteboard: NSPasteboard = .general) {
+        self.pasteboard = pasteboard
+    }
 
     public var count: Int { windows.count }
     public var hasClickThroughPins: Bool { windows.contains { $0.isClickThrough } }
@@ -21,7 +24,8 @@ public final class PinManager: ObservableObject {
         cgImage: CGImage,
         backingScale: Double,
         preferredScreenOriginAppKit: CGPoint?,
-        config: AirSnipConfig
+        config: AirSnipConfig,
+        originalText: String? = nil
     ) -> Bool {
         guard canOpenPin(config: config) else { return false }
         let pointW = max(32.0, Double(cgImage.width) / max(1.0, backingScale))
@@ -48,7 +52,8 @@ public final class PinManager: ObservableObject {
             backingScale: backingScale,
             origin: origin,
             showBorder: config.pinBorder,
-            manager: self
+            manager: self,
+            originalText: originalText
         )
         windows.append(controller)
         controller.show()
@@ -127,6 +132,7 @@ public final class PinWindowController: NSObject {
     public private(set) var cgImage: CGImage
     public private(set) var baseSize: NSSize
     public let backingScale: Double
+    let originalText: String?
     public private(set) var zoomScale: CGFloat = 1.0
     public private(set) var opacity: CGFloat = 1.0
     public private(set) var showBorder: Bool
@@ -141,11 +147,13 @@ public final class PinWindowController: NSObject {
         backingScale: Double,
         origin: NSPoint,
         showBorder: Bool,
-        manager: PinManager
+        manager: PinManager,
+        originalText: String? = nil
     ) {
         self.cgImage = cgImage
         self.baseSize = baseSize
         self.backingScale = backingScale
+        self.originalText = originalText
         self.showBorder = showBorder
         self.manager = manager
 
@@ -268,9 +276,17 @@ public final class PinWindowController: NSObject {
 
     public func copyToClipboard() {
         let cfg = manager?.getConfig?()
-        OutputService.copyImageToClipboard(cgImage, backingScale: backingScale, config: cfg) { _ in
+        OutputService.copyImageToClipboard(
+            cgImage, backingScale: backingScale, config: cfg, to: manager?.pasteboard ?? .general
+        ) { _ in
             ToastHUD.show(L10n.tr("已复制", "Copied"))
         }
+    }
+
+    func copyOriginalText() {
+        guard let originalText else { return }
+        OutputService.copyStringToClipboard(originalText, to: manager?.pasteboard ?? .general)
+        ToastHUD.show(L10n.tr("已复制原文", "Original Text Copied"))
     }
 
     public func savePin(forceDialog: Bool = false) {
@@ -423,7 +439,12 @@ private final class PinCanvasView: NSView {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if (flags.contains(.command) || flags.contains(.control)), event.keyCode == UInt16(kVK_ANSI_C) {
-            owner.copyToClipboard()
+            if flags.intersection([.command, .control, .option, .shift]) == [.command, .shift],
+               owner.originalText != nil {
+                owner.copyOriginalText()
+            } else {
+                owner.copyToClipboard()
+            }
             return
         }
         if (flags.contains(.command) || flags.contains(.control)), event.keyCode == UInt16(kVK_ANSI_S) {
@@ -478,6 +499,16 @@ private final class PinCanvasView: NSView {
         copyItem.target = self
         menu.addItem(copyItem)
 
+        if owner.originalText != nil {
+            let originalTextItem = NSMenuItem(
+                title: L10n.tr("复制原文", "Copy Original Text"), action: #selector(onCopyOriginalText), keyEquivalent: "c"
+            )
+            originalTextItem.keyEquivalentModifierMask = [.command, .shift]
+            originalTextItem.image = pinMenuIcon("doc.plaintext")
+            originalTextItem.target = self
+            menu.addItem(originalTextItem)
+        }
+
         let saveItem = NSMenuItem(title: L10n.tr("保存", "Save"), action: #selector(onSave), keyEquivalent: "s")
         saveItem.image = pinMenuIcon("square.and.arrow.down")
         saveItem.target = self
@@ -528,6 +559,7 @@ private final class PinCanvasView: NSView {
     @objc private func onEdit() { owner?.requestInlineAnnotate() }
     @objc private func onOCR() { owner?.requestOCR() }
     @objc private func onCopy() { owner?.copyToClipboard() }
+    @objc private func onCopyOriginalText() { owner?.copyOriginalText() }
     @objc private func onSave() { owner?.savePin(forceDialog: false) }
     @objc private func onSaveAs() { owner?.savePin(forceDialog: true) }
     @objc private func onToggleBorder() {
