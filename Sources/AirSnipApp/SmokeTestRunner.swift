@@ -274,8 +274,8 @@ public enum SmokeTestRunner {
         configURL: URL,
         _ check: @MainActor (CGImage, AirSnipAppController, NSPasteboard) -> Bool
     ) -> Bool {
-        let app = AirSnipAppController(configURL: configURL)
         let pasteboard = NSPasteboard.withUniqueName()
+        let app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
         defer {
             app.pinManager.closeAll()
             pasteboard.releaseGlobally()
@@ -318,7 +318,10 @@ public enum SmokeTestRunner {
         pins.createPin(cgImage: second, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
         pins.windows.last?.closeSelf()
         pasteboard.clearContents()
-        guard pasteboard.setData(png, forType: .png) else { return false }
+        let imageWithText = NSPasteboardItem()
+        guard imageWithText.setData(png, forType: .png),
+              imageWithText.setString("Image caption", forType: .string),
+              pasteboard.writeObjects([imageWithText]) else { return false }
 
         for (index, width) in [copied.width, second.width, image.width].enumerated() {
             app.triggerPinOrRestore(from: pasteboard)
@@ -342,13 +345,12 @@ public enum SmokeTestRunner {
         }
         recopied.closeSelf()
         pasteboard.clearContents()
-        guard pasteboard.setString("text only", forType: .string) else { return false }
         app.triggerPinOrRestore(from: pasteboard)
         guard pins.count == 4, pins.windows.last?.cgImage.width == copied.width else {
-            fputs("FAIL: A clipboard containing only text should still allow a pin to be restored\n", stderr)
+            fputs("FAIL: An empty clipboard should still allow a pin to be restored\n", stderr)
             return false
         }
-        print("[pins] PASS: 新图优先、最近关闭优先、主动再次复制与纯文本剪贴板")
+        print("[pins] PASS: 新图优先（含图文共存）、最近关闭优先、主动再次复制与空剪贴板")
 
         app.updateConfig { $0.pinMaxCount = 4 }
         pasteboard.clearContents()
@@ -378,6 +380,210 @@ public enum SmokeTestRunner {
             return false
         }
         print("[pins] PASS: 达到同屏上限后仍可重试贴出新图和恢复贴图")
+        return true
+    }
+
+    @MainActor
+    private static func runClipboardTextPinCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
+        let pins = app.pinManager
+        pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        guard pins.count == 2 else { return false }
+        let older = pins.windows[0]
+        let newer = pins.windows[1]
+        older.closeSelf()
+        newer.closeSelf()
+
+        let text = "  iSnip\n\t第二行  "
+        let statusMenu = NSMenu()
+        app.menuNeedsUpdate(statusMenu)
+        guard pasteboard.setString(text, forType: .string),
+              OutputService.readImageFromClipboard(from: pasteboard) == nil,
+              let pinItem = statusMenu.item(withTitle: L10n.tr("贴图或恢复", "Pin or Restore")),
+              let pinAction = pinItem.action,
+              NSApp.sendAction(pinAction, to: pinItem.target, from: pinItem) else {
+            fputs("FAIL: Pin or Restore should handle plain text through the status menu\n", stderr)
+            return false
+        }
+        guard let textPin = pins.windows.last, pins.count == 1, textPin !== older, textPin !== newer,
+              textPin.window.isVisible, pasteboard.string(forType: .string) == text else {
+            fputs("FAIL: New clipboard text should be pinned before restoring closed images\n", stderr)
+            return false
+        }
+
+        for (index, frame) in [newer.window.frame, older.window.frame].enumerated() {
+            app.triggerPinOrRestore(from: pasteboard)
+            guard pins.count == index + 2, let restored = pins.windows.last,
+                  restored.window.frame == frame, restored.window.isVisible else {
+                fputs("FAIL: Repeated presses after pinning text should restore the latest closed pin\n", stderr)
+                return false
+            }
+        }
+        guard let textImage = PixelBufferRGBA(cgImage: textPin.cgImage) else { return false }
+        let middleRow = textImage.width * (textImage.height / 2) * 4
+        guard stride(from: 0, to: middleRow, by: 4).contains(where: { textImage.rgba[$0] < 128 }),
+              stride(from: middleRow, to: textImage.rgba.count, by: 4).contains(where: { textImage.rgba[$0] < 128 }) else {
+            fputs("FAIL: Both lines of the clipboard text should render visible glyphs\n", stderr)
+            return false
+        }
+        textPin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: 30, y: 30))
+        textPin.adjustOpacity(delta: -1)
+        let textFrame = textPin.window.frame
+        let textOpacity = textPin.window.alphaValue
+        textPin.closeSelf()
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 3, let restored = pins.windows.last, restored.window.isVisible,
+              restored.window.frame == textFrame, restored.window.alphaValue == textOpacity,
+              PixelBufferRGBA(cgImage: restored.cgImage) == textImage else {
+            fputs("FAIL: A restored text pin should keep its image, frame and opacity\n", stderr)
+            return false
+        }
+
+        app.updateConfig { $0.pinMaxCount = 3 }
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else { return false }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 3 else { return false }
+        restored.closeSelf()
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 3, let recopied = pins.windows.last,
+              recopied.window.alphaValue == 1, PixelBufferRGBA(cgImage: recopied.cgImage) == textImage else {
+            fputs("FAIL: Recopied text should still make a new pin after reaching the visible pin limit\n", stderr)
+            return false
+        }
+
+        let frames = pins.windows.reversed().map { $0.window.frame }
+        pins.closeAll()
+        for (index, frame) in frames.enumerated() {
+            app.triggerPinOrRestore(from: pasteboard)
+            guard pins.count == index + 1, pins.windows.last?.window.frame == frame else {
+                fputs("FAIL: Close All should restore image and text pins in reverse insertion order\n", stderr)
+                return false
+            }
+        }
+        print("[pins] PASS: 新文字优先、屏幕上限重试、文字和图片共享单张与批量恢复")
+        return true
+    }
+
+    @MainActor
+    private static func runTextPinLayoutCheck(image _: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return false }
+        let pins = app.pinManager
+
+        func pinSize(for text: String) -> NSSize? {
+            pasteboard.clearContents()
+            guard pasteboard.setString(text, forType: .string) else { return nil }
+            let count = pins.count
+            app.triggerPinOrRestore(from: pasteboard)
+            guard pins.count == count + 1 else { return nil }
+            return pins.windows.last?.window.frame.size
+        }
+
+        let longLine = String(repeating: "M", count: Int(screen.visibleFrame.width / 6) + 32)
+        guard let plain = pinSize(for: "iSnip"), let spaced = pinSize(for: "\t iSnip  \n"),
+              spaced.width > plain.width, spaced.height > plain.height,
+              let long = pinSize(for: longLine), long.height == plain.height, long.width > screen.visibleFrame.width else {
+            fputs("FAIL: Text pins should preserve spacing and source lines at their natural size\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 文字贴图保留留白和原行，长行按自然宽度超出屏幕")
+        return true
+    }
+
+    @MainActor
+    private static func runTextPinOriginalCopyCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
+        app.updateConfig {
+            $0.smartPngCompression = false
+            $0.pinAnnotationCoversDesktop = false
+        }
+        let pins = app.pinManager
+        let text = "  iSnip\n\t原文  "
+
+        func menu(for pin: PinWindowController) -> NSMenu? {
+            guard let event = NSEvent.mouseEvent(
+                with: .rightMouseDown, location: NSPoint(x: 24, y: 24),
+                modifierFlags: [], timestamp: 0, windowNumber: pin.window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            ) else { return nil }
+            return pin.window.contentView?.menu(for: event)
+        }
+
+        func pressCopy(on pin: PinWindowController, modifiers: NSEvent.ModifierFlags) -> Bool {
+            guard let view = pin.window.contentView, let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                windowNumber: pin.window.windowNumber, context: nil,
+                characters: "c", charactersIgnoringModifiers: "c", isARepeat: false, keyCode: UInt16(kVK_ANSI_C)
+            ) else { return false }
+            view.keyDown(with: event)
+            return true
+        }
+
+        func verifyCopies(of pin: PinWindowController, image: CGImage) -> Bool {
+            guard pressCopy(on: pin, modifiers: .command),
+                  let clip = OutputService.readImageFromClipboard(from: pasteboard),
+                  PixelBufferRGBA(cgImage: clip.cgImage) == PixelBufferRGBA(cgImage: image) else {
+                fputs("FAIL: Command-C should copy the current pin image\n", stderr)
+                return false
+            }
+            guard pressCopy(on: pin, modifiers: [.command, .shift]),
+                  pasteboard.string(forType: .string) == text else {
+                fputs("FAIL: Command-Shift-C should copy the original text including whitespace\n", stderr)
+                return false
+            }
+            return true
+        }
+
+        guard pasteboard.setString(text, forType: .string) else { return false }
+        app.triggerPinOrRestore()
+        let originalTextTitle = L10n.tr("复制原文", "Copy Original Text")
+        guard let pin = pins.windows.last,
+              let copyOriginal = menu(for: pin)?.item(withTitle: originalTextTitle),
+              let action = copyOriginal.action, copyOriginal.keyEquivalentModifierMask == [.command, .shift] else {
+            fputs("FAIL: A text pin should offer Copy Original Text in its menu\n", stderr)
+            return false
+        }
+        pasteboard.clearContents()
+        guard NSApp.sendAction(action, to: copyOriginal.target, from: copyOriginal),
+              pasteboard.string(forType: .string) == text else {
+            fputs("FAIL: Copy Original Text should write the pin's original text to the clipboard\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        guard pins.count == 2 else {
+            fputs("FAIL: Copying original text should allow it to be pinned as a new copy\n", stderr)
+            return false
+        }
+
+        guard let edited = image.cropping(to: CGRect(x: 0, y: 0, width: 96, height: 64)) else { return false }
+        let frame = pin.window.frame
+        let editor = CaptureSessionCoordinator(config: app.config, mode: .pinAnnotation(pin))
+        editor.startPinAnnotation()
+        guard editor.hasVisibleWindows else { return false }
+        editor.finishPrimaryAction(image: edited, scale: pin.backingScale)
+        guard pin.window.isVisible, pin.window.frame == frame, verifyCopies(of: pin, image: edited) else {
+            fputs("FAIL: Windowed annotation should keep the text pin in place and preserve both copy actions\n", stderr)
+            return false
+        }
+
+        pin.closeSelf()
+        pasteboard.clearContents()
+        app.triggerPinOrRestore()
+        guard pins.count == 2, let restored = pins.windows.last, verifyCopies(of: restored, image: edited) else {
+            fputs("FAIL: Restoring a text pin should keep both its edited image and original text\n", stderr)
+            return false
+        }
+
+        pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        guard let imagePin = pins.windows.last, let imageMenu = menu(for: imagePin),
+              imageMenu.item(withTitle: originalTextTitle) == nil,
+              let copyImage = imageMenu.item(withTitle: L10n.tr("复制", "Copy")), let copyAction = copyImage.action,
+              NSApp.sendAction(copyAction, to: copyImage.target, from: copyImage),
+              let clip = OutputService.readImageFromClipboard(from: pasteboard),
+              PixelBufferRGBA(cgImage: clip.cgImage) == PixelBufferRGBA(cgImage: image) else {
+            fputs("FAIL: An ordinary image pin should still copy its image and omit Copy Original Text\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 右键和快捷键可复制原文，标注与恢复后也能分别复制当前图像和原文")
         return true
     }
 
@@ -513,12 +719,15 @@ public enum SmokeTestRunner {
         let pins = PinManager(historyByteLimit: 5_376)
         defer { pins.closeAll() }
 
-        func openPin(width: Int) -> Bool {
+        func openPin(width: Int, originalText: String? = nil) -> Bool {
             guard let context = CGContext(
                 data: nil, width: width, height: 16, bitsPerComponent: 8, bytesPerRow: width * 4 + 16,
                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
             ), let image = context.makeImage() else { return false }
-            return pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: config)
+            return pins.createPin(
+                cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: config,
+                originalText: originalText
+            )
         }
 
         guard openPin(width: 32) else { return false }
@@ -528,6 +737,9 @@ public enum SmokeTestRunner {
         }
         pins.closeAll()
         guard openPin(width: 88) else { return false }
+        pins.windows.last?.closeSelf()
+        // This bitmap alone fills the budget, so its original text puts the pin over it.
+        guard openPin(width: 80, originalText: "iSnip") else { return false }
         pins.windows.last?.closeSelf()
 
         for width in [40, 36] {
@@ -539,10 +751,10 @@ public enum SmokeTestRunner {
         }
         pins.restoreLastClosedPin(config: config)
         guard pins.count == 2 else {
-            fputs("FAIL: Pin history should discard the oldest pin when the image byte budget is exceeded\n", stderr)
+            fputs("FAIL: Pin history should discard the oldest pin when its byte budget is exceeded\n", stderr)
             return false
         }
-        print("[pins] PASS: 历史按位图字节淘汰最旧的贴图，跳过超大图并保留已有历史")
+        print("[pins] PASS: 历史预算包含图像与原文，跳过超限贴图并优先保留最近关闭的贴图")
         return true
     }
 
@@ -1454,6 +1666,21 @@ public enum SmokeTestRunner {
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-config.json"),
                         runPinRestoreChecks
+                    )
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("text-pin-config.json"),
+                        runClipboardTextPinCheck
+                    )
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("text-pin-layout-config.json"),
+                        runTextPinLayoutCheck
+                    )
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("text-pin-copy-config.json"),
+                        runTextPinOriginalCopyCheck
                     )
                     && withPinRestoreFixture(
                         image: baseCG,

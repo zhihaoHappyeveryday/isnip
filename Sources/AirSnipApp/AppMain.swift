@@ -9,7 +9,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     @Published public private(set) var hotkeyRegistrationErrors: [String] = []
 
     public let hotkeyManager = GlobalHotkeyManager()
-    public let pinManager = PinManager()
+    public let pinManager: PinManager
     public let ocrBubbleManager = OCRBubbleManager()
     public var settingsController: SettingsWindowController?
 
@@ -25,8 +25,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
-    public init(configURL: URL = AirSnipConfig.defaultConfigFileURL()) {
+    public init(configURL: URL = AirSnipConfig.defaultConfigFileURL(), pinPasteboard: NSPasteboard = .general) {
         self.configURL = configURL
+        self.pinManager = PinManager(pasteboard: pinPasteboard)
         let loadedConfig = AirSnipConfig.load(from: configURL)
         L10n.current = loadedConfig.language
         self.config = loadedConfig
@@ -536,10 +537,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         )
     }
 
-    public func triggerPinOrRestore(from pasteboard: NSPasteboard = .general) {
+    public func triggerPinOrRestore(from pasteboard: NSPasteboard? = nil) {
         cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil else { return }
-        guard let clip = OutputService.readImageFromClipboard(from: pasteboard, excluding: lastPinnedClipboardCopy) else {
+        guard let clip = OutputService.readPinFromClipboard(
+            from: pasteboard ?? pinManager.pasteboard, excluding: lastPinnedClipboardCopy
+        ) else {
             pinManager.restoreLastClosedPin(config: config)
             return
         }
@@ -550,7 +553,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             cgImage: clip.cgImage,
             backingScale: max(1.0, scale),
             preferredScreenOriginAppKit: nil,
-            config: pinCfg
+            config: pinCfg,
+            originalText: clip.originalText
         ) {
             lastPinnedClipboardCopy = clip.copyID
         }
