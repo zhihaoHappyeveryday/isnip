@@ -6,13 +6,20 @@ import AirSnipCore
 public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     private var closedPins: [PinWindowController] = []
+    private let historyByteLimit: Int
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     var onWillCloseAll: (() -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
-    public init() {}
+    public convenience init() {
+        self.init(historyByteLimit: 192 * 1024 * 1024)
+    }
+
+    init(historyByteLimit: Int) {
+        self.historyByteLimit = historyByteLimit
+    }
 
     public var count: Int { windows.count }
     public var hasClickThroughPins: Bool { windows.contains { $0.isClickThrough } }
@@ -63,17 +70,31 @@ public final class PinManager: ObservableObject {
     }
 
     private func rememberClosedPins(_ pins: [PinWindowController]) {
-        let limit = getConfig?().pinHistoryLimit ?? AirSnipConfig.defaultPinHistoryLimit
+        let config = getConfig?()
+        let limit = config?.pinHistoryLimit ?? AirSnipConfig.defaultPinHistoryLimit
         guard limit > 0 else { return }
-        closedPins.append(contentsOf: pins)
+
+        let retainedPins = pins.filter { $0.imageByteCount <= historyByteLimit }
+        closedPins.append(contentsOf: retainedPins)
         trimClosedHistory(to: limit)
+        if retainedPins.count < pins.count {
+            ToastHUD.show(
+                L10n.tr("有贴图过大，关闭后无法恢复", "Some pins were too large to restore", in: config?.language),
+                symbol: "exclamationmark.triangle", tint: .systemOrange
+            )
+        }
     }
 
     func trimClosedHistory(to limit: Int) {
-        let excess = closedPins.count - limit
-        if excess > 0 {
-            closedPins.removeFirst(excess)
+        var remainingBytes = historyByteLimit
+        var retainedCount = 0
+        for pin in closedPins.reversed().prefix(limit) {
+            let bytes = pin.imageByteCount
+            guard bytes <= remainingBytes else { break }
+            remainingBytes -= bytes
+            retainedCount += 1
         }
+        closedPins.removeFirst(closedPins.count - retainedCount)
     }
 
     public func restoreLastClosedPin(config: AirSnipConfig) {
@@ -127,6 +148,7 @@ private final class PinPanel: NSPanel {
 public final class PinWindowController: NSObject {
     public let window: NSPanel
     public private(set) var cgImage: CGImage
+    fileprivate var imageByteCount: Int { cgImage.bytesPerRow * cgImage.height }
     public private(set) var baseSize: NSSize
     public let backingScale: Double
     public private(set) var zoomScale: CGFloat = 1.0
