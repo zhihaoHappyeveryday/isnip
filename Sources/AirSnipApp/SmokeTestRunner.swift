@@ -212,6 +212,7 @@ public enum SmokeTestRunner {
     private static func verifyPinAnnotation(on screen: NSScreen) -> Bool {
         var config = AirSnipConfig()
         config.pinAnnotationCoversDesktop = false
+        config.uiScale = .p100
         config.confirmCancel = true
         let pixels = [UInt8](repeating: 0, count: 24 * 120 * 4)
         guard let image = PixelBufferRGBA(width: 24, height: 120, rgba: pixels).makeCGImage() else { return false }
@@ -239,9 +240,9 @@ public enum SmokeTestRunner {
             )
         }
 
-        let coordinator = CaptureSessionCoordinator(config: config, mode: .inlinePinEdit(pin))
+        let coordinator = CaptureSessionCoordinator(config: config, mode: .pinAnnotation(pin))
         coordinator.persistConfigChanges = false
-        coordinator.startPinInlineEdit(pin: pin)
+        coordinator.startPinAnnotation()
         defer { if coordinator.hasVisibleWindows { coordinator.cancelSession() } }
         guard let number = coordinator.activeWindowNumbers.first,
               let editor = NSApp.window(withWindowNumber: number),
@@ -283,10 +284,32 @@ public enum SmokeTestRunner {
             fputs("FAIL: Pin annotation hit testing (margin \(hit)/\(underlying.windowNumber), pin \(pinHit)/\(editor.windowNumber))\n", stderr)
             return false
         }
-        guard let enter = key(kVK_Return, "\r", in: editor) else { return false }
+        config.uiScale = .p150
+        coordinator.refreshWindowedPinConfig(config)
         editor.resignKey()
         coordinator.refocus()
-        canvas.keyDown(with: enter)
+        canvas.needsDisplay = true
+        editor.display()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+        guard let done = canvas.toolbarItemRect(id: "file.copy"), canvas.bounds.contains(done) else {
+            fputs("FAIL: Changing toolbar scale clipped Done in the active pin editor\n", stderr)
+            return false
+        }
+        let location = canvas.convert(NSPoint(x: done.midX, y: done.midY), to: nil)
+        let screenPoint = editor.convertPoint(toScreen: location)
+        guard NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: ceiling.windowNumber) == editor.windowNumber else {
+            fputs("FAIL: Done isn't clickable after changing toolbar scale\n", stderr)
+            return false
+        }
+        func mouse(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [], timestamp: 0,
+                windowNumber: editor.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            )
+        }
+        guard let down = mouse(.leftMouseDown), let up = mouse(.leftMouseUp) else { return false }
+        canvas.mouseDown(with: down)
+        canvas.mouseUp(with: up)
         guard pin.window.isVisible, pin.window.frame == frame, pin.zoomScale == zoom,
               pin.window.contentView === originalView,
               let result = PixelBufferRGBA(cgImage: pin.cgImage),
@@ -298,29 +321,58 @@ public enum SmokeTestRunner {
         }
 
         let applied = pin.cgImage
-        coordinator.startPinInlineEdit(pin: pin)
-        guard let reopenedNumber = coordinator.activeWindowNumbers.first,
+        let reopenedSession = CaptureSessionCoordinator(config: config, mode: .pinAnnotation(pin))
+        reopenedSession.persistConfigChanges = false
+        reopenedSession.startPinAnnotation()
+        defer { if reopenedSession.hasVisibleWindows { reopenedSession.cancelSession() } }
+        guard let reopenedNumber = reopenedSession.activeWindowNumbers.first,
               let reopenedEditor = NSApp.window(withWindowNumber: reopenedNumber),
               let reopened = reopenedEditor.contentView as? OverlayCanvasView,
               let escape = key(kVK_Escape, "\u{1b}", in: reopenedEditor),
-              coordinator.renderStandaloneAnnotatedOutputSample() != nil else { return false }
+              reopenedSession.renderStandaloneAnnotatedOutputSample() != nil else { return false }
+        reopened.needsDisplay = true
+        reopenedEditor.display()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+        let reopenedDone = reopened.toolbarItemRect(id: "file.copy")
+        guard let reopenedDone, reopenedDone.width > done.width else {
+            fputs("FAIL: A new pin editor did not use the updated toolbar scale (button \(String(describing: reopenedDone?.width)), previous \(done.width), window \(reopenedEditor.frame.width))\n", stderr)
+            return false
+        }
         reopened.keyDown(with: escape)
-        guard coordinator.hasVisibleWindows else {
+        guard reopenedSession.hasVisibleWindows else {
             fputs("FAIL: First Escape discarded pending pin annotations\n", stderr)
             return false
         }
         reopened.keyDown(with: escape)
-        guard !coordinator.hasVisibleWindows, pin.window.isVisible, pin.cgImage === applied,
+        guard !reopenedSession.hasVisibleWindows, pin.window.isVisible, pin.cgImage === applied,
               pin.window.frame == frame, pin.window.contentView === originalView else {
             fputs("FAIL: Cancelling pin annotation did not restore the original pin\n", stderr)
             return false
         }
 
-        let fullScreen = CaptureSessionCoordinator(config: AirSnipConfig(), mode: .inlinePinEdit(pin))
-        fullScreen.persistConfigChanges = false
-        fullScreen.startPinInlineEdit(pin: pin)
-        defer { fullScreen.cancelSession() }
-        return fullScreen.hasVisibleWindows && !pin.window.isVisible
+        do {
+            let fullScreen = CaptureSessionCoordinator(config: AirSnipConfig(), mode: .pinAnnotation(pin))
+            fullScreen.persistConfigChanges = false
+            fullScreen.startPinAnnotation()
+            defer { fullScreen.cancelSession() }
+            guard fullScreen.hasVisibleWindows, !pin.window.isVisible else {
+                fputs("FAIL: Pin annotation did not open in the default full-screen mode\n", stderr)
+                return false
+            }
+        }
+
+        let closingSession = CaptureSessionCoordinator(config: config, mode: .pinAnnotation(pin))
+        closingSession.startPinAnnotation()
+        var endedWithoutRestoringPin = false
+        closingSession.onSessionEnded = { endedWithoutRestoringPin = !pin.window.isVisible }
+        manager.onWillCloseAll = { [weak closingSession] in closingSession?.closeWithAllPins() }
+        manager.closeAll()
+        manager.onWillCloseAll = nil
+        guard endedWithoutRestoringPin, !closingSession.hasVisibleWindows, manager.windows.isEmpty else {
+            fputs("FAIL: Closing all pins restored the pin or left its editor open\n", stderr)
+            return false
+        }
+        return true
     }
 
     public static func run() -> Bool {

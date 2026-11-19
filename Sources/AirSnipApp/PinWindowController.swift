@@ -7,7 +7,7 @@ public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
-    var onCloseAll: (() -> Void)?
+    var onWillCloseAll: (() -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
@@ -62,7 +62,7 @@ public final class PinManager: ObservableObject {
     }
 
     public func closeAll() {
-        onCloseAll?()
+        onWillCloseAll?()
         for w in windows {
             w.window.orderOut(nil)
         }
@@ -149,10 +149,13 @@ public final class PinWindowController: NSObject {
         window.makeFirstResponder(contentView)
     }
 
-    public func updateImage(_ newImage: CGImage, preservingFrame: Bool = false) {
-        self.cgImage = newImage
+    func applyAnnotatedImage(_ image: CGImage) {
+        cgImage = image
         contentView.needsDisplay = true
-        guard !preservingFrame else { return }
+    }
+
+    public func updateImage(_ newImage: CGImage) {
+        applyAnnotatedImage(newImage)
         self.baseSize = NSSize(
             width: max(32.0, Double(newImage.width) / max(1.0, backingScale)),
             height: max(32.0, Double(newImage.height) / max(1.0, backingScale))
@@ -221,7 +224,7 @@ public final class PinWindowController: NSObject {
         contentView.needsDisplay = true
     }
 
-    public func requestInlineAnnotate() {
+    public func requestAnnotation() {
         manager?.onRequestAnnotatePin?(self)
     }
 
@@ -398,7 +401,7 @@ private final class PinCanvasView: NSView {
         case kVK_Escape:
             owner.closeSelf()
         case kVK_Space:
-            owner.requestInlineAnnotate()
+            owner.requestAnnotation()
         case kVK_ANSI_T:
             owner.requestOCR()
         case kVK_LeftArrow:
@@ -488,7 +491,7 @@ private final class PinCanvasView: NSView {
         return menu
     }
 
-    @objc private func onEdit() { owner?.requestInlineAnnotate() }
+    @objc private func onEdit() { owner?.requestAnnotation() }
     @objc private func onOCR() { owner?.requestOCR() }
     @objc private func onCopy() { owner?.copyToClipboard() }
     @objc private func onSave() { owner?.savePin(forceDialog: false) }

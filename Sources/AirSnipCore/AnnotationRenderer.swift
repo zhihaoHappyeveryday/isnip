@@ -43,14 +43,26 @@ public enum AnnotationRenderer {
 
     /// Bakes `rawSelection` + `objects` (whose coordinates are in overlay point space) into a pixel-accurate output `CGImage`.
     /// `selectionOrigin` is the top-left of the selection in the same point coordinate space as `objects`,
-    /// and `pixelScale` converts points -> physical pixels (e.g., 2.0 on Retina).
-    /// A pin's displayed dimensions can require a separate vertical scale.
+    /// and `pixelScale` converts points to physical pixels (e.g., 2.0 on Retina).
     public static func bakeOutput(
         rawSelection: CGImage,
         objects: [AnnotationObject],
         selectionOrigin: ASPoint,
-        pixelScale: Double,
-        verticalPixelScale: Double? = nil
+        pixelScale: Double
+    ) -> CGImage? {
+        bakeOutput(
+            rawSelection: rawSelection,
+            objects: objects,
+            selectionOrigin: selectionOrigin,
+            pixelsPerPoint: CGSize(width: pixelScale, height: pixelScale)
+        )
+    }
+
+    public static func bakeOutput(
+        rawSelection: CGImage,
+        objects: [AnnotationObject],
+        selectionOrigin: ASPoint,
+        pixelsPerPoint: CGSize
     ) -> CGImage? {
         let outW = rawSelection.width
         let outH = rawSelection.height
@@ -73,18 +85,17 @@ public enum AnnotationRenderer {
         // Draw base raw image (CGContext default is bottom-left origin, which matches CGImage upright)
         ctx.draw(rawSelection, in: CGRect(x: 0, y: 0, width: outW, height: outH))
 
-        // Switch context to top-down point coordinates mapped by `pixelScale` and offset by `-selectionOrigin`
+        // Map top-down overlay coordinates back to the original image pixels.
         ctx.saveGState()
         ctx.translateBy(x: 0, y: CGFloat(outH))
-        let scaleY = verticalPixelScale ?? pixelScale
-        ctx.scaleBy(x: CGFloat(pixelScale), y: -CGFloat(scaleY))
+        ctx.scaleBy(x: pixelsPerPoint.width, y: -pixelsPerPoint.height)
         ctx.translateBy(x: -CGFloat(selectionOrigin.x), y: -CGFloat(selectionOrigin.y))
 
         let logicalRect = ASRect(
             x: selectionOrigin.x,
             y: selectionOrigin.y,
-            width: Double(outW) / pixelScale,
-            height: Double(outH) / scaleY
+            width: Double(outW) / Double(pixelsPerPoint.width),
+            height: Double(outH) / Double(pixelsPerPoint.height)
         )
 
         drawAnnotations(
@@ -92,9 +103,8 @@ public enum AnnotationRenderer {
             objects: objects,
             rawBuffer: rawBuffer,
             rawOrigin: selectionOrigin,
-            pixelScale: pixelScale,
-            clipBounds: logicalRect,
-            verticalPixelScale: verticalPixelScale
+            pixelsPerPoint: pixelsPerPoint,
+            clipBounds: logicalRect
         )
 
         ctx.restoreGState()
@@ -150,8 +160,25 @@ public enum AnnotationRenderer {
         rawBuffer: PixelBufferRGBA?,
         rawOrigin: ASPoint,
         pixelScale: Double,
-        clipBounds: ASRect,
-        verticalPixelScale: Double? = nil
+        clipBounds: ASRect
+    ) {
+        drawAnnotations(
+            in: ctx,
+            objects: objects,
+            rawBuffer: rawBuffer,
+            rawOrigin: rawOrigin,
+            pixelsPerPoint: CGSize(width: pixelScale, height: pixelScale),
+            clipBounds: clipBounds
+        )
+    }
+
+    public static func drawAnnotations(
+        in ctx: CGContext,
+        objects: [AnnotationObject],
+        rawBuffer: PixelBufferRGBA?,
+        rawOrigin: ASPoint,
+        pixelsPerPoint: CGSize,
+        clipBounds: ASRect
     ) {
         ctx.saveGState()
         ctx.clip(to: clipBounds.cgRect)
@@ -188,8 +215,7 @@ public enum AnnotationRenderer {
                 object: obj,
                 rawBuffer: rawBuffer,
                 rawOrigin: rawOrigin,
-                pixelScale: pixelScale,
-                verticalPixelScale: verticalPixelScale
+                pixelsPerPoint: pixelsPerPoint
             )
         }
 
@@ -201,8 +227,23 @@ public enum AnnotationRenderer {
         object: AnnotationObject,
         rawBuffer: PixelBufferRGBA?,
         rawOrigin: ASPoint,
-        pixelScale: Double,
-        verticalPixelScale: Double? = nil
+        pixelScale: Double
+    ) {
+        drawSingleObject(
+            in: ctx,
+            object: object,
+            rawBuffer: rawBuffer,
+            rawOrigin: rawOrigin,
+            pixelsPerPoint: CGSize(width: pixelScale, height: pixelScale)
+        )
+    }
+
+    private static func drawSingleObject(
+        in ctx: CGContext,
+        object: AnnotationObject,
+        rawBuffer: PixelBufferRGBA?,
+        rawOrigin: ASPoint,
+        pixelsPerPoint: CGSize
     ) {
         let color = object.style.color
         let lineW = CGFloat(object.style.lineWidth)
@@ -215,14 +256,15 @@ public enum AnnotationRenderer {
         case .blur(let a, let b, let blurRadius, let cornerRadius):
             let box = ASRect.between(a, b)
             guard box.width >= 2 && box.height >= 2, let raw = rawBuffer else { break }
-            let scaleY = verticalPixelScale ?? pixelScale
-            let pxX = Int(((box.minX - rawOrigin.x) * pixelScale).rounded(.down))
+            let scaleX = Double(pixelsPerPoint.width)
+            let scaleY = Double(pixelsPerPoint.height)
+            let pxX = Int(((box.minX - rawOrigin.x) * scaleX).rounded(.down))
             let pxY = Int(((box.minY - rawOrigin.y) * scaleY).rounded(.down))
-            let pxW = max(1, Int((box.width * pixelScale).rounded(.up)))
+            let pxW = max(1, Int((box.width * scaleX).rounded(.up)))
             let pxH = max(1, Int((box.height * scaleY).rounded(.up)))
             let cropRect = PixelRect(x: pxX, y: pxY, width: pxW, height: pxH)
             guard let sub = raw.cropped(to: cropRect) else { break }
-            let scaledRadius = max(2, Int((blurRadius * max(1.0, pixelScale * 0.65)).rounded()))
+            let scaledRadius = max(2, Int((blurRadius * max(1.0, scaleX * 0.65)).rounded()))
             let blurred = BoxBlurEngine.blur(sub, radius: scaledRadius)
             guard let blurredCG = blurred.makeCGImage() else { break }
 
