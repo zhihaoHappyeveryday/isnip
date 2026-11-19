@@ -207,6 +207,139 @@ public enum SmokeTestRunner {
         return true
     }
 
+    @MainActor
+    private static func runPinRestoreChecks(image: CGImage, configURL: URL) -> Bool {
+        let app = AirSnipAppController(configURL: configURL)
+        let pins = app.pinManager
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer {
+            pins.closeAll()
+            pasteboard.releaseGlobally()
+        }
+
+        pins.createPin(cgImage: image, backingScale: 2, preferredScreenOriginAppKit: nil, config: app.config)
+        guard let pin = pins.windows.last else {
+            fputs("FAIL: Pin restore fixture could not open a pin\n", stderr)
+            return false
+        }
+        pin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: 30, y: 40))
+        pin.adjustOpacity(delta: -1)
+        pin.window.setFrameOrigin(NSPoint(x: pin.window.frame.minX + 20, y: pin.window.frame.minY + 30))
+        let frame = pin.window.frame
+        let opacity = pin.window.alphaValue
+
+        pin.closeSelf()
+        guard pins.count == 0, !pin.window.isVisible else {
+            fputs("FAIL: Closing a pin should remove it from the screen\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard let restored = pins.windows.last, restored.window.isVisible,
+              restored.window.frame == frame, restored.window.alphaValue == opacity,
+              PixelBufferRGBA(cgImage: restored.cgImage) == PixelBufferRGBA(cgImage: image) else {
+            fputs("FAIL: Restoring a closed pin should preserve its image, frame and opacity\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 恢复贴图保留图像、位置、大小和透明度")
+
+        guard let second = image.cropping(to: CGRect(x: 0, y: 0, width: 96, height: 64)),
+              let copied = image.cropping(to: CGRect(x: 0, y: 0, width: 64, height: 48)),
+              let png = try? ImageEncoder.encode(copied, format: .png, scale: 1) else { return false }
+        restored.closeSelf()
+        pins.createPin(cgImage: second, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        pins.windows.last?.closeSelf()
+        pasteboard.clearContents()
+        guard pasteboard.setData(png, forType: .png) else { return false }
+
+        for (index, width) in [copied.width, second.width, image.width].enumerated() {
+            app.triggerPinOrRestore(from: pasteboard)
+            guard pins.count == index + 1, pins.windows.last?.cgImage.width == width else {
+                fputs("FAIL: Pin or restore should open the newly copied image followed by the most recently closed pins (press \(index + 1))\n", stderr)
+                return false
+            }
+        }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 3 else {
+            fputs("FAIL: Pin or restore should leave the windows alone when history is exhausted\n", stderr)
+            return false
+        }
+
+        pasteboard.clearContents()
+        guard pasteboard.setData(png, forType: .png) else { return false }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard let recopied = pins.windows.last, pins.count == 4, recopied.cgImage.width == copied.width else {
+            fputs("FAIL: Copying the same image again should let it be pinned again\n", stderr)
+            return false
+        }
+        recopied.closeSelf()
+        pasteboard.clearContents()
+        guard pasteboard.setString("text only", forType: .string) else { return false }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 4, pins.windows.last?.cgImage.width == copied.width else {
+            fputs("FAIL: A clipboard containing only text should still allow a pin to be restored\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 新图优先、最近关闭优先、主动再次复制与纯文本剪贴板")
+
+        app.updateConfig { $0.pinMaxCount = 4 }
+        pasteboard.clearContents()
+        guard pasteboard.setData(png, forType: .png) else { return false }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 4 else {
+            fputs("FAIL: A new clipboard image should respect the visible pin limit\n", stderr)
+            return false
+        }
+        app.updateConfig { $0.pinMaxCount = 5 }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard let retried = pins.windows.last, pins.count == 5, retried.cgImage.width == copied.width else {
+            fputs("FAIL: A clipboard image blocked by the visible pin limit should remain available\n", stderr)
+            return false
+        }
+        retried.closeSelf()
+        app.updateConfig { $0.pinMaxCount = 4 }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 4 else {
+            fputs("FAIL: Restoring a pin should respect the visible pin limit\n", stderr)
+            return false
+        }
+        app.updateConfig { $0.pinMaxCount = 5 }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 5, pins.windows.last?.cgImage.width == copied.width else {
+            fputs("FAIL: A closed pin blocked by the visible pin limit should remain available\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 达到同屏上限后仍可重试贴出新图和恢复贴图")
+        return true
+    }
+
+    @MainActor
+    private static func runClosedPinHistoryLimitCheck(image: CGImage) -> Bool {
+        var config = AirSnipConfig()
+        config.pinMaxCount = 25
+        let pins = PinManager()
+        defer { pins.closeAll() }
+
+        for width in 32...52 {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)) else { return false }
+            pins.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: config)
+            pins.windows.last?.closeSelf()
+        }
+        for width in (33...52).reversed() {
+            pins.restoreLastClosedPin(config: config)
+            guard pins.windows.last?.cgImage.width == width else {
+                fputs("FAIL: Pin history should retain the most recent 20 closes in order\n", stderr)
+                return false
+            }
+        }
+        pins.restoreLastClosedPin(config: config)
+        guard pins.count == 20 else {
+            fputs("FAIL: Pin history should discard the oldest pin after 20 closes\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 默认保留最近关闭的 20 张贴图")
+        return true
+    }
+
     public static func run() -> Bool {
         do {
             print("[smoke] 1/7 验证配置往返、无损压缩默认开启与 24 项工具栏可见性...")
@@ -387,6 +520,13 @@ public enum SmokeTestRunner {
                 fputs("FAIL: LongshotCanvas stitching height mismatch (got \(lsCanvas.totalHeight))\n", stderr)
                 return false
             }
+
+            let pinRestoreOK = MainActor.assumeIsolated {
+                NSApplication.shared.setActivationPolicy(.accessory)
+                return runPinRestoreChecks(image: baseCG, configURL: tempDir.appendingPathComponent("pin-config.json"))
+                    && runClosedPinHistoryLimitCheck(image: baseCG)
+            }
+            guard pinRestoreOK else { return false }
 
             print("[smoke] 6/7 验证本地离线 Vision OCR 中英文识别与二维码解析...")
             let ocrW = 680

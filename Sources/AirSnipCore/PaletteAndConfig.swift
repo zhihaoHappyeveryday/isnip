@@ -1207,7 +1207,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
             (L10n.tr("截图识字", "Capture & OCR", in: l), hotkeys.ocrCapture),
             (L10n.tr("划词翻译", "Translate Selection", in: l), hotkeys.translateSelection),
             (L10n.tr("截图翻译", "Capture & Translate", in: l), hotkeys.translateCapture),
-            (L10n.tr("贴图", "Pin", in: l), hotkeys.pin),
+            (L10n.tr("贴图或恢复", "Pin or Restore", in: l), hotkeys.pin),
             (L10n.tr("贴图边框", "Pin Border", in: l), hotkeys.pinBorderToggle),
         ]
         for i in 0..<globalList.count {

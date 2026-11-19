@@ -395,14 +395,24 @@ public enum OutputService {
         public let initialResult: PngCompressionResult?
     }
 
-    private static func writePngDataToPasteboard(_ pngData: Data) -> Int {
+    public struct ClipboardCopyID: Equatable {
+        fileprivate let pasteboardName: NSPasteboard.Name
+        fileprivate let changeCount: Int
+    }
+
+    private static var lastClipboardRewrite: (changeCount: Int, originalChangeCount: Int)?
+
+    private static func writePngDataToPasteboard(_ pngData: Data, originalChangeCount: Int? = nil) -> Int? {
         let pb = NSPasteboard.general
-        pb.clearContents()
+        let changeCount = pb.clearContents()
         let item = NSPasteboardItem()
         // Write PNG data ONLY (omitting uncompressed TIFF avoids 10-20 MB clipboard bloat!)
         item.setData(pngData, forType: .png)
-        pb.writeObjects([item])
-        return pb.changeCount
+        guard pb.writeObjects([item]) else { return nil }
+        if let originalChangeCount {
+            lastClipboardRewrite = (changeCount, originalChangeCount)
+        }
+        return changeCount
     }
 
     public static func copyImageToClipboard(
@@ -425,7 +435,7 @@ public enum OutputService {
             return
         }
 
-        let initialChangeCount = writePngDataToPasteboard(rawPngData)
+        guard let initialChangeCount = writePngDataToPasteboard(rawPngData) else { return }
         let shouldCompress = (config?.smartPngCompression ?? true) && (config?.compressClipboardPng ?? true)
         let qualityPreset = config?.pngCompressionQuality ?? .visuallyLossless
 
@@ -451,10 +461,9 @@ public enum OutputService {
             let afterStage1Count: Int? = await MainActor.run {
                 let pb = NSPasteboard.general
                 guard pb.changeCount == initialChangeCount else { return nil }
-                var nextCount = initialChangeCount
-                if stage1.compressedBytes < rawPngData.count {
-                    nextCount = writePngDataToPasteboard(stage1.data)
-                }
+                let nextCount = stage1.compressedBytes < rawPngData.count
+                    ? writePngDataToPasteboard(stage1.data, originalChangeCount: initialChangeCount)
+                    : initialChangeCount
                 onCompressed?(stage1)
                 return nextCount
             }
@@ -471,7 +480,7 @@ public enum OutputService {
             await MainActor.run {
                 let pb = NSPasteboard.general
                 guard pb.changeCount == expectedCount else { return }
-                _ = writePngDataToPasteboard(stage2.data)
+                _ = writePngDataToPasteboard(stage2.data, originalChangeCount: initialChangeCount)
             }
         }
     }
@@ -482,18 +491,28 @@ public enum OutputService {
         pb.setString(text, forType: .string)
     }
 
-    public static func readImageFromClipboard() -> (cgImage: CGImage, pointSize: NSSize)? {
-        let pb = NSPasteboard.general
-        guard let nsImage = NSImage(pasteboard: pb) else { return nil }
+    public static func readImageFromClipboard(
+        from pasteboard: NSPasteboard = .general,
+        excluding previousCopy: ClipboardCopyID? = nil
+    ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID)? {
+        let changeCount = pasteboard.changeCount
+        let name = pasteboard.name
+        var copyChangeCount = changeCount
+        // Both compression stages keep the identifier of the original clipboard copy.
+        if name == .general, let lastClipboardRewrite, lastClipboardRewrite.changeCount == changeCount {
+            copyChangeCount = lastClipboardRewrite.originalChangeCount
+        }
+        let copyID = ClipboardCopyID(pasteboardName: name, changeCount: copyChangeCount)
+        guard copyID != previousCopy, let nsImage = NSImage(pasteboard: pasteboard) else { return nil }
         var rect = NSRect(origin: .zero, size: nsImage.size)
         guard let cg = nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil),
-              cg.width > 0 && cg.height > 0 else {
+              cg.width > 0, cg.height > 0, pasteboard.changeCount == changeCount else {
             return nil
         }
         let ptSize = nsImage.size.width > 1 && nsImage.size.height > 1
             ? nsImage.size
             : NSSize(width: CGFloat(cg.width) / 2.0, height: CGFloat(cg.height) / 2.0)
-        return (cg, ptSize)
+        return (cg, ptSize, copyID)
     }
 
     public static func readImageFromFileDialog() -> CGImage? {
@@ -960,7 +979,7 @@ public final class GlobalHotkeyManager {
             (.ocrCapture, L10n.tr("截图识字", "Capture & OCR", in: lang), hotkeys.ocrCapture),
             (.translateSelection, L10n.tr("划词翻译", "Translate Selection", in: lang), hotkeys.translateSelection),
             (.translateCapture, L10n.tr("截图翻译", "Capture & Translate", in: lang), hotkeys.translateCapture),
-            (.pin, L10n.tr("贴图", "Pin", in: lang), hotkeys.pin),
+            (.pin, L10n.tr("贴图或恢复", "Pin or Restore", in: lang), hotkeys.pin),
             (.pinBorderToggle, L10n.tr("贴图边框", "Pin Border", in: lang), hotkeys.pinBorderToggle),
         ]
 

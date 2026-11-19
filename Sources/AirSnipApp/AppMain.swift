@@ -17,6 +17,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private let statusMenu = NSMenu(title: "iSnip")
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
+    private var lastPinnedClipboardCopy: OutputService.ClipboardCopyID?
     private var isCapturingSnapshots = false
     private let selectionTranslation = SelectionTranslationController()
     private var selectionSourceApplication: NSRunningApplication?
@@ -89,7 +90,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             case .translateCapture:
                 self.triggerOCRTranslation()
             case .pin:
-                self.triggerGlobalPinFromClipboard()
+                self.triggerPinOrRestore()
             case .pinBorderToggle:
                 self.pinManager.toggleAllBorders()
             }
@@ -298,8 +299,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         translateCaptureItem.target = self
         menu.addItem(translateCaptureItem)
 
-        let pinTitle = L10n.tr("剪贴板贴图", "Pin from Clipboard", in: l)
-        let pinItem = NSMenuItem(title: pinTitle, action: #selector(menuPinClipboard), keyEquivalent: "")
+        let pinTitle = L10n.tr("贴图或恢复", "Pin or Restore", in: l)
+        let pinItem = NSMenuItem(title: pinTitle, action: #selector(menuPinOrRestore), keyEquivalent: "")
         applyMenuShortcut(config.hotkeys.pin, to: pinItem, baseTitle: pinTitle)
         pinItem.image = menuIcon("pin")
         pinItem.target = self
@@ -362,7 +363,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     @objc private func menuTranslateCapture() {
         triggerOCRTranslation(fromMenu: true)
     }
-    @objc private func menuPinClipboard() { triggerGlobalPinFromClipboard() }
+    @objc private func menuPinOrRestore() { triggerPinOrRestore() }
     @objc private func menuOCRClipboard() { triggerOCRFromClipboard() }
     @objc private func menuOCRFile() { triggerOCRFromFile() }
     @objc private func menuRestoreClickThrough() { pinManager.restoreAllClickThrough() }
@@ -527,22 +528,24 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         )
     }
 
-    public func triggerGlobalPinFromClipboard() {
+    public func triggerPinOrRestore(from pasteboard: NSPasteboard = .general) {
         cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil else { return }
-        guard let clip = OutputService.readImageFromClipboard() else {
-            // Silent ignore when clipboard contains text or no image (matches AirSnip ADR)
+        guard let clip = OutputService.readImageFromClipboard(from: pasteboard, excluding: lastPinnedClipboardCopy) else {
+            pinManager.restoreLastClosedPin(config: config)
             return
         }
         let scale = Double(clip.cgImage.width) / max(1.0, Double(clip.pointSize.width))
         var pinCfg = config
         pinCfg.pinPosition = .center
-        pinManager.createPin(
+        if pinManager.createPin(
             cgImage: clip.cgImage,
             backingScale: max(1.0, scale),
             preferredScreenOriginAppKit: nil,
             config: pinCfg
-        )
+        ) {
+            lastPinnedClipboardCopy = clip.copyID
+        }
     }
 
     private func startPinInlineEditSession(pin: PinWindowController) {

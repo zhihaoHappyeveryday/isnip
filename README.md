@@ -80,7 +80,7 @@ sh scripts/install-local.sh --no-pull
 | **Global** | `⌃D` | Scrolling Capture (select region or window to auto-scroll & stitch) |
 | **Global** | `⌃F` | Capture & OCR |
 | **Global** | `⌥D` / `⌥S` | Translate Selection / Capture & Translate (macOS 15+) |
-| **Global** | `F3` / `⌃F3` | Pin from Clipboard / Toggle All Pin Borders |
+| **Global** | `F3` / `⌃F3` | Pin or Restore / Toggle All Pin Borders |
 | **Selection & Output** | `Enter` / Double-Click | Copy capture to clipboard and finish |
 | **Selection & Output** | `⌘S` / `⇧⌘S` | Silent save to default folder / Save As… |
 | **Selection & Output** | `S` / `T` | Start Scrolling Capture (`Space` pause/resume, `Enter` save & copy) / OCR selection |

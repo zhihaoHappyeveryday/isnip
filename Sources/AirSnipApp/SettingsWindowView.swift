@@ -1265,7 +1265,7 @@ private struct HotkeysSettingsPane: View {
                     app.updateConfig { $0.hotkeys.translateCapture = b }
                 }
                 MagpieRowDivider()
-                HotkeyRow(title: L10n.tr("剪贴板贴图", "Pin from Clipboard", in: lang), slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
+                HotkeyRow(title: L10n.tr("贴图或恢复", "Pin or Restore", in: lang), slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.pin = b }
                 }
                 MagpieRowDivider()
