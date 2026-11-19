@@ -64,6 +64,24 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertFalse(restored.toolbar.isVisible(.pin))
     }
 
+    func testRestoringDefaultToolbarOrderPreservesVisibility() throws {
+        var config = AirSnipConfig()
+        config.toolbar.setVisible(.ocr, false)
+        config.toolbar.mainOrder = [.ocr] + config.toolbar.mainOrder.filter { $0 != .ocr }
+        let encoded = try JSONEncoder().encode(config)
+        var restored = try JSONDecoder().decode(AirSnipConfig.self, from: encoded)
+
+        XCTAssertEqual(restored.toolbar.mainOrder.first, .ocr)
+        XCTAssertFalse(restored.toolbar.isVisible(.ocr))
+        restored.toolbar.setVisible(.ocr, true)
+        XCTAssertEqual(restored.toolbar.mainOrder.first, .ocr)
+
+        restored.toolbar.setVisible(.ocr, false)
+        restored.toolbar.resetMainOrder()
+        XCTAssertEqual(restored.toolbar.mainOrder.first, .tool(.rect))
+        XCTAssertFalse(restored.toolbar.isVisible(.ocr))
+    }
+
     func testHotkeyConflictDetectionAndUnbound() {
         var cfg = AirSnipConfig()
         XCTAssertTrue(cfg.hotkeyConflicts().isEmpty)

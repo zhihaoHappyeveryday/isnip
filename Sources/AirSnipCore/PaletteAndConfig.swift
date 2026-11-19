@@ -356,6 +356,10 @@ public struct ToolbarVisibilityConfig: Codable, Equatable, Sendable {
         }
     }
 
+    public mutating func resetMainOrder() {
+        order = nil
+    }
+
     public func isVisible(_ slot: ToolbarSlot) -> Bool {
         slot == .cancel || !hidden.contains(slot.key)
     }

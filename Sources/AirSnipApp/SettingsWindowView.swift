@@ -1102,23 +1102,34 @@ private struct ToolbarOrderPane: View {
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
+        let toolbar = app.config.toolbar
+        let order = toolbar.mainOrder
+        let hasCustomOrder = order != ToolbarSlot.defaultMainOrder
 
         MagpieCard {
             MagpieSettingRow(
                 title: L10n.tr("拖动调整顺序", "Drag to Reorder", in: lang),
                 subtitle: L10n.tr("列表从上到下对应工具栏从左到右", "The list runs from left to right on the toolbar", in: lang)
             ) {
-                EmptyView()
+                MagpieTextAction(L10n.tr("恢复默认顺序", "Restore Default Order", in: lang), prominent: hasCustomOrder) {
+                    app.updateConfig { $0.toolbar.resetMainOrder() }
+                }
+                .disabled(!hasCustomOrder)
             }
 
             MagpieRowDivider()
             List {
-                ForEach(app.config.toolbar.mainOrder, id: \.key) { slot in
+                ForEach(order, id: \.key) { slot in
                     HStack(spacing: 8) {
                         Text(label(for: slot))
                             .font(.system(size: 13.5))
                             .foregroundStyle(p.inkPrimary)
                         Spacer()
+                        if !toolbar.isVisible(slot) {
+                            Text(L10n.tr("已隐藏", "Hidden", in: lang))
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(p.inkSecondary)
+                        }
                         Image(systemName: "line.3.horizontal")
                             .font(.system(size: 11.5))
                             .foregroundStyle(p.inkTertiary)

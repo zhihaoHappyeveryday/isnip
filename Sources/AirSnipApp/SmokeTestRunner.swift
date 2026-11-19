@@ -595,11 +595,17 @@ public enum SmokeTestRunner {
                 let reordered = CaptureSessionCoordinator(config: reorderedCfg, mode: .normalCapture)
                 reordered.persistConfigChanges = false
                 reordered.startWithSnapshots([snap])
-                let sample = reordered.renderToolbarVerificationSample(selection: sampleSel)
+                let customIDs = reordered.renderToolbarVerificationSample(selection: sampleSel)?.toolbarIDs
+                reordered.mutateConfig { $0.toolbar.setVisible(.ocr, false) }
+                let hiddenIDs = reordered.renderToolbarVerificationSample(selection: sampleSel)?.toolbarIDs
+                reordered.mutateConfig { $0.toolbar.resetMainOrder() }
+                let restoredIDs = reordered.renderToolbarVerificationSample(selection: sampleSel)?.toolbarIDs
                 reordered.cancelSession()
                 let reorderedIDs = ["output.ocr", "file.copy"] + expectedIDs.filter { $0 != "output.ocr" && $0 != "file.copy" }
-                guard sample?.toolbarIDs == reorderedIDs else {
-                    fputs("FAIL: Screenshot toolbar did not follow the saved order\n", stderr)
+                guard customIDs == reorderedIDs,
+                      hiddenIDs == reorderedIDs.filter({ $0 != "output.ocr" }),
+                      restoredIDs == expectedIDs.filter({ $0 != "output.ocr" }) else {
+                    fputs("FAIL: Screenshot toolbar order, visibility or restore default mismatch\n", stderr)
                     return false
                 }
 
