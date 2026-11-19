@@ -1109,7 +1109,7 @@ private struct ToolbarOrderPane: View {
         MagpieCard {
             MagpieSettingRow(
                 title: L10n.tr("拖动调整顺序", "Drag to Reorder", in: lang),
-                subtitle: L10n.tr("列表从上到下对应工具栏从左到右", "The list runs from left to right on the toolbar", in: lang)
+                subtitle: L10n.tr("列表从上到下对应工具栏从左到右", "List order (top to bottom) becomes toolbar order (left to right)", in: lang)
             ) {
                 MagpieTextAction(L10n.tr("恢复默认顺序", "Restore Default Order", in: lang), prominent: hasCustomOrder) {
                     app.updateConfig { $0.toolbar.resetMainOrder() }
@@ -1136,7 +1136,7 @@ private struct ToolbarOrderPane: View {
                             .accessibilityHidden(true)
                     }
                     .listRowInsets(EdgeInsets(top: 7, leading: 20, bottom: 7, trailing: 20))
-                    .listRowBackground(p.cardBg)
+                    .listRowBackground(Color.clear)
                     .listRowSeparatorTint(p.rowDivider)
                 }
                 .onMove(perform: move)

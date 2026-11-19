@@ -543,9 +543,15 @@ public enum SmokeTestRunner {
                     "output.pin", "edit.undo", "output.ocr", "file.cancel",
                     "output.longshot", "file.save", "file.copy"
                 ]
+                func hasUniformToolbarSpacing(_ rects: [CGRect]) -> Bool {
+                    let gaps = zip(rects, rects.dropFirst()).map { $1.minX - $0.maxX }
+                    guard let first = gaps.first else { return false }
+                    return gaps.allSatisfy { abs($0 - first) < 0.01 }
+                }
                 var toolbarExactMatch = false
                 if let sample = coordinator.renderToolbarVerificationSample(selection: sampleSel) {
-                    toolbarExactMatch = (sample.toolbarIDs == expectedIDs) && !sample.hasSecondaryBar
+                    toolbarExactMatch = sample.toolbarIDs == expectedIDs && !sample.hasSecondaryBar
+                        && !hasUniformToolbarSpacing(sample.toolbarRects)
                     if let previewPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_PNG"],
                        let cg = sample.croppedImage {
                         let rep = NSBitmapImageRep(cgImage: cg)
@@ -595,17 +601,86 @@ public enum SmokeTestRunner {
                 let reordered = CaptureSessionCoordinator(config: reorderedCfg, mode: .normalCapture)
                 reordered.persistConfigChanges = false
                 reordered.startWithSnapshots([snap])
-                let customIDs = reordered.renderToolbarVerificationSample(selection: sampleSel)?.toolbarIDs
+                let reorderedSelection = ASRect(
+                    x: 20, y: 20,
+                    width: Double(rawBuf.width) / snap.backingScale / 2,
+                    height: Double(rawBuf.height) / snap.backingScale / 2
+                )
+                let customSample = reordered.renderToolbarVerificationSample(selection: reorderedSelection, includePreviews: false)
                 reordered.mutateConfig { $0.toolbar.setVisible(.ocr, false) }
-                let hiddenIDs = reordered.renderToolbarVerificationSample(selection: sampleSel)?.toolbarIDs
+                let hiddenIDs = reordered.renderToolbarVerificationSample(includePreviews: false)?.toolbarIDs
                 reordered.mutateConfig { $0.toolbar.resetMainOrder() }
-                let restoredIDs = reordered.renderToolbarVerificationSample(selection: sampleSel)?.toolbarIDs
-                reordered.cancelSession()
+                let restoredSample = reordered.renderToolbarVerificationSample(includePreviews: false)
                 let reorderedIDs = ["output.ocr", "file.copy"] + expectedIDs.filter { $0 != "output.ocr" && $0 != "file.copy" }
-                guard customIDs == reorderedIDs,
+                guard let customSample, customSample.toolbarIDs == reorderedIDs,
+                      hasUniformToolbarSpacing(customSample.toolbarRects),
                       hiddenIDs == reorderedIDs.filter({ $0 != "output.ocr" }),
-                      restoredIDs == expectedIDs.filter({ $0 != "output.ocr" }) else {
+                      let restoredSample, restoredSample.toolbarIDs == expectedIDs.filter({ $0 != "output.ocr" }),
+                      !hasUniformToolbarSpacing(restoredSample.toolbarRects) else {
+                    reordered.cancelSession()
                     fputs("FAIL: Screenshot toolbar order, visibility or restore default mismatch\n", stderr)
+                    return false
+                }
+                reordered.mutateConfig { $0.toolbar = reorderedCfg.toolbar }
+                let visibleAgain = reordered.renderToolbarVerificationSample(includePreviews: false)
+                var didRunOCR = false
+                reordered.onStartOCR = { image, _ in didRunOCR = image.width > 0 }
+                if let visibleAgain, visibleAgain.toolbarIDs == reorderedIDs {
+                    clickToolbarButton(visibleAgain.toolbarRects[0], in: reordered)
+                }
+                reordered.cancelSession()
+                guard didRunOCR else {
+                    fputs("FAIL: Reordered screenshot OCR button did not start recognition\n", stderr)
+                    return false
+                }
+
+                let toolbarConfigURL = tempDir.appendingPathComponent("toolbar-config.json")
+                let toolbarApp = AirSnipAppController(configURL: toolbarConfigURL)
+                toolbarApp.updateConfig {
+                    $0 = defaultCfg
+                    $0.smartPngCompression = false
+                }
+                let oldCapture = toolbarApp.makeSessionCoordinator(mode: .normalCapture)
+                let oldAnnotation = toolbarApp.makeSessionCoordinator(mode: .standaloneImageEdit(baked, snap.backingScale, screen))
+                toolbarApp.updateConfig {
+                    $0.toolbar.mainOrder = reorderedCfg.toolbar.mainOrder
+                    $0.toolbar.setVisible(.save, false)
+                }
+                oldCapture.finishWithSave(image: baked, scale: snap.backingScale)
+                guard toolbarApp.config.toolbar.mainOrder.first == .ocr,
+                      !toolbarApp.config.toolbar.isVisible(.save) else {
+                    fputs("FAIL: Saving from an older capture changed the toolbar order\n", stderr)
+                    return false
+                }
+                oldAnnotation.mutateConfig { $0.defaultLineWidth = 5 }
+                let savedToolbarConfig = AirSnipConfig.load(from: toolbarConfigURL)
+                let nextCapture = toolbarApp.makeSessionCoordinator(mode: .normalCapture)
+                guard nextCapture.config.toolbar.mainOrder.first == .ocr,
+                      savedToolbarConfig.toolbar.mainOrder.first == .ocr,
+                      !savedToolbarConfig.toolbar.isVisible(.save),
+                      savedToolbarConfig.defaultLineWidth == 5 else {
+                    fputs("FAIL: Writing annotation preferences changed the toolbar order\n", stderr)
+                    return false
+                }
+
+                let pin = PinWindowController(
+                    cgImage: baseCG, baseSize: NSSize(width: baseW, height: baseH), backingScale: 1,
+                    origin: screen.visibleFrame.origin, showBorder: true, manager: toolbarApp.pinManager
+                )
+                let pinEdit = CaptureSessionCoordinator(config: reorderedCfg, mode: .inlinePinEdit(pin))
+                var pinFinished = false
+                pinEdit.onSessionEnded = { pinFinished = true }
+                pinEdit.startPinInlineEdit(pin: pin)
+                let pinIDs = reorderedIDs.filter { $0 != "output.pin" && $0 != "output.longshot" }
+                if let sample = pinEdit.renderToolbarVerificationSample(includePreviews: false),
+                   sample.toolbarIDs == pinIDs {
+                    clickToolbarButton(sample.toolbarRects[1], in: pinEdit)
+                }
+                let didFinishPin = pinFinished && !pinEdit.hasVisibleWindows
+                if pinEdit.hasVisibleWindows { pinEdit.cancelSession() }
+                pin.window.orderOut(nil)
+                guard didFinishPin else {
+                    fputs("FAIL: Reordered pin annotation toolbar did not complete the edit\n", stderr)
                     return false
                 }
 
@@ -640,7 +715,7 @@ public enum SmokeTestRunner {
                     lsSession.finishAndSave()
 
                     let tallEditCoord = CaptureSessionCoordinator(
-                        config: defaultCfg,
+                        config: reorderedCfg,
                         mode: .standaloneImageEdit(tallCG, max(1.0, Double(screen.backingScaleFactor)), screen)
                     )
                     tallEditCoord.persistConfigChanges = false
@@ -649,7 +724,10 @@ public enum SmokeTestRunner {
                         backingScale: max(1.0, Double(screen.backingScaleFactor)),
                         screen: screen
                     )
-                    if let tallBaked = tallEditCoord.renderStandaloneAnnotatedOutputSample() {
+                    let expectedEditOrder = reorderedIDs.filter { $0 != "output.longshot" }
+                    let editSample = tallEditCoord.renderToolbarVerificationSample(includePreviews: false)
+                    if editSample?.toolbarIDs == expectedEditOrder,
+                       let tallBaked = tallEditCoord.renderStandaloneAnnotatedOutputSample() {
                         longshotSaveAndEditOK = (lsSavedDims?.0 == tallW)
                             && (lsSavedDims?.1 == tallH)
                             && (tallBaked.width == tallW)
@@ -817,6 +895,24 @@ public enum SmokeTestRunner {
         } catch {
             fputs("FAIL: Smoke test threw error: \(error)\n", stderr)
             return false
+        }
+    }
+
+    @MainActor
+    private static func clickToolbarButton(_ rect: CGRect, in session: CaptureSessionCoordinator) {
+        guard let window = NSApp.windows.first(where: { session.activeWindowNumbers.contains($0.windowNumber) }),
+              let view = window.contentView as? OverlayCanvasView else { return }
+        let point = view.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            )
+        }
+        if let down = event(.leftMouseDown), let up = event(.leftMouseUp) {
+            view.mouseDown(with: down)
+            view.mouseUp(with: up)
         }
     }
 }

@@ -82,6 +82,13 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertFalse(restored.toolbar.isVisible(.ocr))
     }
 
+    func testMainToolbarOrderKeepsKnownPositionsWhenButtonsChange() throws {
+        let saved = Data(#"{"toolbar":{"hidden":[],"order":["output.ocr","removed.button","file.copy"]}}"#.utf8)
+        let config = try JSONDecoder().decode(AirSnipConfig.self, from: saved)
+        let remaining = ToolbarSlot.defaultMainOrder.filter { $0 != .ocr && $0 != .copy }
+        XCTAssertEqual(config.toolbar.mainOrder, [.ocr, .copy] + remaining)
+    }
+
     func testHotkeyConflictDetectionAndUnbound() {
         var cfg = AirSnipConfig()
         XCTAssertTrue(cfg.hotkeyConflicts().isEmpty)

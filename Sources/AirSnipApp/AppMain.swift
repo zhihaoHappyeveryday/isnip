@@ -561,11 +561,17 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.startStandaloneImageEdit(cgImage: image, backingScale: scale, screen: screen)
     }
 
-    private func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
+    func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
 
-        coordinator.onConfigMutated = { [weak self] updated in
-            self?.config = updated
+        coordinator.onConfigMutated = { [weak self, weak coordinator] updated in
+            guard let self else { return }
+            var cfg = updated
+            cfg.toolbar = self.config.toolbar
+            if coordinator?.persistConfigChanges == true {
+                try? cfg.save(to: self.configURL)
+            }
+            self.config = cfg
         }
         coordinator.onCompleteCopy = { [weak self] cgImg, scale in
             let currentCfg = self?.config
@@ -576,6 +582,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
+            if let self {
+                cfg.toolbar = self.config.toolbar
+            }
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
             guard OutputService.saveImage(

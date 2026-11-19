@@ -151,9 +151,11 @@ public final class CaptureSessionCoordinator {
         }
     }
 
-    public func renderToolbarVerificationSample(selection: ASRect) -> (toolbarIDs: [String], hasSecondaryBar: Bool, croppedImage: CGImage?)? {
+    public func renderToolbarVerificationSample(
+        selection: ASRect? = nil, includePreviews: Bool = true
+    ) -> (toolbarIDs: [String], toolbarRects: [CGRect], hasSecondaryBar: Bool, croppedImage: CGImage?)? {
         guard let ctrl = screenControllers.first else { return nil }
-        return ctrl.canvasView.renderVerificationSample(selection: selection)
+        return ctrl.canvasView.renderVerificationSample(selection: selection, includePreviews: includePreviews)
     }
 
     public func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
@@ -344,10 +346,11 @@ public final class CaptureSessionCoordinator {
 
     func mutateConfig(_ block: (inout AirSnipConfig) -> Void) {
         block(&config)
-        if persistConfigChanges {
+        if let onConfigMutated {
+            onConfigMutated(config)
+        } else if persistConfigChanges {
             try? config.save()
         }
-        onConfigMutated?(config)
     }
 
     func finishWithCopy(image: CGImage, scale: Double) {
@@ -769,7 +772,10 @@ final class OverlayCanvasView: NSView {
         return out
     }
 
-    func renderVerificationSample(selection sel: ASRect) -> (toolbarIDs: [String], hasSecondaryBar: Bool, croppedImage: CGImage?) {
+    func renderVerificationSample(
+        selection sampleSelection: ASRect?, includePreviews: Bool
+    ) -> (toolbarIDs: [String], toolbarRects: [CGRect], hasSecondaryBar: Bool, croppedImage: CGImage?) {
+        guard let sel = sampleSelection ?? selection else { return ([], [], false, nil) }
         self.selection = sel
         self.activeTool = nil
         self.colorPicker = nil
@@ -777,7 +783,7 @@ final class OverlayCanvasView: NSView {
         var cropped: CGImage?
         if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
             cacheDisplay(in: bounds, to: rep)
-            if let fullCG = rep.cgImage, mainToolbarRect != .zero {
+            if includePreviews, let fullCG = rep.cgImage, mainToolbarRect != .zero {
                 let scale = CGFloat(fullCG.width) / max(1, bounds.width)
                 let cropPt = mainToolbarRect.insetBy(dx: -18, dy: -26)
                 let clamped = cropPt.intersection(bounds)
@@ -791,10 +797,11 @@ final class OverlayCanvasView: NSView {
             }
         }
         let ids = toolbarHitItems.map(\.id)
+        let rects = toolbarHitItems.map(\.rect)
         let hadSub = (secondRowRect != .zero)
 
         // Optional rich multi-state verification dump for visual inspection
-        if let dirPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_DIR"] {
+        if includePreviews, let dirPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_DIR"] {
             let dirURL = URL(fileURLWithPath: dirPath)
             try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
             func dumpRegion(_ name: String, computeRect: () -> CGRect) {
@@ -851,7 +858,7 @@ final class OverlayCanvasView: NSView {
             activeTool = nil
         }
 
-        return (ids, hadSub, cropped)
+        return (ids, rects, hadSub, cropped)
     }
 
     private var currentSwatchColor: RGBAColor {
