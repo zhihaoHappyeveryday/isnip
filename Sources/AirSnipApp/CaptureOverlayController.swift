@@ -360,8 +360,7 @@ public final class CaptureSessionCoordinator {
     func finishWithCopy(image: CGImage, scale: Double) {
         if case .inlinePinEdit(let pin) = mode {
             closeAllWindows()
-            pin.updateImage(image)
-            pin.show()
+            pin.finishInlineEdit(image: image)
             onSessionEnded?()
             return
         }
@@ -375,8 +374,7 @@ public final class CaptureSessionCoordinator {
             closeAllWindows()
             _ = onSaveImage?(image, scale, false, config)
             if case .inlinePinEdit(let pin) = mode {
-                pin.updateImage(image)
-                pin.show()
+                pin.finishInlineEdit(image: image)
             }
             onSessionEnded?()
             return
@@ -389,8 +387,7 @@ public final class CaptureSessionCoordinator {
         let saved = onSaveImage?(image, scale, true, config) ?? false
         if saved {
             if case .inlinePinEdit(let pin) = mode {
-                pin.updateImage(image)
-                pin.show()
+                pin.finishInlineEdit(image: image)
             }
             closeAllWindows()
             onSessionEnded?()
@@ -405,8 +402,7 @@ public final class CaptureSessionCoordinator {
     func finishWithPin(image: CGImage, scale: Double, appKitOrigin: CGPoint?) {
         if case .inlinePinEdit(let pin) = mode {
             closeAllWindows()
-            pin.updateImage(image)
-            pin.show()
+            pin.finishInlineEdit(image: image)
             onSessionEnded?()
             return
         }
@@ -417,7 +413,7 @@ public final class CaptureSessionCoordinator {
 
     func finishWithOCR(rawImage: CGImage, anchorScreenPoint: NSPoint?) {
         if case .inlinePinEdit(let pin) = mode {
-            pin.show()
+            pin.finishInlineEdit()
         }
         closeAllWindows()
         onStartOCR?(rawImage, anchorScreenPoint)
@@ -438,7 +434,7 @@ public final class CaptureSessionCoordinator {
     public func cancelSession() {
         if case .inlinePinEdit(let pin) = mode {
             closeAllWindows()
-            pin.show()
+            pin.finishInlineEdit()
             onSessionEnded?()
             return
         }

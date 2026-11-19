@@ -5,6 +5,7 @@ import AirSnipCore
 @MainActor
 public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
+    private var closedPins: [PinWindowController] = []
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
@@ -15,16 +16,14 @@ public final class PinManager: ObservableObject {
     public var count: Int { windows.count }
     public var hasClickThroughPins: Bool { windows.contains { $0.isClickThrough } }
 
+    @discardableResult
     public func createPin(
         cgImage: CGImage,
         backingScale: Double,
         preferredScreenOriginAppKit: CGPoint?,
         config: AirSnipConfig
-    ) {
-        if windows.count >= config.pinMaxCount {
-            ToastHUD.show(L10n.tr("已达上限（\(config.pinMaxCount) 张）", "Pin limit reached (\(config.pinMaxCount))", in: config.language))
-            return
-        }
+    ) -> Bool {
+        guard canOpenPin(config: config) else { return false }
         let pointW = max(32.0, Double(cgImage.width) / max(1.0, backingScale))
         let pointH = max(32.0, Double(cgImage.height) / max(1.0, backingScale))
         let size = NSSize(width: pointW, height: pointH)
@@ -53,18 +52,51 @@ public final class PinManager: ObservableObject {
         )
         windows.append(controller)
         controller.show()
+        return true
     }
 
     public func remove(_ pin: PinWindowController) {
+        guard let index = windows.firstIndex(where: { $0 === pin }) else { return }
         pin.window.orderOut(nil)
-        windows.removeAll { $0 === pin }
+        rememberClosedPins([windows.remove(at: index)])
+    }
+
+    private func rememberClosedPins(_ pins: [PinWindowController]) {
+        let limit = getConfig?().pinHistoryLimit ?? AirSnipConfig.defaultPinHistoryLimit
+        guard limit > 0 else { return }
+        closedPins.append(contentsOf: pins)
+        trimClosedHistory(to: limit)
+    }
+
+    func trimClosedHistory(to limit: Int) {
+        let excess = closedPins.count - limit
+        if excess > 0 {
+            closedPins.removeFirst(excess)
+        }
+    }
+
+    public func restoreLastClosedPin(config: AirSnipConfig) {
+        guard let pin = closedPins.last, canOpenPin(config: config) else { return }
+        closedPins.removeLast()
+        windows.append(pin)
+        pin.show()
+    }
+
+    private func canOpenPin(config: AirSnipConfig) -> Bool {
+        guard count < config.pinMaxCount else {
+            ToastHUD.show(L10n.tr("已达上限（\(config.pinMaxCount) 张）", "Pin limit reached (\(config.pinMaxCount))", in: config.language))
+            return false
+        }
+        return true
     }
 
     public func closeAll() {
-        for w in windows {
-            w.window.orderOut(nil)
+        let pins = windows
+        for pin in pins {
+            pin.window.orderOut(nil)
         }
         windows.removeAll()
+        rememberClosedPins(pins)
     }
 
     public func restoreAllClickThrough() {
@@ -145,6 +177,14 @@ public final class PinWindowController: NSObject {
     public func show() {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(contentView)
+    }
+
+    func finishInlineEdit(image: CGImage? = nil) {
+        guard manager?.windows.contains(where: { $0 === self }) == true else { return }
+        if let image {
+            updateImage(image)
+        }
+        show()
     }
 
     public func updateImage(_ newImage: CGImage) {

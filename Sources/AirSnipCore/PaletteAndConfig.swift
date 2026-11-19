@@ -947,6 +947,9 @@ public struct TranslationConfig: Codable, Equatable, Sendable {
 }
 
 public struct AirSnipConfig: Codable, Equatable, Sendable {
+    public static let defaultPinHistoryLimit = 20
+    public static let pinHistoryLimitRange = 0...50
+
     public var autoStart: Bool
     public var language: AppLanguage
     public var theme: ThemeSetting
@@ -956,6 +959,9 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var pinPosition: PinPosition
     public var pinBorder: Bool
     public var pinMaxCount: Int
+    public var pinHistoryLimit: Int {
+        didSet { pinHistoryLimit = Self.clampedPinHistoryLimit(pinHistoryLimit) }
+    }
     public var uiScale: UiScaleSetting
     public var swatchColors: [RGBAColor]
     public var activeColorIndex: Int
@@ -999,6 +1005,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         pinPosition: PinPosition = .original,
         pinBorder: Bool = true,
         pinMaxCount: Int = 20,
+        pinHistoryLimit: Int = AirSnipConfig.defaultPinHistoryLimit,
         uiScale: UiScaleSetting = .auto,
         swatchColors: [RGBAColor] = ColorPalette.defaultSwatches,
         activeColorIndex: Int = 1,
@@ -1041,6 +1048,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinPosition = pinPosition
         self.pinBorder = pinBorder
         self.pinMaxCount = pinMaxCount
+        self.pinHistoryLimit = Self.clampedPinHistoryLimit(pinHistoryLimit)
         self.uiScale = uiScale
         self.swatchColors = swatchColors.count == ColorPalette.swatchCount ? swatchColors : ColorPalette.defaultSwatches
         self.activeColorIndex = max(0, min(ColorPalette.swatchCount - 1, activeColorIndex))
@@ -1076,7 +1084,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case autoStart, language, theme, hotkeys, hotkeyDefaultsMigratedV2, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
+        case autoStart, language, theme, hotkeys, hotkeyDefaultsMigratedV2, toolKeys, uiScale
+        case pinPosition, pinBorder, pinMaxCount, pinHistoryLimit
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
         case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
         case styleDefaultsMigratedV2
@@ -1138,6 +1147,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinPosition = try c.decodeIfPresent(PinPosition.self, forKey: .pinPosition) ?? d.pinPosition
         self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
         self.pinMaxCount = try c.decodeIfPresent(Int.self, forKey: .pinMaxCount) ?? d.pinMaxCount
+        self.pinHistoryLimit = Self.clampedPinHistoryLimit(try c.decodeIfPresent(Int.self, forKey: .pinHistoryLimit) ?? d.pinHistoryLimit)
         self.uiScale = try c.decodeIfPresent(UiScaleSetting.self, forKey: .uiScale) ?? d.uiScale
         let alreadyMigratedV2 = try c.decodeIfPresent(Bool.self, forKey: .styleDefaultsMigratedV2) ?? false
         var decodedSwatches = try c.decodeIfPresent([RGBAColor].self, forKey: .swatchColors) ?? d.swatchColors
@@ -1182,6 +1192,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.skippedVersion = try c.decodeIfPresent(String.self, forKey: .skippedVersion)
         self.ocr = try c.decodeIfPresent(OcrConfig.self, forKey: .ocr) ?? d.ocr
         self.translation = try c.decodeIfPresent(TranslationConfig.self, forKey: .translation) ?? d.translation
+    }
+
+    private static func clampedPinHistoryLimit(_ limit: Int) -> Int {
+        max(pinHistoryLimitRange.lowerBound, min(pinHistoryLimitRange.upperBound, limit))
     }
 
     public static func defaultConfigFileURL() -> URL {
@@ -1245,7 +1259,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
             (L10n.tr("截图识字", "Capture & OCR", in: l), hotkeys.ocrCapture),
             (L10n.tr("划词翻译", "Translate Selection", in: l), hotkeys.translateSelection),
             (L10n.tr("截图翻译", "Capture & Translate", in: l), hotkeys.translateCapture),
-            (L10n.tr("贴图", "Pin", in: l), hotkeys.pin),
+            (L10n.tr("贴图或恢复", "Pin or Restore", in: l), hotkeys.pin),
             (L10n.tr("贴图边框", "Pin Border", in: l), hotkeys.pinBorderToggle),
         ]
         for i in 0..<globalList.count {

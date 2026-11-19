@@ -1059,6 +1059,22 @@ private struct CaptureAndPinPane: View {
                     }
                 )
             }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: L10n.tr("可恢复贴图数", "Recoverable Pins", in: lang)) {
+                MagpieStepperPill(
+                    displayValue: lang.isEnglish ? "\(app.config.pinHistoryLimit) pins" : "\(app.config.pinHistoryLimit) 张",
+                    canDecrement: app.config.pinHistoryLimit > AirSnipConfig.pinHistoryLimitRange.lowerBound,
+                    canIncrement: app.config.pinHistoryLimit < AirSnipConfig.pinHistoryLimitRange.upperBound,
+                    onDecrement: {
+                        app.updateConfig { $0.pinHistoryLimit -= 5 }
+                    },
+                    onIncrement: {
+                        app.updateConfig { $0.pinHistoryLimit += 5 }
+                    }
+                )
+            }
         }
     }
 }
@@ -1365,7 +1381,7 @@ private struct HotkeysSettingsPane: View {
                     app.updateConfig { $0.hotkeys.translateCapture = b }
                 }
                 MagpieRowDivider()
-                HotkeyRow(title: L10n.tr("剪贴板贴图", "Pin from Clipboard", in: lang), slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
+                HotkeyRow(title: L10n.tr("贴图或恢复", "Pin or Restore", in: lang), slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.pin = b }
                 }
                 MagpieRowDivider()

@@ -37,6 +37,7 @@
   - Built-in non-inertial pixel scroll driver, feature-row peak matching (resilient to sparse whitespace and dynamic scrollbars, with center-column fallback for fixed-sidebar layouts), automatic sticky header/footer stripping, and **automatic bottom-of-page stop detection**; supports `Space` pause/resume, 3 scroll speeds, manual scroll-wheel top-up, and `⌘Z` segment undo.
 - **Pin to Screen (`F3` / `⌃F3`)**
   - Float any capture or clipboard image always-on-top for side-by-side reference; supports cursor-centered scroll zoom, `⌘`/`⌃` + scroll opacity control, subtle border toggle, click-through mode, and pressing `Space` to annotate in place.
+  - Press `F3` without a new clipboard image to restore the most recently closed pin from this session. **Settings → Capture → Recoverable Pins** defaults to 20 and adjusts from 0 to 50 in steps of 5. Setting it to 0 clears and disables pin history.
 - **100% Offline On-Device Vision OCR & QR Code Detection (`⌃F` / `T`)**
   - Extract text directly from screen regions (`⌃F`), active captures (`T`), pinned images (`T`), tall scrolling captures, clipboard images, or local image files (`Recognize Image File…`).
   - Supports multi-language switching (`Auto` / `Simplified Chinese` / `Traditional Chinese` / `English` / `Japanese` / `Korean`), smart soft line-break merging, and one-click QR URL opening—**100% local inference, images never leave your Mac**.
@@ -80,7 +81,7 @@ sh scripts/install-local.sh --no-pull
 | **Global** | `⌃D` | Scrolling Capture (select region or window to auto-scroll & stitch) |
 | **Global** | `⌃F` | Capture & OCR |
 | **Global** | `⌥D` / `⌥S` | Translate Selection / Capture & Translate (macOS 15+) |
-| **Global** | `F3` / `⌃F3` | Pin from Clipboard / Toggle All Pin Borders |
+| **Global** | `F3` / `⌃F3` | Pin or Restore / Toggle All Pin Borders |
 | **Selection & Output** | `Enter` / Double-Click | Copy capture to clipboard and finish |
 | **Selection & Output** | `⌘S` / `⇧⌘S` | Silent save to default folder / Save As… |
 | **Selection & Output** | `S` / `T` | Start Scrolling Capture (`Space` pause/resume, `Enter` save & copy) / OCR selection |
