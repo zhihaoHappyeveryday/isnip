@@ -416,6 +416,7 @@ final class AirSnipCoreTests: XCTestCase {
 
     func testPinHistoryLimitDefaultsMigrationAndPersistence() throws {
         XCTAssertEqual(AirSnipConfig().pinHistoryLimit, 20)
+        XCTAssertNil(AirSnipConfig().pinHistoryParentDirectory)
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -431,6 +432,7 @@ final class AirSnipCoreTests: XCTestCase {
 
         for limit in [0, 50] {
             config.pinHistoryLimit = limit
+            config.pinHistoryParentDirectory = limit == 0 ? nil : dir.path
             try config.save(to: url)
             XCTAssertEqual(AirSnipConfig.load(from: url), config)
         }

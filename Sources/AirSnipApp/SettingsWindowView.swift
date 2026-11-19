@@ -1827,6 +1827,54 @@ private struct OCRSettingsPane: View {
 
 // MARK: - 7. About (关于 / About)
 
+private struct PinHistoryDirectoryRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appLanguage) private var lang
+    @ObservedObject var app: AirSnipAppController
+    var subtitle: String? = nil
+
+    var body: some View {
+        let directory = OutputService.pinHistoryDirectoryURL(for: app.config)
+        MagpieSettingRow(
+            title: L10n.tr("贴图历史目录", "Pin History Directory", in: lang),
+            subtitle: subtitle,
+            infoTip: L10n.tr(
+                "存放本次运行的已关闭贴图。默认跟随截图保存目录。",
+                "Stores closed pins for the current session. By default, follows the screenshot save location.", in: lang
+            )
+        ) {
+            HStack(spacing: 6) {
+                Text(OutputService.displayPath(for: directory))
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundStyle(MagpiePalette(colorScheme: colorScheme).inkMono)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 260, alignment: .trailing)
+                MagpieCopyButton(value: directory.path)
+                MagpieTextAction(L10n.tr("打开", "Open", in: lang)) {
+                    do {
+                        try ClosedPinHistory.prepareRoot(directory)
+                        NSWorkspace.shared.open(directory)
+                    } catch {
+                        ToastHUD.show(L10n.tr("无法打开贴图历史目录", "Could not open the pin history directory", in: lang),
+                                      symbol: "exclamationmark.triangle", tint: .systemOrange)
+                    }
+                }
+                MagpieTextAction(L10n.tr("更改…", "Change…", in: lang)) {
+                    if let chosen = OutputService.chooseSaveDirectory(initial: directory.deletingLastPathComponent()) {
+                        app.updateConfig { $0.pinHistoryParentDirectory = chosen.path }
+                    }
+                }
+                if app.config.pinHistoryParentDirectory != nil {
+                    MagpieTextAction(L10n.tr("恢复默认", "Restore Default", in: lang)) {
+                        app.updateConfig { $0.pinHistoryParentDirectory = nil }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct AboutSettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appLanguage) private var lang
@@ -1956,6 +2004,10 @@ private struct AboutSettingsPane: View {
                     }
                 }
             }
+
+            MagpieRowDivider()
+
+            PinHistoryDirectoryRow(app: app)
 
             MagpieRowDivider()
 
@@ -2237,6 +2289,9 @@ private struct SettingsSearchResultsPane: View {
                         MagpieTextAction(L10n.tr("打开", "Open", in: lang)) { NSWorkspace.shared.open(configDirURL) }
                     }
                 })
+            },
+            SearchEntry(id: "ab.pin-history", keywords: "关于 贴图历史目录 存储路径 恢复缓存 about pin history directory storage cache") {
+                AnyView(PinHistoryDirectoryRow(app: app, subtitle: SettingsTab.about.title(in: lang)))
             },
             SearchEntry(id: "ab.dingding", keywords: "关于 about 服务支持 叮叮提醒 微信小程序 提供服务 二维码 小程序码 dingding wechat mini program service provider qrcode yinso") {
                 AnyView(DingDingServiceSupportRow(lang: lang, onShowQR: onShowDingDingQR))

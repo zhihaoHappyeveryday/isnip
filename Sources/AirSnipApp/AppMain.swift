@@ -27,7 +27,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public init(configURL: URL = AirSnipConfig.defaultConfigFileURL(), pinPasteboard: NSPasteboard = .general) {
         self.configURL = configURL
-        self.pinManager = PinManager(pasteboard: pinPasteboard)
+        self.pinManager = PinManager(
+            pasteboard: pinPasteboard,
+            historyRegistryURL: configURL.deletingPathExtension().appendingPathExtension("pin-history-sessions.json"),
+            historyDirectory: OutputService.pinHistoryDirectoryURL(for:)
+        )
         let loadedConfig = AirSnipConfig.load(from: configURL)
         L10n.current = loadedConfig.language
         self.config = loadedConfig
@@ -578,8 +582,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.startStandaloneImageEdit(cgImage: image, backingScale: scale, screen: screen)
     }
 
-    private func preservePinHistoryLimit(in captureConfig: inout AirSnipConfig) {
+    private func preservePinHistorySettings(in captureConfig: inout AirSnipConfig) {
         captureConfig.pinHistoryLimit = config.pinHistoryLimit
+        captureConfig.pinHistoryParentDirectory = config.pinHistoryParentDirectory
+        captureConfig.lastSaveDirectory = config.lastSaveDirectory
     }
 
     private func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
@@ -589,7 +595,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.onConfigMutated = { [weak self] updated in
             guard let self else { return }
             var merged = updated
-            self.preservePinHistoryLimit(in: &merged)
+            self.preservePinHistorySettings(in: &merged)
             try? merged.save(to: self.configURL)
             self.config = merged
         }
@@ -602,7 +608,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
-            self?.preservePinHistoryLimit(in: &cfg)
+            self?.preservePinHistorySettings(in: &cfg)
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
             guard OutputService.saveImage(
@@ -738,6 +744,10 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         controller?.openSettings()
         return true
+    }
+
+    public func applicationWillTerminate(_ notification: Notification) {
+        controller?.pinManager.finishHistorySession()
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

@@ -655,6 +655,16 @@ public enum OutputService {
         (url.path as NSString).abbreviatingWithTildeInPath
     }
 
+    static func pinHistoryDirectoryURL(for config: AirSnipConfig) -> URL {
+        let parent: URL
+        if let path = config.pinHistoryParentDirectory, !path.isEmpty {
+            parent = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+        } else {
+            parent = defaultSaveDirectoryURL(for: config)
+        }
+        return parent.appendingPathComponent(ClosedPinHistory.directoryName, isDirectory: true)
+    }
+
     public static func chooseSaveDirectory(initial: URL) -> URL? {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
