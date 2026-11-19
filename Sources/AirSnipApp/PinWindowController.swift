@@ -58,9 +58,13 @@ public final class PinManager: ObservableObject {
     public func remove(_ pin: PinWindowController) {
         guard let index = windows.firstIndex(where: { $0 === pin }) else { return }
         pin.window.orderOut(nil)
-        closedPins.append(windows.remove(at: index))
+        rememberClosedPins([windows.remove(at: index)])
+    }
+
+    private func rememberClosedPins(_ pins: [PinWindowController]) {
+        closedPins.append(contentsOf: pins)
         if closedPins.count > 20 {
-            closedPins.removeFirst()
+            closedPins.removeFirst(closedPins.count - 20)
         }
     }
 
@@ -80,10 +84,12 @@ public final class PinManager: ObservableObject {
     }
 
     public func closeAll() {
-        for w in windows {
-            w.window.orderOut(nil)
+        let pins = windows
+        for pin in pins {
+            pin.window.orderOut(nil)
         }
         windows.removeAll()
+        rememberClosedPins(pins)
     }
 
     public func restoreAllClickThrough() {
@@ -164,6 +170,14 @@ public final class PinWindowController: NSObject {
     public func show() {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(contentView)
+    }
+
+    func finishInlineEdit(image: CGImage? = nil) {
+        guard manager?.windows.contains(where: { $0 === self }) == true else { return }
+        if let image {
+            updateImage(image)
+        }
+        show()
     }
 
     public func updateImage(_ newImage: CGImage) {

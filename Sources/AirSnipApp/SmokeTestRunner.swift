@@ -313,21 +313,122 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func runBatchPinRestoreCheck(image: CGImage, configURL: URL) -> Bool {
+        let app = AirSnipAppController(configURL: configURL)
+        let pins = app.pinManager
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer {
+            pins.closeAll()
+            pasteboard.releaseGlobally()
+        }
+
+        for width in [64, 80, 96] {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 48)),
+                  pins.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config),
+                  let pin = pins.windows.last else { return false }
+            pin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: 24, y: 24))
+            pin.adjustOpacity(delta: -1)
+        }
+        let opened = pins.windows
+        let states = opened.map { (image: $0.cgImage, frame: $0.window.frame, opacity: $0.window.alphaValue) }
+
+        func checkRestoration(indices: [Int]) -> Bool {
+            guard pins.count == 0, opened.allSatisfy({ !$0.window.isVisible }) else {
+                fputs("FAIL: Close All should hide every pin\n", stderr)
+                return false
+            }
+            for (press, index) in indices.enumerated() {
+                app.triggerPinOrRestore(from: pasteboard)
+                let state = states[index]
+                guard let restored = pins.windows.last, pins.count == press + 1, restored.window.isVisible,
+                      PixelBufferRGBA(cgImage: restored.cgImage) == PixelBufferRGBA(cgImage: state.image),
+                      restored.window.frame == state.frame, restored.window.alphaValue == state.opacity else {
+                    fputs("FAIL: Pin or restore should restore one pin in reverse insertion order with its original display state (press \(press + 1))\n", stderr)
+                    return false
+                }
+            }
+            app.triggerPinOrRestore(from: pasteboard)
+            guard pins.count == indices.count else {
+                fputs("FAIL: Close All should leave one history entry per pin\n", stderr)
+                return false
+            }
+            return true
+        }
+
+        let first = opened[0]
+        first.show()
+        let statusMenu = NSMenu()
+        app.menuNeedsUpdate(statusMenu)
+        guard let statusClose = statusMenu.item(withTitle: L10n.tr("关闭全部贴图", "Close All Pins")),
+              let statusAction = statusClose.action,
+              NSApp.sendAction(statusAction, to: statusClose.target, from: statusClose),
+              checkRestoration(indices: [2, 1, 0]) else { return false }
+
+        guard let event = NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: 24, y: 24),
+                                             modifierFlags: [], timestamp: 0, windowNumber: first.window.windowNumber,
+                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+              let pinMenu = first.window.contentView?.menu(for: event),
+              let pinClose = pinMenu.item(withTitle: L10n.tr("关闭全部", "Close All")),
+              let pinAction = pinClose.action,
+              NSApp.sendAction(pinAction, to: pinClose.target, from: pinClose),
+              checkRestoration(indices: [0, 1, 2]) else { return false }
+        print("[pins] PASS: 两个关闭全部菜单都按最近贴出或恢复的顺序逐张恢复")
+        return true
+    }
+
+    @MainActor
+    private static func runBatchCloseDuringInlineEditCheck(image: CGImage) -> Bool {
+        let config = AirSnipConfig()
+        let pins = PinManager()
+        defer { pins.closeAll() }
+        guard let edited = image.cropping(to: CGRect(x: 0, y: 0, width: 96, height: 64)),
+              pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: config),
+              let pin = pins.windows.last else { return false }
+
+        let editor = CaptureSessionCoordinator(config: config, mode: .inlinePinEdit(pin))
+        editor.startPinInlineEdit(pin: pin)
+        pins.restoreLastClosedPin(config: config)
+        guard editor.hasVisibleWindows, pins.count == 1, !pin.window.isVisible else {
+            fputs("FAIL: A pin hidden for inline editing should still count as open\n", stderr)
+            return false
+        }
+
+        pins.closeAll()
+        editor.finishWithCopy(image: edited, scale: 1)
+        guard pins.count == 0, !pin.window.isVisible, !editor.hasVisibleWindows else {
+            fputs("FAIL: Finishing an inline edit should leave a pin closed by Close All hidden\n", stderr)
+            return false
+        }
+
+        pins.restoreLastClosedPin(config: config)
+        guard let restored = pins.windows.last, pins.count == 1, restored.window.isVisible,
+              PixelBufferRGBA(cgImage: restored.cgImage) == PixelBufferRGBA(cgImage: image) else {
+            fputs("FAIL: Restoring a pin closed during an inline edit should show the image as it was at close time\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 关闭全部后结束标注，贴图保持关闭并可按关闭时的图像恢复")
+        return true
+    }
+
+    @MainActor
     private static func runClosedPinHistoryLimitCheck(image: CGImage) -> Bool {
         var config = AirSnipConfig()
         config.pinMaxCount = 25
         let pins = PinManager()
         defer { pins.closeAll() }
 
-        for width in 32...52 {
-            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)) else { return false }
-            pins.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: config)
-            pins.windows.last?.closeSelf()
+        for width in 32...54 {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
+                  pins.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: config) else { return false }
+            if width < 36 {
+                pins.windows.last?.closeSelf()
+            }
         }
-        for width in (33...52).reversed() {
+        pins.closeAll()
+        for width in (35...54).reversed() {
             pins.restoreLastClosedPin(config: config)
             guard pins.windows.last?.cgImage.width == width else {
-                fputs("FAIL: Pin history should retain the most recent 20 closes in order\n", stderr)
+                fputs("FAIL: Single and batch closes should share the most recent 20 history entries in order\n", stderr)
                 return false
             }
         }
@@ -336,7 +437,7 @@ public enum SmokeTestRunner {
             fputs("FAIL: Pin history should discard the oldest pin after 20 closes\n", stderr)
             return false
         }
-        print("[pins] PASS: 默认保留最近关闭的 20 张贴图")
+        print("[pins] PASS: 单张关闭和关闭全部共用最近 20 张的历史")
         return true
     }
 
@@ -524,6 +625,8 @@ public enum SmokeTestRunner {
             let pinRestoreOK = MainActor.assumeIsolated {
                 NSApplication.shared.setActivationPolicy(.accessory)
                 return runPinRestoreChecks(image: baseCG, configURL: tempDir.appendingPathComponent("pin-config.json"))
+                    && runBatchPinRestoreCheck(image: baseCG, configURL: tempDir.appendingPathComponent("pin-batch-config.json"))
+                    && runBatchCloseDuringInlineEditCheck(image: baseCG)
                     && runClosedPinHistoryLimitCheck(image: baseCG)
             }
             guard pinRestoreOK else { return false }
