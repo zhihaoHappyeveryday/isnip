@@ -491,6 +491,38 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func runOversizedTextPinCheck(image _: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
+        let text = String(repeating: "W", count: 360) + String(repeating: "\nx", count: 234) + "\n\t 原文结尾  "
+        guard pasteboard.setString(text, forType: .string) else { return false }
+
+        let pins = app.pinManager
+        app.triggerPinOrRestore()
+        guard let pin = pins.windows.last, pin.window.isVisible else {
+            fputs("FAIL: Oversized clipboard text should still open as a pin\n", stderr)
+            return false
+        }
+        let bitmapBytes = pin.cgImage.bytesPerRow * pin.cgImage.height
+        guard bitmapBytes <= 32 * 1024 * 1024 else {
+            fputs("FAIL: Oversized text pin exceeded the 32 MiB bitmap limit (\(bitmapBytes) bytes)\n", stderr)
+            return false
+        }
+
+        pin.closeSelf()
+        app.triggerPinOrRestore()
+        guard pins.windows.last === pin, pin.window.isVisible else {
+            fputs("FAIL: A clipped text pin should still restore from history\n", stderr)
+            return false
+        }
+        pin.copyOriginalText()
+        guard pasteboard.string(forType: .string) == text else {
+            fputs("FAIL: A restored clipped text pin should copy the complete original text\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 超大文字贴图预览限制在 32 MiB，关闭恢复后仍可复制完整原文")
+        return true
+    }
+
+    @MainActor
     private static func runTextPinOriginalCopyCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         app.updateConfig { $0.smartPngCompression = false }
         let pins = app.pinManager
@@ -1480,6 +1512,11 @@ public enum SmokeTestRunner {
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("text-pin-layout-config.json"),
                         runTextPinLayoutCheck
+                    )
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("oversized-text-pin-config.json"),
+                        runOversizedTextPinCheck
                     )
                     && withPinRestoreFixture(
                         image: baseCG,
