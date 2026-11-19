@@ -6,8 +6,8 @@ import AirSnipCore
 public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     let pasteboard: NSPasteboard
-    private var closedPins: [PinWindowController] = []
-    private let historyByteLimit: Int
+    private let history: ClosedPinHistory
+    private let historyDirectory: (AirSnipConfig) -> URL
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     var onWillCloseAll: (() -> Void)?
@@ -15,12 +15,22 @@ public final class PinManager: ObservableObject {
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
     public convenience init(pasteboard: NSPasteboard = .general) {
-        self.init(historyByteLimit: 192 * 1024 * 1024, pasteboard: pasteboard)
+        self.init(pasteboard: pasteboard, historyRegistryURL: nil) { _ in
+            FileManager.default.temporaryDirectory.appendingPathComponent(ClosedPinHistory.directoryName, isDirectory: true)
+        }
     }
 
-    init(historyByteLimit: Int, pasteboard: NSPasteboard = .general) {
-        self.historyByteLimit = historyByteLimit
+    init(
+        pasteboard: NSPasteboard,
+        historyRegistryURL: URL?,
+        historyDirectory: @escaping (AirSnipConfig) -> URL
+    ) {
         self.pasteboard = pasteboard
+        self.historyDirectory = historyDirectory
+        history = ClosedPinHistory(registryURL: historyRegistryURL)
+        history.onWriteFailure = { [weak self] in
+            self?.showHistoryWarning("贴图历史写入失败，这些贴图无法恢复", "Some closed pins could not be saved for recovery")
+        }
     }
 
     public var count: Int { windows.count }
@@ -74,38 +84,39 @@ public final class PinManager: ObservableObject {
     }
 
     private func rememberClosedPins(_ pins: [PinWindowController]) {
-        let config = getConfig?()
-        let limit = config?.pinHistoryLimit ?? AirSnipConfig.defaultPinHistoryLimit
-        guard limit > 0 else { return }
-
-        let retainedPins = pins.filter { $0.historyByteCount <= historyByteLimit }
-        closedPins.append(contentsOf: retainedPins)
-        trimClosedHistory(to: limit)
-        if retainedPins.count < pins.count {
-            ToastHUD.show(
-                L10n.tr("有贴图过大，关闭后无法恢复", "Some pins were too large to restore", in: config?.language),
-                symbol: "exclamationmark.triangle", tint: .systemOrange
-            )
-        }
+        let config = getConfig?() ?? AirSnipConfig()
+        guard config.pinHistoryLimit > 0 else { return }
+        history.remember(pins.suffix(config.pinHistoryLimit).map { $0.snapshot() },
+                         limit: config.pinHistoryLimit, root: historyDirectory(config))
     }
 
     func trimClosedHistory(to limit: Int) {
-        var remainingBytes = historyByteLimit
-        var retainedCount = 0
-        for pin in closedPins.reversed().prefix(limit) {
-            let bytes = pin.historyByteCount
-            guard bytes <= remainingBytes else { break }
-            remainingBytes -= bytes
-            retainedCount += 1
-        }
-        closedPins.removeFirst(closedPins.count - retainedCount)
+        history.trim(to: limit)
+    }
+
+    func finishHistorySession() {
+        history.finishSession()
     }
 
     public func restoreLastClosedPin(config: AirSnipConfig) {
-        guard let pin = closedPins.last, canOpenPin(config: config) else { return }
-        closedPins.removeLast()
+        guard !history.isEmpty, canOpenPin(config: config) else { return }
+        let result = history.restoreLast()
+        if result.skippedUnreadable {
+            showHistoryWarning("部分贴图历史文件无法读取", "Some closed pin files could not be read")
+        }
+        guard let snapshot = result.snapshot else { return }
+        let state = snapshot.presentation
+        let pin = PinWindowController(
+            cgImage: snapshot.image, baseSize: state.baseSize, backingScale: state.backingScale,
+            origin: state.frame.origin, showBorder: state.showBorder, manager: self, originalText: snapshot.originalText
+        )
+        pin.applyPresentation(state)
         windows.append(pin)
         pin.show()
+    }
+
+    private func showHistoryWarning(_ zh: String, _ en: String) {
+        ToastHUD.show(L10n.tr(zh, en, in: getConfig?().language), symbol: "exclamationmark.triangle", tint: .systemOrange)
     }
 
     private func canOpenPin(config: AirSnipConfig) -> Bool {
@@ -160,10 +171,6 @@ public final class PinWindowController: NSObject {
     public private(set) var showBorder: Bool
     public private(set) var isClickThrough: Bool = false
 
-    fileprivate var historyByteCount: Int {
-        cgImage.bytesPerRow * cgImage.height + (originalText?.utf8.count ?? 0)
-    }
-
     private weak var manager: PinManager?
     private let contentView: PinCanvasView
 
@@ -211,6 +218,26 @@ public final class PinWindowController: NSObject {
     public func show() {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(contentView)
+    }
+
+    fileprivate func snapshot() -> PinSnapshot {
+        PinSnapshot(
+            image: cgImage, originalText: originalText,
+            presentation: PinPresentation(
+                frame: window.frame, baseSize: baseSize, backingScale: backingScale, zoomScale: zoomScale,
+                opacity: opacity, windowAlpha: window.alphaValue, showBorder: showBorder, isClickThrough: isClickThrough
+            )
+        )
+    }
+
+    fileprivate func applyPresentation(_ state: PinPresentation) {
+        zoomScale = state.zoomScale
+        opacity = state.opacity
+        isClickThrough = state.isClickThrough
+        window.ignoresMouseEvents = state.isClickThrough
+        window.alphaValue = state.windowAlpha
+        window.setFrame(state.frame, display: false)
+        contentView.frame = NSRect(origin: .zero, size: state.frame.size)
     }
 
     func finishAnnotation(image: CGImage? = nil, preserveGeometry: Bool = false) {

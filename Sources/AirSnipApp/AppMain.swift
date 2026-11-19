@@ -27,7 +27,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public init(configURL: URL = AirSnipConfig.defaultConfigFileURL(), pinPasteboard: NSPasteboard = .general) {
         self.configURL = configURL
-        self.pinManager = PinManager(pasteboard: pinPasteboard)
+        self.pinManager = PinManager(
+            pasteboard: pinPasteboard,
+            historyRegistryURL: configURL.deletingPathExtension().appendingPathExtension("pin-history-sessions.json"),
+            historyDirectory: OutputService.pinHistoryDirectoryURL(for:)
+        )
         let loadedConfig = AirSnipConfig.load(from: configURL)
         L10n.current = loadedConfig.language
         self.config = loadedConfig
@@ -731,6 +735,10 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         controller?.openSettings()
         return true
+    }
+
+    public func applicationWillTerminate(_ notification: Notification) {
+        controller?.pinManager.finishHistorySession()
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

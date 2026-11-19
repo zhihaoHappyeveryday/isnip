@@ -962,6 +962,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var pinHistoryLimit: Int {
         didSet { pinHistoryLimit = Self.clampedPinHistoryLimit(pinHistoryLimit) }
     }
+    public var pinHistoryParentDirectory: String?
     public var pinAnnotationCoversDesktop: Bool
     public var uiScale: UiScaleSetting
     public var swatchColors: [RGBAColor]
@@ -1007,6 +1008,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         pinBorder: Bool = true,
         pinMaxCount: Int = 20,
         pinHistoryLimit: Int = AirSnipConfig.defaultPinHistoryLimit,
+        pinHistoryParentDirectory: String? = nil,
         pinAnnotationCoversDesktop: Bool = true,
         uiScale: UiScaleSetting = .auto,
         swatchColors: [RGBAColor] = ColorPalette.defaultSwatches,
@@ -1051,6 +1053,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinBorder = pinBorder
         self.pinMaxCount = pinMaxCount
         self.pinHistoryLimit = Self.clampedPinHistoryLimit(pinHistoryLimit)
+        self.pinHistoryParentDirectory = pinHistoryParentDirectory
         self.pinAnnotationCoversDesktop = pinAnnotationCoversDesktop
         self.uiScale = uiScale
         self.swatchColors = swatchColors.count == ColorPalette.swatchCount ? swatchColors : ColorPalette.defaultSwatches
@@ -1088,7 +1091,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case autoStart, language, theme, hotkeys, hotkeyDefaultsMigratedV2, toolKeys, uiScale
-        case pinPosition, pinBorder, pinMaxCount, pinHistoryLimit, pinAnnotationCoversDesktop
+        case pinPosition, pinBorder, pinMaxCount, pinHistoryLimit, pinHistoryParentDirectory, pinAnnotationCoversDesktop
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
         case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
         case styleDefaultsMigratedV2
@@ -1151,6 +1154,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
         self.pinMaxCount = try c.decodeIfPresent(Int.self, forKey: .pinMaxCount) ?? d.pinMaxCount
         self.pinHistoryLimit = Self.clampedPinHistoryLimit(try c.decodeIfPresent(Int.self, forKey: .pinHistoryLimit) ?? d.pinHistoryLimit)
+        self.pinHistoryParentDirectory = try c.decodeIfPresent(String.self, forKey: .pinHistoryParentDirectory)
         self.pinAnnotationCoversDesktop = try c.decodeIfPresent(Bool.self, forKey: .pinAnnotationCoversDesktop) ?? d.pinAnnotationCoversDesktop
         self.uiScale = try c.decodeIfPresent(UiScaleSetting.self, forKey: .uiScale) ?? d.uiScale
         let alreadyMigratedV2 = try c.decodeIfPresent(Bool.self, forKey: .styleDefaultsMigratedV2) ?? false
