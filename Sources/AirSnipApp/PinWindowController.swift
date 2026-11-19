@@ -62,9 +62,16 @@ public final class PinManager: ObservableObject {
     }
 
     private func rememberClosedPins(_ pins: [PinWindowController]) {
+        let limit = getConfig?().pinHistoryLimit ?? AirSnipConfig.defaultPinHistoryLimit
+        guard limit > 0 else { return }
         closedPins.append(contentsOf: pins)
-        if closedPins.count > 20 {
-            closedPins.removeFirst(closedPins.count - 20)
+        trimClosedHistory(to: limit)
+    }
+
+    func trimClosedHistory(to limit: Int) {
+        let excess = closedPins.count - limit
+        if excess > 0 {
+            closedPins.removeFirst(excess)
         }
     }
 

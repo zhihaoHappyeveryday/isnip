@@ -414,6 +414,34 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(roundtrip.lastSaveDirectory, "/tmp/isnip-custom")
     }
 
+    func testPinHistoryLimitDefaultsMigrationAndPersistence() throws {
+        XCTAssertEqual(AirSnipConfig().pinHistoryLimit, 20)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config.json")
+        try Data(#"{"pinMaxCount":35,"pinPosition":"center","pinBorder":false}"#.utf8).write(to: url)
+
+        var config = AirSnipConfig.load(from: url)
+        XCTAssertEqual(config.pinHistoryLimit, 20)
+        XCTAssertEqual(config.pinMaxCount, 35)
+        XCTAssertEqual(config.pinPosition, .center)
+        XCTAssertFalse(config.pinBorder)
+
+        for limit in [0, 50] {
+            config.pinHistoryLimit = limit
+            try config.save(to: url)
+            XCTAssertEqual(AirSnipConfig.load(from: url), config)
+        }
+
+        for (stored, expected) in [(-1, 0), (51, 50)] {
+            let data = Data("{\"pinHistoryLimit\":\(stored)}".utf8)
+            let decoded = try JSONDecoder().decode(AirSnipConfig.self, from: data)
+            XCTAssertEqual(decoded.pinHistoryLimit, expected)
+        }
+    }
+
     func testPureRedThinDefaultMigrationAndFullOptionPersistence() throws {
         let fresh = AirSnipConfig()
         XCTAssertEqual(fresh.swatchColors[1], RGBAColor(r: 255, g: 0, b: 0))

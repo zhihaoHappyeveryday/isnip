@@ -1059,6 +1059,22 @@ private struct CaptureAndPinPane: View {
                     }
                 )
             }
+
+            MagpieRowDivider()
+
+            MagpieSettingRow(title: L10n.tr("可恢复贴图数", "Recoverable Pins", in: lang)) {
+                MagpieStepperPill(
+                    displayValue: lang.isEnglish ? "\(app.config.pinHistoryLimit) pins" : "\(app.config.pinHistoryLimit) 张",
+                    canDecrement: app.config.pinHistoryLimit > AirSnipConfig.pinHistoryLimitRange.lowerBound,
+                    canIncrement: app.config.pinHistoryLimit < AirSnipConfig.pinHistoryLimitRange.upperBound,
+                    onDecrement: {
+                        app.updateConfig { $0.pinHistoryLimit -= 5 }
+                    },
+                    onIncrement: {
+                        app.updateConfig { $0.pinHistoryLimit += 5 }
+                    }
+                )
+            }
         }
     }
 }

@@ -153,7 +153,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         let oldHotkeys = config.hotkeys
         let oldLang = config.language
         let oldSelectionButton = config.translation.showSelectionButton
+        let oldPinHistoryLimit = config.pinHistoryLimit
         mutate(&config)
+        if config.pinHistoryLimit != oldPinHistoryLimit {
+            pinManager.trimClosedHistory(to: config.pinHistoryLimit)
+        }
         L10n.current = config.language
         try? config.save(to: configURL)
         if config.language != oldLang {
@@ -566,9 +570,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     private func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
+        coordinator.persistConfigChanges = false
 
         coordinator.onConfigMutated = { [weak self] updated in
-            self?.config = updated
+            guard let self else { return }
+            var merged = updated
+            merged.pinHistoryLimit = self.config.pinHistoryLimit
+            try? merged.save(to: self.configURL)
+            self.config = merged
         }
         coordinator.onCompleteCopy = { [weak self] cgImg, scale in
             let currentCfg = self?.config
@@ -579,6 +588,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
+            cfg.pinHistoryLimit = self?.config.pinHistoryLimit ?? cfg.pinHistoryLimit
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
             guard OutputService.saveImage(

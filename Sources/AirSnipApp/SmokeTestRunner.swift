@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 import CoreImage
 import ImageIO
@@ -441,6 +442,137 @@ public enum SmokeTestRunner {
         return true
     }
 
+    @MainActor
+    private static func runConfiguredPinHistoryCheck(image: CGImage, configURL: URL) -> Bool {
+        let app = AirSnipAppController(configURL: configURL)
+        let pins = app.pinManager
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer {
+            pins.closeAll()
+            pasteboard.releaseGlobally()
+        }
+
+        func openPins(widths: ClosedRange<Int>) -> Bool {
+            for width in widths {
+                guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
+                      pins.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config) else { return false }
+            }
+            return true
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 10 }
+        guard openPins(widths: 32...41) else { return false }
+        pins.closeAll()
+        app.updateConfig { $0.pinHistoryLimit = 5 }
+        app.updateConfig { $0.pinHistoryLimit = 10 }
+
+        for width in [41, 40, 39, 38, 37] {
+            app.triggerPinOrRestore(from: pasteboard)
+            guard pins.windows.last?.cgImage.width == width else {
+                fputs("FAIL: Reducing pin history should keep the most recently closed pins\n", stderr)
+                return false
+            }
+        }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 5 else {
+            fputs("FAIL: Increasing the pin history limit should not bring back previously trimmed pins\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 调小可恢复贴图数后立即只保留最近关闭的贴图")
+
+        pins.closeAll()
+        app.updateConfig { $0.pinHistoryLimit = 0 }
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 0 else {
+            fputs("FAIL: Disabling pin history should immediately clear it\n", stderr)
+            return false
+        }
+
+        guard openPins(widths: 32...33) else { return false }
+        pins.windows.last?.closeSelf()
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 1 else {
+            fputs("FAIL: Closing a pin with history disabled should leave nothing to restore\n", stderr)
+            return false
+        }
+        pins.closeAll()
+        app.triggerPinOrRestore(from: pasteboard)
+        guard pins.count == 0 else {
+            fputs("FAIL: Close All should also honor disabled pin history\n", stderr)
+            return false
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 10 }
+        guard openPins(widths: 32...43) else { return false }
+        pins.closeAll()
+        for _ in 0..<11 { app.triggerPinOrRestore(from: pasteboard) }
+        guard pins.count == 10, pins.windows.last?.cgImage.width == 34 else {
+            fputs("FAIL: Re-enabling pin history should retain future closes up to the new limit\n", stderr)
+            return false
+        }
+
+        pins.closeAll()
+        let restarted = AirSnipAppController(configURL: configURL)
+        restarted.triggerPinOrRestore(from: pasteboard)
+        guard restarted.config.pinHistoryLimit == 10, restarted.pinManager.count == 0 else {
+            fputs("FAIL: A new controller should load the saved history limit and start with empty history\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 停用时清空历史，重新开启后可继续累积，设置保存到下次启动")
+        return true
+    }
+
+    @MainActor
+    private static func runPinHistoryCaptureSaveCheck(image: CGImage, configURL: URL) -> Bool {
+        let app = AirSnipAppController(configURL: configURL)
+        let directory = configURL.deletingLastPathComponent()
+        app.updateConfig {
+            $0.lastSaveDirectory = directory.path
+            $0.smartPngCompression = false
+            $0.showCompletionToast = false
+        }
+        let pins = app.pinManager
+        defer { pins.closeAll() }
+        guard pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config),
+              let pin = pins.windows.last else { return false }
+        let previousWindows = Set(NSApp.windows.map(\.windowNumber))
+        pin.requestInlineAnnotate()
+        guard let editor = NSApp.windows.first(where: { $0.isVisible && !previousWindows.contains($0.windowNumber) }),
+              let responder = editor.firstResponder else { return false }
+
+        func pressKey(_ keyCode: Int, _ characters: String, modifiers: NSEvent.ModifierFlags = []) {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                windowNumber: editor.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: UInt16(keyCode)
+            ) else { return }
+            responder.keyDown(with: event)
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 5 }
+        pressKey(kVK_ANSI_2, "2")
+        let savedConfig = AirSnipConfig.load(from: configURL)
+        guard app.config.pinHistoryLimit == 5, app.config.lastTool == .arrow,
+              savedConfig.pinHistoryLimit == 5, savedConfig.lastTool == .arrow else {
+            fputs("FAIL: Tool changes from an older capture session should save without reverting the pin history limit\n", stderr)
+            return false
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 10 }
+        pressKey(kVK_ANSI_S, "s", modifiers: .command)
+        guard !editor.isVisible, pin.window.isVisible,
+              (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.contains(where: { $0.hasSuffix(".png") }) == true else {
+            fputs("FAIL: Quick save should write the edited pin and close the editor\n", stderr)
+            return false
+        }
+        guard app.config.pinHistoryLimit == 10, AirSnipConfig.load(from: configURL).pinHistoryLimit == 10 else {
+            fputs("FAIL: Saving from an older capture session should retain the latest pin history limit\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 旧编辑会话调整工具或保存图片时都保留最新可恢复贴图数")
+        return true
+    }
+
     public static func run() -> Bool {
         do {
             print("[smoke] 1/7 验证配置往返、无损压缩默认开启与 24 项工具栏可见性...")
@@ -621,15 +753,6 @@ public enum SmokeTestRunner {
                 fputs("FAIL: LongshotCanvas stitching height mismatch (got \(lsCanvas.totalHeight))\n", stderr)
                 return false
             }
-
-            let pinRestoreOK = MainActor.assumeIsolated {
-                NSApplication.shared.setActivationPolicy(.accessory)
-                return runPinRestoreChecks(image: baseCG, configURL: tempDir.appendingPathComponent("pin-config.json"))
-                    && runBatchPinRestoreCheck(image: baseCG, configURL: tempDir.appendingPathComponent("pin-batch-config.json"))
-                    && runBatchCloseDuringInlineEditCheck(image: baseCG)
-                    && runClosedPinHistoryLimitCheck(image: baseCG)
-            }
-            guard pinRestoreOK else { return false }
 
             print("[smoke] 6/7 验证本地离线 Vision OCR 中英文识别与二维码解析...")
             let ocrW = 680
@@ -1035,6 +1158,19 @@ public enum SmokeTestRunner {
                 fputs("FAIL: Overlay panel hidesOnDeactivate / accessory visibility check failed\n", stderr)
                 return false
             }
+
+            // Opening and closing many pin windows can delay async OCR in the smoke process.
+            print("[smoke] 验证贴图关闭、恢复与历史设置...")
+            let pinSaveConfigURL = tempDir.appendingPathComponent("pin-save", isDirectory: true).appendingPathComponent("config.json")
+            let pinRestoreOK = MainActor.assumeIsolated {
+                runPinRestoreChecks(image: baseCG, configURL: tempDir.appendingPathComponent("pin-config.json"))
+                    && runBatchPinRestoreCheck(image: baseCG, configURL: tempDir.appendingPathComponent("pin-batch-config.json"))
+                    && runBatchCloseDuringInlineEditCheck(image: baseCG)
+                    && runClosedPinHistoryLimitCheck(image: baseCG)
+                    && runConfiguredPinHistoryCheck(image: baseCG, configURL: tempDir.appendingPathComponent("pin-history-config.json"))
+                    && runPinHistoryCaptureSaveCheck(image: baseCG, configURL: pinSaveConfigURL)
+            }
+            guard pinRestoreOK else { return false }
 
             print("smoke-test: ok (iSnip v\(UpdateChecker.currentVersion))")
             return true
