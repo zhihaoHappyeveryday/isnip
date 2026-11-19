@@ -256,9 +256,12 @@ public enum ToolbarSlot: Equatable, Hashable, Sendable {
     case copy
     case save
 
-    public static var allOrdered: [ToolbarSlot] {
+    public static var hideableSlots: [ToolbarSlot] {
         ToolbarGroup.allCases.flatMap { $0.slots }
     }
+
+    @available(*, deprecated, renamed: "hideableSlots")
+    public static var allOrdered: [ToolbarSlot] { hideableSlots }
 
     public static let defaultMainOrder: [ToolbarSlot] = [
         .tool(.rect), .tool(.ellipse), .tool(.line), .tool(.arrow), .tool(.freehand),
@@ -335,7 +338,7 @@ public enum ToolbarGroupState: Equatable, Sendable {
     case none
 }
 
-public struct ToolbarVisibilityConfig: Codable, Equatable, Sendable {
+public struct ToolbarConfig: Codable, Equatable, Sendable {
     public var hidden: [String]
     private var order: [String]?
 
@@ -354,6 +357,10 @@ public struct ToolbarVisibilityConfig: Codable, Equatable, Sendable {
         set {
             order = newValue == ToolbarSlot.defaultMainOrder ? nil : newValue.map(\.key)
         }
+    }
+
+    public var hasCustomMainOrder: Bool {
+        mainOrder != ToolbarSlot.defaultMainOrder
     }
 
     public mutating func resetMainOrder() {
@@ -392,7 +399,7 @@ public struct ToolbarVisibilityConfig: Codable, Equatable, Sendable {
     }
 
     public var isEntireToolbarHidden: Bool {
-        ToolbarSlot.allOrdered.allSatisfy { !isVisible($0) }
+        ToolbarSlot.hideableSlots.allSatisfy { !isVisible($0) }
     }
 
     public func settleTool(_ preferred: AnnotationTool) -> AnnotationTool {
@@ -405,6 +412,9 @@ public struct ToolbarVisibilityConfig: Codable, Equatable, Sendable {
         return (0..<ColorPalette.swatchCount).first(where: { isVisible(.color($0)) }) ?? preferred
     }
 }
+
+@available(*, deprecated, renamed: "ToolbarConfig")
+public typealias ToolbarVisibilityConfig = ToolbarConfig
 
 public enum MouseExtraButton: Int, Codable, Equatable, Hashable, Sendable {
     case middle = 2
@@ -963,7 +973,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var windowCaptureShadow: Bool
     public var confirmCancel: Bool
     public var showCompletionToast: Bool
-    public var toolbar: ToolbarVisibilityConfig
+    public var toolbar: ToolbarConfig
     public var nameStyle: NameStyle
     public var lastSaveFormat: ExportImageFormat
     public var lastSaveDirectory: String?
@@ -1006,7 +1016,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         windowCaptureShadow: Bool = true,
         confirmCancel: Bool = true,
         showCompletionToast: Bool = true,
-        toolbar: ToolbarVisibilityConfig = ToolbarVisibilityConfig(),
+        toolbar: ToolbarConfig = ToolbarConfig(),
         nameStyle: NameStyle = .datetime,
         lastSaveFormat: ExportImageFormat = .png,
         lastSaveDirectory: String? = nil,
@@ -1157,7 +1167,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.windowCaptureShadow = try c.decodeIfPresent(Bool.self, forKey: .windowCaptureShadow) ?? d.windowCaptureShadow
         self.confirmCancel = try c.decodeIfPresent(Bool.self, forKey: .confirmCancel) ?? d.confirmCancel
         self.showCompletionToast = try c.decodeIfPresent(Bool.self, forKey: .showCompletionToast) ?? d.showCompletionToast
-        self.toolbar = try c.decodeIfPresent(ToolbarVisibilityConfig.self, forKey: .toolbar) ?? d.toolbar
+        self.toolbar = try c.decodeIfPresent(ToolbarConfig.self, forKey: .toolbar) ?? d.toolbar
         self.nameStyle = try c.decodeIfPresent(NameStyle.self, forKey: .nameStyle) ?? d.nameStyle
         self.lastSaveFormat = try c.decodeIfPresent(ExportImageFormat.self, forKey: .lastSaveFormat) ?? d.lastSaveFormat
         self.lastSaveDirectory = try c.decodeIfPresent(String.self, forKey: .lastSaveDirectory)

@@ -390,10 +390,19 @@ public enum AccessibilityService {
 
 @MainActor
 public enum OutputService {
-    public struct SaveOutcome: Sendable {
-        public let url: URL
-        public let initialResult: PngCompressionResult?
+    struct SaveOutcome {
+        let url: URL
+        let updatePreferences: ((inout AirSnipConfig) -> Void)?
     }
+
+    struct SavePanelSelection {
+        let url: URL
+        let format: ExportImageFormat
+        let smartPngCompression: Bool
+        let quality: PngCompressionQualityPreset
+    }
+
+    typealias ChooseSaveDestination = @MainActor (AirSnipConfig) -> SavePanelSelection?
 
     private static func writePngDataToPasteboard(_ pngData: Data) -> Int {
         let pb = NSPasteboard.general
@@ -618,15 +627,14 @@ public enum OutputService {
         }
     }
 
-    public static func saveImage(
+    static func saveImage(
         for cgImage: CGImage,
         backingScale: Double? = nil,
-        config: inout AirSnipConfig,
+        config: AirSnipConfig,
         forceDialog: Bool = false,
-        configSaveURL: URL = AirSnipConfig.defaultConfigFileURL(),
-        parentWindow: NSWindow? = nil,
+        chooseDestination: ChooseSaveDestination = chooseSaveDestination,
         onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
-    ) -> URL? {
+    ) -> SaveOutcome? {
         let resolvedScale = max(1.0, backingScale ?? Double(NSScreen.main?.backingScaleFactor ?? 2.0))
         if !forceDialog && !config.askBeforeSave {
             let dir = defaultSaveDirectoryURL(for: config)
@@ -645,31 +653,45 @@ public enum OutputService {
                     quality: config.pngCompressionQuality,
                     onFinalCompressed: onFinalCompressed
                 )
-                return dest
+                return SaveOutcome(url: dest, updatePreferences: nil)
             } catch {
                 // Directory unavailable or read-only -> fall back to Save As panel so screenshot is never lost
             }
         }
-        return presentSaveDialog(
-            for: cgImage,
-            backingScale: resolvedScale,
-            config: &config,
-            configSaveURL: configSaveURL,
-            parentWindow: parentWindow,
-            onFinalCompressed: onFinalCompressed
-        )
+        guard let selection = chooseDestination(config) else { return nil }
+        var url = selection.url
+        if url.pathExtension.lowercased() != selection.format.fileExtension {
+            url = url.deletingPathExtension().appendingPathExtension(selection.format.fileExtension)
+        }
+
+        do {
+            try writeEncodedImage(
+                cgImage,
+                to: url,
+                format: selection.format,
+                scale: resolvedScale,
+                smartCompress: selection.smartPngCompression,
+                quality: selection.quality,
+                onFinalCompressed: onFinalCompressed
+            )
+            let directory = url.deletingLastPathComponent().path
+            return SaveOutcome(url: url, updatePreferences: {
+                $0.lastSaveFormat = selection.format
+                $0.smartPngCompression = selection.smartPngCompression
+                $0.pngCompressionQuality = selection.quality
+                $0.lastSaveDirectory = directory
+            })
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L10n.tr("保存失败", "Failed to Save", in: config.language)
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return nil
+        }
     }
 
-    public static func presentSaveDialog(
-        for cgImage: CGImage,
-        backingScale: Double? = nil,
-        config: inout AirSnipConfig,
-        configSaveURL: URL = AirSnipConfig.defaultConfigFileURL(),
-        parentWindow: NSWindow? = nil,
-        onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
-    ) -> URL? {
-        let _ = parentWindow
-        let resolvedScale = max(1.0, backingScale ?? Double(NSScreen.main?.backingScaleFactor ?? 2.0))
+    static func chooseSaveDestination(config: AirSnipConfig) -> SavePanelSelection? {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
         panel.title = L10n.tr("保存截图", "Save Screenshot")
@@ -808,38 +830,12 @@ public enum OutputService {
 
         let response = panel.runModal()
         _ = helper // keep alive during modal loop
-        guard response == .OK, var url = panel.url else {
+        guard response == .OK, let url = panel.url else {
             return nil
         }
-        if url.pathExtension.lowercased() != chosenFormat.fileExtension {
-            url = url.deletingPathExtension().appendingPathExtension(chosenFormat.fileExtension)
-        }
-
-        do {
-            try writeEncodedImage(
-                cgImage,
-                to: url,
-                format: chosenFormat,
-                scale: resolvedScale,
-                smartCompress: chosenSmartCompress,
-                quality: chosenQuality,
-                onFinalCompressed: onFinalCompressed
-            )
-
-            config.lastSaveFormat = chosenFormat
-            config.smartPngCompression = chosenSmartCompress
-            config.pngCompressionQuality = chosenQuality
-            config.lastSaveDirectory = url.deletingLastPathComponent().path
-            try? config.save(to: configSaveURL)
-            return url
-        } catch {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = L10n.tr("保存失败", "Failed to Save", in: config.language)
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
-            return nil
-        }
+        return SavePanelSelection(
+            url: url, format: chosenFormat, smartPngCompression: chosenSmartCompress, quality: chosenQuality
+        )
     }
 }
 

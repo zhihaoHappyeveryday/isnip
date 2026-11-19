@@ -75,6 +75,13 @@ private enum DirectionalResizeCursor {
     }
 }
 
+struct ToolbarVerificationSample {
+    let buttons: [(id: String, rect: CGRect)]
+    let hasSecondaryBar: Bool
+
+    var buttonIDs: [String] { buttons.map { $0.id } }
+}
+
 @MainActor
 public final class CaptureSessionCoordinator {
     public enum SessionMode {
@@ -119,13 +126,12 @@ public final class CaptureSessionCoordinator {
     private(set) var config: AirSnipConfig
     public let mode: SessionMode
 
-    public var persistConfigChanges: Bool = true
     public var onCompleteCopy: ((CGImage, Double) -> Void)?
-    public var onCompleteSave: ((CGImage, Double, Bool, inout AirSnipConfig) -> Bool)?
+    var onSaveImage: ((CGImage, Double, Bool, AirSnipConfig) -> Bool)?
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
     public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, Bool) -> Void)?
-    public var onConfigMutated: ((AirSnipConfig) -> Void)?
+    var onUpdatePreferences: (((inout AirSnipConfig) -> Void) -> Void)?
     public var onSessionEnded: (() -> Void)?
 
     public init(config: AirSnipConfig, mode: SessionMode = .normalCapture) {
@@ -151,11 +157,12 @@ public final class CaptureSessionCoordinator {
         }
     }
 
-    public func renderToolbarVerificationSample(
-        selection: ASRect? = nil, includePreviews: Bool = true
-    ) -> (toolbarIDs: [String], toolbarRects: [CGRect], hasSecondaryBar: Bool, croppedImage: CGImage?)? {
-        guard let ctrl = screenControllers.first else { return nil }
-        return ctrl.canvasView.renderVerificationSample(selection: selection, includePreviews: includePreviews)
+    func renderToolbarVerificationSample(selection: ASRect? = nil) -> ToolbarVerificationSample? {
+        screenControllers.first?.canvasView.renderVerificationSample(selection: selection)
+    }
+
+    func exportToolbarVerificationPreviews() {
+        screenControllers.first?.canvasView.exportVerificationPreviews()
     }
 
     public func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
@@ -344,13 +351,10 @@ public final class CaptureSessionCoordinator {
         }
     }
 
-    func mutateConfig(_ block: (inout AirSnipConfig) -> Void) {
-        block(&config)
-        if let onConfigMutated {
-            onConfigMutated(config)
-        } else if persistConfigChanges {
-            try? config.save()
-        }
+    func mutateConfig(_ change: (inout AirSnipConfig) -> Void) {
+        // Keep the session snapshot in sync and apply the same preference change to the app's current config.
+        change(&config)
+        onUpdatePreferences?(change)
     }
 
     func finishWithCopy(image: CGImage, scale: Double) {
@@ -369,10 +373,7 @@ public final class CaptureSessionCoordinator {
     func finishWithSave(image: CGImage, scale: Double, forceDialog: Bool = false) {
         if !forceDialog && !config.askBeforeSave {
             closeAllWindows()
-            var cfg = config
-            if onCompleteSave?(image, scale, false, &cfg) ?? false {
-                self.config = cfg
-            }
+            _ = onSaveImage?(image, scale, false, config)
             if case .inlinePinEdit(let pin) = mode {
                 pin.updateImage(image)
                 pin.show()
@@ -385,10 +386,8 @@ public final class CaptureSessionCoordinator {
         for c in screenControllers {
             c.panel.orderOut(nil)
         }
-        var cfg = config
-        let saved = onCompleteSave?(image, scale, true, &cfg) ?? false
+        let saved = onSaveImage?(image, scale, true, config) ?? false
         if saved {
-            self.config = cfg
             if case .inlinePinEdit(let pin) = mode {
                 pin.updateImage(image)
                 pin.show()
@@ -772,93 +771,86 @@ final class OverlayCanvasView: NSView {
         return out
     }
 
-    func renderVerificationSample(
-        selection sampleSelection: ASRect?, includePreviews: Bool
-    ) -> (toolbarIDs: [String], toolbarRects: [CGRect], hasSecondaryBar: Bool, croppedImage: CGImage?) {
-        guard let sel = sampleSelection ?? selection else { return ([], [], false, nil) }
+    func renderVerificationSample(selection sampleSelection: ASRect?) -> ToolbarVerificationSample? {
+        guard let sel = sampleSelection ?? selection else { return nil }
         self.selection = sel
         self.activeTool = nil
         self.colorPicker = nil
         self.needsDisplay = true
-        var cropped: CGImage?
-        if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
+        guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        cacheDisplay(in: bounds, to: rep)
+        return ToolbarVerificationSample(
+            buttons: toolbarHitItems.map { (id: $0.id, rect: $0.rect) },
+            hasSecondaryBar: secondRowRect != .zero
+        )
+    }
+
+    func exportVerificationPreviews() {
+        guard let selection else { return }
+        let environment = ProcessInfo.processInfo.environment
+        func writePreview(to url: URL, computeRect: () -> CGRect) {
+            guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return }
             cacheDisplay(in: bounds, to: rep)
-            if includePreviews, let fullCG = rep.cgImage, mainToolbarRect != .zero {
-                let scale = CGFloat(fullCG.width) / max(1, bounds.width)
-                let cropPt = mainToolbarRect.insetBy(dx: -18, dy: -26)
-                let clamped = cropPt.intersection(bounds)
-                let pxRect = CGRect(
-                    x: (clamped.minX * scale).rounded(),
-                    y: (clamped.minY * scale).rounded(),
-                    width: (clamped.width * scale).rounded(),
-                    height: (clamped.height * scale).rounded()
-                )
-                cropped = fullCG.cropping(to: pxRect)
+            guard let fullCG = rep.cgImage else { return }
+            let scale = CGFloat(fullCG.width) / max(1, bounds.width)
+            let clamped = computeRect().intersection(bounds)
+            let pxRect = CGRect(
+                x: (clamped.minX * scale).rounded(),
+                y: (clamped.minY * scale).rounded(),
+                width: max(1, (clamped.width * scale).rounded()),
+                height: max(1, (clamped.height * scale).rounded())
+            )
+            if let sub = fullCG.cropping(to: pxRect),
+               let png = NSBitmapImageRep(cgImage: sub).representation(using: .png, properties: [:]) {
+                try? png.write(to: url)
             }
         }
-        let ids = toolbarHitItems.map(\.id)
-        let rects = toolbarHitItems.map(\.rect)
-        let hadSub = (secondRowRect != .zero)
-
-        // Optional rich multi-state verification dump for visual inspection
-        if includePreviews, let dirPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_DIR"] {
-            let dirURL = URL(fileURLWithPath: dirPath)
-            try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
-            func dumpRegion(_ name: String, computeRect: () -> CGRect) {
-                guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return }
-                cacheDisplay(in: bounds, to: rep)
-                guard let fullCG = rep.cgImage else { return }
-                let scale = CGFloat(fullCG.width) / max(1, bounds.width)
-                let clamped = computeRect().intersection(bounds)
-                let pxRect = CGRect(
-                    x: (clamped.minX * scale).rounded(),
-                    y: (clamped.minY * scale).rounded(),
-                    width: max(1, (clamped.width * scale).rounded()),
-                    height: max(1, (clamped.height * scale).rounded())
-                )
-                if let sub = fullCG.cropping(to: pxRect),
-                   let png = NSBitmapImageRep(cgImage: sub).representation(using: .png, properties: [:]) {
-                    try? png.write(to: dirURL.appendingPathComponent(name))
-                }
+        if let path = environment["AIRSNIP_SMOKE_PREVIEW_PNG"], mainToolbarRect != .zero {
+            writePreview(to: URL(fileURLWithPath: path)) {
+                mainToolbarRect.insetBy(dx: -18, dy: -26)
             }
-            // 1. Selection corner + dimension pill + main bar
-            dumpRegion("01_selection_and_toolbar_light.png") {
-                sel.cgRect.union(mainToolbarRect).insetBy(dx: -24, dy: -32)
-            }
-
-            // 2. Rect tool active -> callout popover with stroke dots + fill + circular swatches
-            selectTool(.rect)
-            dumpRegion("02_rect_subbar_light.png") {
-                mainToolbarRect.union(secondRowRect).insetBy(dx: -18, dy: -16)
-            }
-
-            // 3. Double-click swatch -> smooth HSV color picker popover
-            openColorPicker(for: activeColorIndex, anchorRect: secondRowRect)
-            dumpRegion("03_color_picker_light.png") {
-                let pRect = colorPicker?.panelRect ?? .zero
-                return mainToolbarRect.union(secondRowRect).union(pRect).insetBy(dx: -18, dy: -16)
-            }
-            colorPicker = nil
-
-            // 4. Text tool active -> typography callout popover
-            selectTool(.text)
-            dumpRegion("04_text_subbar_light.png") {
-                mainToolbarRect.union(secondRowRect).insetBy(dx: -18, dy: -16)
-            }
-
-            // 5. Dark mode toolbar
-            let prevTheme = coordinator?.config.theme ?? .follow
-            coordinator?.mutateConfig { $0.theme = .dark }
-            activeTool = nil
-            needsDisplay = true
-            dumpRegion("05_toolbar_dark.png") {
-                mainToolbarRect.insetBy(dx: -18, dy: -22)
-            }
-            coordinator?.mutateConfig { $0.theme = prevTheme }
-            activeTool = nil
+        }
+        guard let dirPath = environment["AIRSNIP_SMOKE_PREVIEW_DIR"] else { return }
+        let dirURL = URL(fileURLWithPath: dirPath)
+        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        func dumpRegion(_ name: String, computeRect: () -> CGRect) {
+            writePreview(to: dirURL.appendingPathComponent(name), computeRect: computeRect)
         }
 
-        return (ids, rects, hadSub, cropped)
+        // 1. Selection corner + dimension pill + main bar
+        dumpRegion("01_selection_and_toolbar_light.png") {
+            selection.cgRect.union(mainToolbarRect).insetBy(dx: -24, dy: -32)
+        }
+
+        // 2. Rect tool active -> callout popover with stroke dots + fill + circular swatches
+        selectTool(.rect)
+        dumpRegion("02_rect_subbar_light.png") {
+            mainToolbarRect.union(secondRowRect).insetBy(dx: -18, dy: -16)
+        }
+
+        // 3. Double-click swatch -> smooth HSV color picker popover
+        openColorPicker(for: activeColorIndex, anchorRect: secondRowRect)
+        dumpRegion("03_color_picker_light.png") {
+            let pRect = colorPicker?.panelRect ?? .zero
+            return mainToolbarRect.union(secondRowRect).union(pRect).insetBy(dx: -18, dy: -16)
+        }
+        colorPicker = nil
+
+        // 4. Text tool active -> typography callout popover
+        selectTool(.text)
+        dumpRegion("04_text_subbar_light.png") {
+            mainToolbarRect.union(secondRowRect).insetBy(dx: -18, dy: -16)
+        }
+
+        // 5. Dark mode toolbar
+        let prevTheme = coordinator?.config.theme ?? .follow
+        coordinator?.mutateConfig { $0.theme = .dark }
+        activeTool = nil
+        needsDisplay = true
+        dumpRegion("05_toolbar_dark.png") {
+            mainToolbarRect.insetBy(dx: -18, dy: -22)
+        }
+        coordinator?.mutateConfig { $0.theme = prevTheme }
     }
 
     private var currentSwatchColor: RGBAColor {
@@ -1527,8 +1519,7 @@ final class OverlayCanvasView: NSView {
             : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.085)
 
         struct BarButtonSpec {
-            let id: String
-            let zone: Int // 0 = tools, 1 = pin/undo/ocr, 2 = cancel/longshot/save/copy
+            let defaultZone: Int // 0 = tools, 1 = pin/undo/ocr, 2 = cancel/longshot/save/copy
             let glyph: ToolbarGlyph
             let selected: Bool
             let enabled: Bool
@@ -1536,120 +1527,108 @@ final class OverlayCanvasView: NSView {
             let action: () -> Void
         }
 
-        var items: [BarButtonSpec] = []
+        var buttonsBySlot: [ToolbarSlot: BarButtonSpec] = [:]
         let lang = cfg.language
         for case .tool(let tool) in ToolbarSlot.defaultMainOrder where vis.isVisible(.tool(tool)) {
             let keyText = cfg.toolKeys.binding(for: tool).isUnbound ? "" : " · \(cfg.toolKeys.binding(for: tool).displayString(in: lang))"
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.tool(tool).key,
-                zone: 0,
+            buttonsBySlot[.tool(tool)] = BarButtonSpec(
+                defaultZone: 0,
                 glyph: glyph(for: tool),
                 selected: activeTool == tool,
                 enabled: true,
                 tooltip: "\(tool.displayName(in: lang))\(keyText)",
                 action: { [weak self] in self?.selectTool(tool) }
-            ))
+            )
         }
 
         if vis.isVisible(.pin), !(coordinator?.isInlinePinEdit ?? false) {
             let pinKey = cfg.hotkeys.pin.isUnbound ? "" : " · \(cfg.hotkeys.pin.displayString(in: lang))"
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.pin.key,
-                zone: 1,
+            buttonsBySlot[.pin] = BarButtonSpec(
+                defaultZone: 1,
                 glyph: .pin,
                 selected: false,
                 enabled: true,
                 tooltip: L10n.tr("贴图\(pinKey)", "Pin\(pinKey)", in: lang),
                 action: { [weak self] in self?.triggerPinOutput() }
-            ))
+            )
         }
 
         if vis.isVisible(.undo) {
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.undo.key,
-                zone: 1,
+            buttonsBySlot[.undo] = BarButtonSpec(
+                defaultZone: 1,
                 glyph: .undo,
                 selected: false,
                 enabled: document.canUndo,
                 tooltip: L10n.tr("撤销 · ⌘Z", "Undo · ⌘Z", in: lang),
                 action: { [weak self] in self?.performUndo() }
-            ))
+            )
         }
 
         if vis.isVisible(.ocr) {
             let ocrKey = cfg.hotkeys.ocr.isUnbound ? "" : " · \(cfg.hotkeys.ocr.displayString(in: lang))"
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.ocr.key,
-                zone: 1,
+            buttonsBySlot[.ocr] = BarButtonSpec(
+                defaultZone: 1,
                 glyph: .ocr,
                 selected: false,
                 enabled: true,
                 tooltip: L10n.tr("识字\(ocrKey)", "OCR\(ocrKey)", in: lang),
                 action: { [weak self] in self?.triggerOCR() }
-            ))
+            )
         }
 
-        items.append(BarButtonSpec(
-            id: ToolbarSlot.cancel.key,
-            zone: 2,
+        buttonsBySlot[.cancel] = BarButtonSpec(
+            defaultZone: 2,
             glyph: .cancel,
             selected: false,
             enabled: true,
             tooltip: L10n.tr("取消 · Esc", "Cancel · Esc", in: lang),
             action: { [weak self] in self?.attemptCancel() }
-        ))
+        )
 
         if vis.isVisible(.longshot), !selectionLocked {
             let lsKey = cfg.hotkeys.longshot.isUnbound ? "" : " · \(cfg.hotkeys.longshot.displayString(in: lang))"
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.longshot.key,
-                zone: 2,
+            buttonsBySlot[.longshot] = BarButtonSpec(
+                defaultZone: 2,
                 glyph: .longshot,
                 selected: false,
                 enabled: true,
                 tooltip: L10n.tr("长截图\(lsKey)", "Longshot\(lsKey)", in: lang),
                 action: { [weak self] in self?.triggerLongshot() }
-            ))
+            )
         }
 
         if vis.isVisible(.save) {
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.save.key,
-                zone: 2,
+            buttonsBySlot[.save] = BarButtonSpec(
+                defaultZone: 2,
                 glyph: .save,
                 selected: false,
                 enabled: true,
                 tooltip: L10n.tr("保存 · ⌘S", "Save · ⌘S", in: lang),
                 action: { [weak self] in self?.triggerSaveOutput(forceDialog: NSEvent.modifierFlags.contains(.option)) }
-            ))
+            )
         }
 
         if vis.isVisible(.copy) {
-            items.append(BarButtonSpec(
-                id: ToolbarSlot.copy.key,
-                zone: 2,
+            buttonsBySlot[.copy] = BarButtonSpec(
+                defaultZone: 2,
                 glyph: .copy,
                 selected: false,
                 enabled: true,
                 tooltip: L10n.tr("完成 · Enter", "Done · Enter", in: lang),
                 action: { [weak self] in self?.triggerCopyOutput() }
-            ))
+            )
         }
 
-        let order = vis.mainOrder
-        let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
-        items = order.compactMap { itemsByID[$0.key] }
+        let items = vis.mainOrder.compactMap { slot in
+            buttonsBySlot[slot].map { (slot: slot, spec: $0) }
+        }
         guard !items.isEmpty else { return }
 
-        let showDividers = order == ToolbarSlot.defaultMainOrder
-        var zoneTransitions = 0
-        if showDividers {
-            for i in 1..<items.count where items[i].zone != items[i - 1].zone {
-                zoneTransitions += 1
-            }
+        let dividerIndices = vis.hasCustomMainOrder ? [] : items.indices.dropFirst().filter { index in
+            items[index].spec.defaultZone != items[index - 1].spec.defaultZone
         }
-
-        let totalWidth = (padX * 2 + CGFloat(items.count) * btnSide + CGFloat(max(0, items.count - 1)) * gap + CGFloat(zoneTransitions) * groupDividerExtra).rounded()
+        let totalWidth = (padX * 2 + CGFloat(items.count) * btnSide + CGFloat(items.count - 1) * gap
+            + CGFloat(dividerIndices.count) * groupDividerExtra).rounded()
         var barX = (CGFloat(selection.maxX) - totalWidth).rounded()
         barX = max(8, min(bounds.width - totalWidth - 8, barX))
 
@@ -1683,19 +1662,19 @@ final class OverlayCanvasView: NSView {
             shadowAlpha: dark ? 0.36 : 0.18
         )
 
-        let selectedObjToolKey: String? = {
+        let selectedObjectToolSlot: ToolbarSlot? = {
             guard let selObj = document.selectedObject else { return nil }
             switch selObj.kind {
-            case .rect: return ToolbarSlot.tool(.rect).key
-            case .ellipse: return ToolbarSlot.tool(.ellipse).key
-            case .line: return ToolbarSlot.tool(.line).key
-            case .arrow: return ToolbarSlot.tool(.arrow).key
-            case .freehand: return ToolbarSlot.tool(.freehand).key
-            case .blur: return ToolbarSlot.tool(.blur).key
-            case .text: return ToolbarSlot.tool(.text).key
-            case .number: return ToolbarSlot.tool(.number).key
-            case .glow: return ToolbarSlot.tool(.glow).key
-            case .highlight: return ToolbarSlot.tool(.highlight).key
+            case .rect: return .tool(.rect)
+            case .ellipse: return .tool(.ellipse)
+            case .line: return .tool(.line)
+            case .arrow: return .tool(.arrow)
+            case .freehand: return .tool(.freehand)
+            case .blur: return .tool(.blur)
+            case .text: return .tool(.text)
+            case .number: return .tool(.number)
+            case .glow: return .tool(.glow)
+            case .highlight: return .tool(.highlight)
             }
         }()
 
@@ -1703,8 +1682,8 @@ final class OverlayCanvasView: NSView {
         var curX = barRect.minX + padX
         let itemY = barRect.minY + padY
 
-        for (idx, item) in items.enumerated() {
-            if showDividers && idx > 0 && item.zone != items[idx - 1].zone {
+        for (index, (slot, item)) in items.enumerated() {
+            if dividerIndices.contains(index) {
                 let divX = pixelSnap(curX - gap * 0.5 + groupDividerExtra * 0.5, lineWidth: 1.0)
                 let divH = 14.0 * uis
                 let divY0 = (barRect.midY - divH * 0.5).rounded()
@@ -1718,9 +1697,10 @@ final class OverlayCanvasView: NSView {
                 curX += groupDividerExtra
             }
 
+            let id = slot.key
             let itemRect = CGRect(x: curX, y: itemY, width: btnSide, height: btnSide)
-            let isPressed = (pressedItemID == item.id && item.enabled)
-            let isHovered = (hoveredItemID == item.id && item.enabled)
+            let isPressed = (pressedItemID == id && item.enabled)
+            let isHovered = (hoveredItemID == id && item.enabled)
             let pillRect = itemRect.insetBy(dx: 0.8 * uis, dy: 0.8 * uis)
 
             if item.selected {
@@ -1733,19 +1713,20 @@ final class OverlayCanvasView: NSView {
                 ctx.setStrokeColor(activeBorder)
                 ctx.setLineWidth(0.75)
                 ctx.strokePath()
-            } else if isPressed {
+            } else if isPressed || isHovered {
+                let background: CGColor
+                switch slot {
+                case .cancel: background = cancelHoverBg
+                case .copy: background = copyHoverBg
+                default: background = isPressed ? pressBg : hoverBg
+                }
                 let p = CGPath(roundedRect: pillRect, cornerWidth: 6.0 * uis, cornerHeight: 6.0 * uis, transform: nil)
                 ctx.addPath(p)
-                ctx.setFillColor(item.id == "file.cancel" ? cancelHoverBg : (item.id == "file.copy" ? copyHoverBg : pressBg))
-                ctx.fillPath()
-            } else if isHovered {
-                let p = CGPath(roundedRect: pillRect, cornerWidth: 6.0 * uis, cornerHeight: 6.0 * uis, transform: nil)
-                ctx.addPath(p)
-                ctx.setFillColor(item.id == "file.cancel" ? cancelHoverBg : (item.id == "file.copy" ? copyHoverBg : hoverBg))
+                ctx.setFillColor(background)
                 ctx.fillPath()
             }
 
-            if activeToolAnchorX == nil, item.id == selectedObjToolKey {
+            if activeToolAnchorX == nil, slot == selectedObjectToolSlot {
                 activeToolAnchorX = itemRect.midX
             }
 
@@ -1754,9 +1735,9 @@ final class OverlayCanvasView: NSView {
                 tint = iconDisabled
             } else if item.selected {
                 tint = activeAccent
-            } else if item.id == "file.cancel" && (isHovered || isPressed) {
+            } else if slot == .cancel && (isHovered || isPressed) {
                 tint = cancelHoverTint
-            } else if item.id == "file.copy" {
+            } else if slot == .copy {
                 tint = copyTint
             } else {
                 tint = iconNormal
@@ -1776,7 +1757,7 @@ final class OverlayCanvasView: NSView {
             let action = item.action
             let enabled = item.enabled
             toolbarHitItems.append(ToolbarHitItem(
-                id: item.id,
+                id: id,
                 rect: itemRect,
                 tooltip: item.tooltip,
                 action: { if enabled { action() } },
@@ -1807,7 +1788,7 @@ final class OverlayCanvasView: NSView {
         case text
     }
 
-    private func currentStyleSubBarMode(vis: ToolbarVisibilityConfig) -> StyleSubBarMode {
+    private func currentStyleSubBarMode(vis: ToolbarConfig) -> StyleSubBarMode {
         if let selObj = document.selectedObject {
             switch selObj.kind {
             case .text:

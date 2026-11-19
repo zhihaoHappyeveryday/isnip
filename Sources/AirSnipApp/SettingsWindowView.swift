@@ -1104,7 +1104,7 @@ private struct ToolbarOrderPane: View {
         let p = MagpiePalette(colorScheme: colorScheme)
         let toolbar = app.config.toolbar
         let order = toolbar.mainOrder
-        let hasCustomOrder = order != ToolbarSlot.defaultMainOrder
+        let hasCustomOrder = toolbar.hasCustomMainOrder
 
         MagpieCard {
             MagpieSettingRow(
@@ -1172,8 +1172,9 @@ private struct ToolbarVisibilityPane: View {
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
-        let totalSlots = ToolbarSlot.allOrdered.count
-        let visibleSlots = ToolbarSlot.allOrdered.filter { app.config.toolbar.isVisible($0) }.count
+        let slots = ToolbarSlot.hideableSlots
+        let totalSlots = slots.count
+        let visibleSlots = slots.filter { app.config.toolbar.isVisible($0) }.count
 
         MagpieCard {
             MagpieSettingRow(

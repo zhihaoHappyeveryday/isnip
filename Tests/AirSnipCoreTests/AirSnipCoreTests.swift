@@ -24,12 +24,12 @@ final class AirSnipCoreTests: XCTestCase {
     }
 
     func testToolbar24SlotsVisibilityAndSettleFallback() {
-        let all = ToolbarSlot.allOrdered
+        let all = ToolbarSlot.hideableSlots
         XCTAssertEqual(all.count, 24)
         XCTAssertEqual(Set(all.map(\.key)).count, 24)
         XCTAssertEqual(Set(all.map(\.label)).count, 24)
 
-        var vis = ToolbarVisibilityConfig()
+        var vis = ToolbarConfig()
         for g in ToolbarGroup.allCases {
             XCTAssertEqual(vis.groupState(g), .all)
         }
@@ -57,10 +57,12 @@ final class AirSnipCoreTests: XCTestCase {
         var config = try JSONDecoder().decode(AirSnipConfig.self, from: legacy)
         XCTAssertEqual(config.toolbar.mainOrder.first?.key, "tool.rect")
         XCTAssertEqual(config.toolbar.mainOrder.count, 16)
+        XCTAssertFalse(config.toolbar.hasCustomMainOrder)
 
         config.toolbar.mainOrder = [.ocr, .copy] + config.toolbar.mainOrder.filter { $0 != .ocr && $0 != .copy }
         let restored = try JSONDecoder().decode(AirSnipConfig.self, from: JSONEncoder().encode(config))
         XCTAssertEqual(restored.toolbar.mainOrder.prefix(3).map(\.key), ["output.ocr", "file.copy", "tool.rect"])
+        XCTAssertTrue(restored.toolbar.hasCustomMainOrder)
         XCTAssertFalse(restored.toolbar.isVisible(.pin))
     }
 
@@ -77,8 +79,14 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(restored.toolbar.mainOrder.first, .ocr)
 
         restored.toolbar.setVisible(.ocr, false)
+        var reorderedBackToDefault = restored
+        reorderedBackToDefault.toolbar.mainOrder = ToolbarSlot.defaultMainOrder
+        XCTAssertFalse(reorderedBackToDefault.toolbar.hasCustomMainOrder)
+        XCTAssertFalse(reorderedBackToDefault.toolbar.isVisible(.ocr))
+
         restored.toolbar.resetMainOrder()
         XCTAssertEqual(restored.toolbar.mainOrder.first, .tool(.rect))
+        XCTAssertFalse(restored.toolbar.hasCustomMainOrder)
         XCTAssertFalse(restored.toolbar.isVisible(.ocr))
     }
 

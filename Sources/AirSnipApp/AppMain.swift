@@ -561,17 +561,15 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.startStandaloneImageEdit(cgImage: image, backingScale: scale, screen: screen)
     }
 
-    func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
+    func makeSessionCoordinator(
+        mode: CaptureSessionCoordinator.SessionMode,
+        translateOCR: Bool = false,
+        chooseSaveDestination: @escaping OutputService.ChooseSaveDestination = OutputService.chooseSaveDestination
+    ) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
 
-        coordinator.onConfigMutated = { [weak self, weak coordinator] updated in
-            guard let self else { return }
-            var cfg = updated
-            cfg.toolbar = self.config.toolbar
-            if coordinator?.persistConfigChanges == true {
-                try? cfg.save(to: self.configURL)
-            }
-            self.config = cfg
+        coordinator.onUpdatePreferences = { [weak self] change in
+            self?.updateConfig(change)
         }
         coordinator.onCompleteCopy = { [weak self] cgImg, scale in
             let currentCfg = self?.config
@@ -581,26 +579,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 ToastHUD.show(L10n.tr("已复制", "Copied"))
             }
         }
-        coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
-            if let self {
-                cfg.toolbar = self.config.toolbar
-            }
-            let showToast = cfg.showCompletionToast
-            let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
-            guard OutputService.saveImage(
-                for: cgImg,
-                backingScale: scale,
-                config: &cfg,
-                forceDialog: forceDialog,
-                configSaveURL: cfgSaveURL
-            ) != nil else {
-                return false
-            }
-            self?.config = cfg
-            if showToast {
-                ToastHUD.show(L10n.tr("已保存", "Saved"))
-            }
-            return true
+        coordinator.onSaveImage = { [weak self] image, scale, forceDialog, sessionConfig in
+            self?.saveImage(
+                image, scale: scale, forceDialog: forceDialog, config: sessionConfig,
+                chooseDestination: chooseSaveDestination
+            ) ?? false
         }
         coordinator.onCompletePin = { [weak self] cgImg, scale, origin in
             guard let self else { return }
@@ -635,6 +618,26 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         return coordinator
     }
 
+    private func saveImage(
+        _ image: CGImage,
+        scale: Double,
+        forceDialog: Bool,
+        config: AirSnipConfig,
+        chooseDestination: OutputService.ChooseSaveDestination = OutputService.chooseSaveDestination
+    ) -> Bool {
+        guard let saved = OutputService.saveImage(
+            for: image, backingScale: scale, config: config, forceDialog: forceDialog,
+            chooseDestination: chooseDestination
+        ) else { return false }
+        if let updatePreferences = saved.updatePreferences {
+            updateConfig(updatePreferences)
+        }
+        if config.showCompletionToast {
+            ToastHUD.show(L10n.tr("已保存", "Saved"))
+        }
+        return true
+    }
+
     private func beginLongshotSession(
         screen: NSScreen,
         viewportTopDown: ASRect,
@@ -664,20 +667,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             guard let self else { return }
             self.activeLongshotSession = nil
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: self.config)
-            var cfg = self.config
-            let showToast = cfg.showCompletionToast
-            if OutputService.saveImage(
-                for: cgImg,
-                backingScale: scale,
-                config: &cfg,
-                forceDialog: forceDialog,
-                configSaveURL: self.configURL
-            ) != nil {
-                self.config = cfg
-                if showToast {
-                    ToastHUD.show(L10n.tr("已保存", "Saved"))
-                }
-            }
+            _ = self.saveImage(cgImg, scale: scale, forceDialog: forceDialog, config: self.config)
         }
         ls.onFinishEdit = { [weak self] cgImg, scale, scr in
             self?.activeLongshotSession = nil

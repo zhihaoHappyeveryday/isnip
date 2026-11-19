@@ -234,20 +234,14 @@ public final class PinWindowController: NSObject {
     }
 
     public func savePin(forceDialog: Bool = false) {
-        guard var cfg = manager?.getConfig?() else { return }
-        let showToast = cfg.showCompletionToast
-        if OutputService.saveImage(
-            for: cgImage,
-            backingScale: backingScale,
-            config: &cfg,
-            forceDialog: forceDialog,
-            parentWindow: window
-        ) != nil {
-            let finalCfg = cfg
-            manager?.updateConfig? { $0 = finalCfg }
-            if showToast {
-                ToastHUD.show(L10n.tr("已保存", "Saved"))
-            }
+        guard let cfg = manager?.getConfig?(),
+              let saved = OutputService.saveImage(for: cgImage, backingScale: backingScale, config: cfg, forceDialog: forceDialog)
+        else { return }
+        if let updatePreferences = saved.updatePreferences {
+            manager?.updateConfig?(updatePreferences)
+        }
+        if cfg.showCompletionToast {
+            ToastHUD.show(L10n.tr("已保存", "Saved"))
         }
     }
 
