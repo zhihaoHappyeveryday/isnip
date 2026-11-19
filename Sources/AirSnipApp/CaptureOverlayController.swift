@@ -1529,15 +1529,9 @@ final class OverlayCanvasView: NSView {
             let action: () -> Void
         }
 
-        // Exact 16-item single-pill layout grouped subtly into 3 optical zones:
-        // [□  ○  ╱  ↗  ✎  ▚  A  ①  ▣] | [📌  ↺  OCR] | [✕  ↕  ↓  ✓]
         var items: [BarButtonSpec] = []
-
         let lang = cfg.language
-        let orderedPrimaryTools: [AnnotationTool] = [
-            .rect, .ellipse, .line, .arrow, .freehand, .blur, .text, .number, .glow
-        ]
-        for tool in orderedPrimaryTools where vis.isVisible(.tool(tool)) {
+        for case .tool(let tool) in ToolbarSlot.defaultMainOrder where vis.isVisible(.tool(tool)) {
             let keyText = cfg.toolKeys.binding(for: tool).isUnbound ? "" : " · \(cfg.toolKeys.binding(for: tool).displayString(in: lang))"
             items.append(BarButtonSpec(
                 id: ToolbarSlot.tool(tool).key,
@@ -1553,7 +1547,7 @@ final class OverlayCanvasView: NSView {
         if vis.isVisible(.pin), !(coordinator?.isInlinePinEdit ?? false) {
             let pinKey = cfg.hotkeys.pin.isUnbound ? "" : " · \(cfg.hotkeys.pin.displayString(in: lang))"
             items.append(BarButtonSpec(
-                id: "output.pin",
+                id: ToolbarSlot.pin.key,
                 zone: 1,
                 glyph: .pin,
                 selected: false,
@@ -1565,7 +1559,7 @@ final class OverlayCanvasView: NSView {
 
         if vis.isVisible(.undo) {
             items.append(BarButtonSpec(
-                id: "edit.undo",
+                id: ToolbarSlot.undo.key,
                 zone: 1,
                 glyph: .undo,
                 selected: false,
@@ -1578,7 +1572,7 @@ final class OverlayCanvasView: NSView {
         if vis.isVisible(.ocr) {
             let ocrKey = cfg.hotkeys.ocr.isUnbound ? "" : " · \(cfg.hotkeys.ocr.displayString(in: lang))"
             items.append(BarButtonSpec(
-                id: "output.ocr",
+                id: ToolbarSlot.ocr.key,
                 zone: 1,
                 glyph: .ocr,
                 selected: false,
@@ -1589,7 +1583,7 @@ final class OverlayCanvasView: NSView {
         }
 
         items.append(BarButtonSpec(
-            id: "file.cancel",
+            id: ToolbarSlot.cancel.key,
             zone: 2,
             glyph: .cancel,
             selected: false,
@@ -1601,7 +1595,7 @@ final class OverlayCanvasView: NSView {
         if vis.isVisible(.longshot), !selectionLocked {
             let lsKey = cfg.hotkeys.longshot.isUnbound ? "" : " · \(cfg.hotkeys.longshot.displayString(in: lang))"
             items.append(BarButtonSpec(
-                id: "output.longshot",
+                id: ToolbarSlot.longshot.key,
                 zone: 2,
                 glyph: .longshot,
                 selected: false,
@@ -1613,7 +1607,7 @@ final class OverlayCanvasView: NSView {
 
         if vis.isVisible(.save) {
             items.append(BarButtonSpec(
-                id: "file.save",
+                id: ToolbarSlot.save.key,
                 zone: 2,
                 glyph: .save,
                 selected: false,
@@ -1625,7 +1619,7 @@ final class OverlayCanvasView: NSView {
 
         if vis.isVisible(.copy) {
             items.append(BarButtonSpec(
-                id: "file.copy",
+                id: ToolbarSlot.copy.key,
                 zone: 2,
                 glyph: .copy,
                 selected: false,
@@ -1635,11 +1629,17 @@ final class OverlayCanvasView: NSView {
             ))
         }
 
+        let order = vis.mainOrder
+        let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        items = order.compactMap { itemsByID[$0.key] }
         guard !items.isEmpty else { return }
 
+        let showDividers = order == ToolbarSlot.defaultMainOrder
         var zoneTransitions = 0
-        for i in 1..<items.count where items[i].zone != items[i - 1].zone {
-            zoneTransitions += 1
+        if showDividers {
+            for i in 1..<items.count where items[i].zone != items[i - 1].zone {
+                zoneTransitions += 1
+            }
         }
 
         let totalWidth = (padX * 2 + CGFloat(items.count) * btnSide + CGFloat(max(0, items.count - 1)) * gap + CGFloat(zoneTransitions) * groupDividerExtra).rounded()
@@ -1697,7 +1697,7 @@ final class OverlayCanvasView: NSView {
         let itemY = barRect.minY + padY
 
         for (idx, item) in items.enumerated() {
-            if idx > 0 && item.zone != items[idx - 1].zone {
+            if showDividers && idx > 0 && item.zone != items[idx - 1].zone {
                 let divX = pixelSnap(curX - gap * 0.5 + groupDividerExtra * 0.5, lineWidth: 1.0)
                 let divH = 14.0 * uis
                 let divY0 = (barRect.midY - divH * 0.5).rounded()

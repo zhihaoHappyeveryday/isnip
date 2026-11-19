@@ -52,6 +52,18 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(vis.settleColorIndex(1), 0)
     }
 
+    func testMainToolbarOrderSurvivesConfigRoundTrip() throws {
+        let legacy = Data(#"{"toolbar":{"hidden":["output.pin"]}}"#.utf8)
+        var config = try JSONDecoder().decode(AirSnipConfig.self, from: legacy)
+        XCTAssertEqual(config.toolbar.mainOrder.first?.key, "tool.rect")
+        XCTAssertEqual(config.toolbar.mainOrder.count, 16)
+
+        config.toolbar.mainOrder = [.ocr, .copy] + config.toolbar.mainOrder.filter { $0 != .ocr && $0 != .copy }
+        let restored = try JSONDecoder().decode(AirSnipConfig.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(restored.toolbar.mainOrder.prefix(3).map(\.key), ["output.ocr", "file.copy", "tool.rect"])
+        XCTAssertFalse(restored.toolbar.isVisible(.pin))
+    }
+
     func testHotkeyConflictDetectionAndUnbound() {
         var cfg = AirSnipConfig()
         XCTAssertTrue(cfg.hotkeyConflicts().isEmpty)

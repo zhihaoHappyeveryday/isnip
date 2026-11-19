@@ -252,12 +252,19 @@ public enum ToolbarSlot: Equatable, Hashable, Sendable {
     case pin
     case longshot
     case ocr
+    case cancel
     case copy
     case save
 
     public static var allOrdered: [ToolbarSlot] {
         ToolbarGroup.allCases.flatMap { $0.slots }
     }
+
+    public static let defaultMainOrder: [ToolbarSlot] = [
+        .tool(.rect), .tool(.ellipse), .tool(.line), .tool(.arrow), .tool(.freehand),
+        .tool(.blur), .tool(.text), .tool(.number), .tool(.glow),
+        .pin, .undo, .ocr, .cancel, .longshot, .save, .copy
+    ]
 
     public var key: String {
         switch self {
@@ -282,6 +289,7 @@ public enum ToolbarSlot: Equatable, Hashable, Sendable {
         case .pin: return "output.pin"
         case .longshot: return "output.longshot"
         case .ocr: return "output.ocr"
+        case .cancel: return "file.cancel"
         case .copy: return "file.copy"
         case .save: return "file.save"
         }
@@ -304,6 +312,7 @@ public enum ToolbarSlot: Equatable, Hashable, Sendable {
         case .pin: return lang.isEnglish ? "Pin" : "贴图"
         case .longshot: return lang.isEnglish ? "Longshot" : "长截图"
         case .ocr: return "OCR"
+        case .cancel: return lang.isEnglish ? "Cancel" : "取消"
         case .copy: return lang.isEnglish ? "Copy" : "复制"
         case .save: return lang.isEnglish ? "Save" : "保存"
         }
@@ -315,7 +324,7 @@ public enum ToolbarSlot: Equatable, Hashable, Sendable {
         case .color: return .colors
         case .fill, .undo, .redo, .textRow: return .edit
         case .pin, .longshot, .ocr: return .output
-        case .copy, .save: return .file
+        case .cancel, .copy, .save: return .file
         }
     }
 }
@@ -328,16 +337,31 @@ public enum ToolbarGroupState: Equatable, Sendable {
 
 public struct ToolbarVisibilityConfig: Codable, Equatable, Sendable {
     public var hidden: [String]
+    private var order: [String]?
 
     public init(hidden: [String] = []) {
         self.hidden = hidden
     }
 
+    public var mainOrder: [ToolbarSlot] {
+        get {
+            let defaults = ToolbarSlot.defaultMainOrder
+            guard let order else { return defaults }
+            var remaining = Dictionary(uniqueKeysWithValues: defaults.map { ($0.key, $0) })
+            let ordered = order.compactMap { remaining.removeValue(forKey: $0) }
+            return ordered + defaults.filter { remaining[$0.key] != nil }
+        }
+        set {
+            order = newValue == ToolbarSlot.defaultMainOrder ? nil : newValue.map(\.key)
+        }
+    }
+
     public func isVisible(_ slot: ToolbarSlot) -> Bool {
-        !hidden.contains(slot.key)
+        slot == .cancel || !hidden.contains(slot.key)
     }
 
     public mutating func setVisible(_ slot: ToolbarSlot, _ visible: Bool) {
+        guard slot != .cancel else { return }
         let k = slot.key
         if visible {
             hidden.removeAll { $0 == k }

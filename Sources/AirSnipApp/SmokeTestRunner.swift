@@ -590,6 +590,19 @@ public enum SmokeTestRunner {
 
                 coordinator.cancelSession()
 
+                var reorderedCfg = defaultCfg
+                reorderedCfg.toolbar.mainOrder = [.ocr, .copy] + reorderedCfg.toolbar.mainOrder.filter { $0 != .ocr && $0 != .copy }
+                let reordered = CaptureSessionCoordinator(config: reorderedCfg, mode: .normalCapture)
+                reordered.persistConfigChanges = false
+                reordered.startWithSnapshots([snap])
+                let sample = reordered.renderToolbarVerificationSample(selection: sampleSel)
+                reordered.cancelSession()
+                let reorderedIDs = ["output.ocr", "file.copy"] + expectedIDs.filter { $0 != "output.ocr" && $0 != "file.copy" }
+                guard sample?.toolbarIDs == reorderedIDs else {
+                    fputs("FAIL: Screenshot toolbar did not follow the saved order\n", stderr)
+                    return false
+                }
+
                 // Verify Longshot first-mouse click acceptance, immediate smart-PNG disk write, and full-res tall Longshot annotation export
                 let firstMouseOK = FirstMouseHostingView(rootView: EmptyView()).acceptsFirstMouse(for: nil)
                 var smartSaveImmediateCfg = defaultCfg

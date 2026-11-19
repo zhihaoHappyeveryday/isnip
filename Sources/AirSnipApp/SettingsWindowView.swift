@@ -290,7 +290,7 @@ public struct SettingsRootView: View {
                             case .captureAndPin:
                                 CaptureAndPinPane(app: app)
                             case .toolbar:
-                                ToolbarVisibilityPane(app: app)
+                                ToolbarSettingsPane(app: app)
                             case .hotkeys:
                                 HotkeysSettingsPane(app: app, recordingSlot: $recordingSlot)
                             case .editor:
@@ -1063,7 +1063,95 @@ private struct CaptureAndPinPane: View {
     }
 }
 
-// MARK: - 3. Toolbar Visibility (工具栏 / Toolbar)
+// MARK: - 3. Toolbar (工具栏 / Toolbar)
+
+private struct ToolbarSettingsPane: View {
+    private enum Page {
+        case visibility
+        case order
+    }
+
+    @Environment(\.appLanguage) private var lang
+    @ObservedObject var app: AirSnipAppController
+    @State private var page = Page.visibility
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            MagpieSegmentedPicker(
+                options: [
+                    (.visibility, L10n.tr("显示与隐藏", "Visibility", in: lang)),
+                    (.order, L10n.tr("按钮顺序", "Button Order", in: lang))
+                ],
+                selection: $page
+            )
+
+            switch page {
+            case .visibility:
+                ToolbarVisibilityPane(app: app)
+            case .order:
+                ToolbarOrderPane(app: app)
+            }
+        }
+    }
+}
+
+private struct ToolbarOrderPane: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appLanguage) private var lang
+    @ObservedObject var app: AirSnipAppController
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+
+        MagpieCard {
+            MagpieSettingRow(
+                title: L10n.tr("拖动调整顺序", "Drag to Reorder", in: lang),
+                subtitle: L10n.tr("列表从上到下对应工具栏从左到右", "The list runs from left to right on the toolbar", in: lang)
+            ) {
+                EmptyView()
+            }
+
+            MagpieRowDivider()
+            List {
+                ForEach(app.config.toolbar.mainOrder, id: \.key) { slot in
+                    HStack(spacing: 8) {
+                        Text(label(for: slot))
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(p.inkPrimary)
+                        Spacer()
+                        Image(systemName: "line.3.horizontal")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(p.inkTertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .listRowInsets(EdgeInsets(top: 7, leading: 20, bottom: 7, trailing: 20))
+                    .listRowBackground(p.cardBg)
+                    .listRowSeparatorTint(p.rowDivider)
+                }
+                .onMove(perform: move)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .frame(height: 300)
+        }
+    }
+
+    private func label(for slot: ToolbarSlot) -> String {
+        switch slot {
+        case .tool(let tool): return tool.displayName(in: lang)
+        case .copy: return L10n.tr("完成", "Done", in: lang)
+        default: return slot.label(in: lang)
+        }
+    }
+
+    private func move(from source: IndexSet, to destination: Int) {
+        let currentOrder = app.config.toolbar.mainOrder
+        var order = currentOrder
+        order.move(fromOffsets: source, toOffset: destination)
+        guard order != currentOrder else { return }
+        app.updateConfig { $0.toolbar.mainOrder = order }
+    }
+}
 
 private struct ToolbarVisibilityPane: View {
     @Environment(\.colorScheme) private var colorScheme
