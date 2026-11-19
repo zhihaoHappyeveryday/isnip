@@ -918,6 +918,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var pinPosition: PinPosition
     public var pinBorder: Bool
     public var pinMaxCount: Int
+    public var pinAnnotationCoversDesktop: Bool
     public var uiScale: UiScaleSetting
     public var swatchColors: [RGBAColor]
     public var activeColorIndex: Int
@@ -961,6 +962,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         pinPosition: PinPosition = .original,
         pinBorder: Bool = true,
         pinMaxCount: Int = 20,
+        pinAnnotationCoversDesktop: Bool = true,
         uiScale: UiScaleSetting = .auto,
         swatchColors: [RGBAColor] = ColorPalette.defaultSwatches,
         activeColorIndex: Int = 1,
@@ -1003,6 +1005,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinPosition = pinPosition
         self.pinBorder = pinBorder
         self.pinMaxCount = pinMaxCount
+        self.pinAnnotationCoversDesktop = pinAnnotationCoversDesktop
         self.uiScale = uiScale
         self.swatchColors = swatchColors.count == ColorPalette.swatchCount ? swatchColors : ColorPalette.defaultSwatches
         self.activeColorIndex = max(0, min(ColorPalette.swatchCount - 1, activeColorIndex))
@@ -1039,6 +1042,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case autoStart, language, theme, hotkeys, hotkeyDefaultsMigratedV2, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
+        case pinAnnotationCoversDesktop
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
         case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
         case styleDefaultsMigratedV2
@@ -1100,6 +1104,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinPosition = try c.decodeIfPresent(PinPosition.self, forKey: .pinPosition) ?? d.pinPosition
         self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
         self.pinMaxCount = try c.decodeIfPresent(Int.self, forKey: .pinMaxCount) ?? d.pinMaxCount
+        self.pinAnnotationCoversDesktop = try c.decodeIfPresent(Bool.self, forKey: .pinAnnotationCoversDesktop) ?? d.pinAnnotationCoversDesktop
         self.uiScale = try c.decodeIfPresent(UiScaleSetting.self, forKey: .uiScale) ?? d.uiScale
         let alreadyMigratedV2 = try c.decodeIfPresent(Bool.self, forKey: .styleDefaultsMigratedV2) ?? false
         var decodedSwatches = try c.decodeIfPresent([RGBAColor].self, forKey: .swatchColors) ?? d.swatchColors

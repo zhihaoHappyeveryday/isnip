@@ -44,11 +44,13 @@ public enum AnnotationRenderer {
     /// Bakes `rawSelection` + `objects` (whose coordinates are in overlay point space) into a pixel-accurate output `CGImage`.
     /// `selectionOrigin` is the top-left of the selection in the same point coordinate space as `objects`,
     /// and `pixelScale` converts points -> physical pixels (e.g., 2.0 on Retina).
+    /// A pin's displayed dimensions can require a separate vertical scale.
     public static func bakeOutput(
         rawSelection: CGImage,
         objects: [AnnotationObject],
         selectionOrigin: ASPoint,
-        pixelScale: Double
+        pixelScale: Double,
+        verticalPixelScale: Double? = nil
     ) -> CGImage? {
         let outW = rawSelection.width
         let outH = rawSelection.height
@@ -74,14 +76,15 @@ public enum AnnotationRenderer {
         // Switch context to top-down point coordinates mapped by `pixelScale` and offset by `-selectionOrigin`
         ctx.saveGState()
         ctx.translateBy(x: 0, y: CGFloat(outH))
-        ctx.scaleBy(x: CGFloat(pixelScale), y: -CGFloat(pixelScale))
+        let scaleY = verticalPixelScale ?? pixelScale
+        ctx.scaleBy(x: CGFloat(pixelScale), y: -CGFloat(scaleY))
         ctx.translateBy(x: -CGFloat(selectionOrigin.x), y: -CGFloat(selectionOrigin.y))
 
         let logicalRect = ASRect(
             x: selectionOrigin.x,
             y: selectionOrigin.y,
             width: Double(outW) / pixelScale,
-            height: Double(outH) / pixelScale
+            height: Double(outH) / scaleY
         )
 
         drawAnnotations(
@@ -90,7 +93,8 @@ public enum AnnotationRenderer {
             rawBuffer: rawBuffer,
             rawOrigin: selectionOrigin,
             pixelScale: pixelScale,
-            clipBounds: logicalRect
+            clipBounds: logicalRect,
+            verticalPixelScale: verticalPixelScale
         )
 
         ctx.restoreGState()
@@ -146,7 +150,8 @@ public enum AnnotationRenderer {
         rawBuffer: PixelBufferRGBA?,
         rawOrigin: ASPoint,
         pixelScale: Double,
-        clipBounds: ASRect
+        clipBounds: ASRect,
+        verticalPixelScale: Double? = nil
     ) {
         ctx.saveGState()
         ctx.clip(to: clipBounds.cgRect)
@@ -183,7 +188,8 @@ public enum AnnotationRenderer {
                 object: obj,
                 rawBuffer: rawBuffer,
                 rawOrigin: rawOrigin,
-                pixelScale: pixelScale
+                pixelScale: pixelScale,
+                verticalPixelScale: verticalPixelScale
             )
         }
 
@@ -195,7 +201,8 @@ public enum AnnotationRenderer {
         object: AnnotationObject,
         rawBuffer: PixelBufferRGBA?,
         rawOrigin: ASPoint,
-        pixelScale: Double
+        pixelScale: Double,
+        verticalPixelScale: Double? = nil
     ) {
         let color = object.style.color
         let lineW = CGFloat(object.style.lineWidth)
@@ -208,10 +215,11 @@ public enum AnnotationRenderer {
         case .blur(let a, let b, let blurRadius, let cornerRadius):
             let box = ASRect.between(a, b)
             guard box.width >= 2 && box.height >= 2, let raw = rawBuffer else { break }
+            let scaleY = verticalPixelScale ?? pixelScale
             let pxX = Int(((box.minX - rawOrigin.x) * pixelScale).rounded(.down))
-            let pxY = Int(((box.minY - rawOrigin.y) * pixelScale).rounded(.down))
+            let pxY = Int(((box.minY - rawOrigin.y) * scaleY).rounded(.down))
             let pxW = max(1, Int((box.width * pixelScale).rounded(.up)))
-            let pxH = max(1, Int((box.height * pixelScale).rounded(.up)))
+            let pxH = max(1, Int((box.height * scaleY).rounded(.up)))
             let cropRect = PixelRect(x: pxX, y: pxY, width: pxW, height: pxH)
             guard let sub = raw.cropped(to: cropRect) else { break }
             let scaledRadius = max(2, Int((blurRadius * max(1.0, pixelScale * 0.65)).rounded()))

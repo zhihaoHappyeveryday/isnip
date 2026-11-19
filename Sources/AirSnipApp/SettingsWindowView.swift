@@ -1439,13 +1439,27 @@ private struct EditorDefaultsPane: View {
     }
 
     var body: some View {
+        VStack(spacing: 14) {
+            styleCard
+            MagpieCard {
+                MagpieSettingRow(title: L10n.tr("贴图标注时遮住桌面", "Cover Desktop When Annotating Pins", in: lang)) {
+                    MagpieBooleanSwitch(isOn: Binding(
+                        get: { app.config.pinAnnotationCoversDesktop },
+                        set: { enabled in app.updateConfig { $0.pinAnnotationCoversDesktop = enabled } }
+                    ))
+                }
+            }
+        }
+    }
+
+    private var styleCard: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
         let clampedActiveIdx = max(0, min(app.config.swatchColors.count - 1, app.config.activeColorIndex))
         let activeRGB = app.config.swatchColors[clampedActiveIdx]
         let activeLum = (0.299 * Double(activeRGB.r) + 0.587 * Double(activeRGB.g) + 0.114 * Double(activeRGB.b)) / 255.0
         let needsDarkPreview = activeLum > 0.80
 
-        MagpieCard {
+        return MagpieCard {
             MagpieSettingRow(title: L10n.tr("线宽", "Stroke Width", in: lang)) {
                 HStack(spacing: 14) {
                     MagpieSlider(

@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 import CoreImage
 import ImageIO
@@ -207,6 +208,121 @@ public enum SmokeTestRunner {
         return true
     }
 
+    @MainActor
+    private static func verifyPinAnnotation(on screen: NSScreen) -> Bool {
+        var config = AirSnipConfig()
+        config.pinAnnotationCoversDesktop = false
+        config.confirmCancel = true
+        let pixels = [UInt8](repeating: 0, count: 24 * 120 * 4)
+        guard let image = PixelBufferRGBA(width: 24, height: 120, rgba: pixels).makeCGImage() else { return false }
+        let manager = PinManager()
+        let visible = screen.visibleFrame
+        manager.createPin(
+            cgImage: image,
+            backingScale: 2,
+            preferredScreenOriginAppKit: NSPoint(x: visible.midX, y: visible.midY),
+            config: config
+        )
+        guard let pin = manager.windows.first else { return false }
+        defer { manager.closeAll() }
+        pin.adjustZoom(delta: -1, anchorInWindow: .zero)
+        let frame = pin.window.frame
+        let zoom = pin.zoomScale
+        let originalView = pin.window.contentView
+
+        func key(_ keyCode: Int, _ characters: String, in window: NSWindow) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil,
+                characters: characters, charactersIgnoringModifiers: characters, isARepeat: false,
+                keyCode: UInt16(keyCode)
+            )
+        }
+
+        let coordinator = CaptureSessionCoordinator(config: config, mode: .inlinePinEdit(pin))
+        coordinator.persistConfigChanges = false
+        coordinator.startPinInlineEdit(pin: pin)
+        defer { if coordinator.hasVisibleWindows { coordinator.cancelSession() } }
+        guard let number = coordinator.activeWindowNumbers.first,
+              let editor = NSApp.window(withWindowNumber: number),
+              let canvas = editor.contentView as? OverlayCanvasView, !pin.window.isVisible else {
+            fputs("FAIL: Pin annotation did not open in place\n", stderr)
+            return false
+        }
+        guard coordinator.renderStandaloneAnnotatedOutputSample() != nil else { return false }
+
+        // Scope WindowServer hit testing to the fixture windows, below any lock screen or system overlays.
+        let gutter = NSPoint(x: editor.frame.minX + 3, y: frame.midY)
+        func hitTestPanel(levelOffset: Int) -> NSPanel {
+            let panel = NSPanel(
+                contentRect: NSRect(x: gutter.x - 8, y: gutter.y - 8, width: 16, height: 16),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.backgroundColor = .white
+            panel.level = NSWindow.Level(rawValue: editor.level.rawValue + levelOffset)
+            panel.orderFrontRegardless()
+            panel.display()
+            return panel
+        }
+        let underlying = hitTestPanel(levelOffset: -1)
+        let ceiling = hitTestPanel(levelOffset: 1)
+        defer {
+            ceiling.orderOut(nil)
+            underlying.orderOut(nil)
+        }
+        editor.display()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+
+        let hit = NSWindow.windowNumber(at: gutter, belowWindowWithWindowNumber: ceiling.windowNumber)
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        let pinHit = NSWindow.windowNumber(at: center, belowWindowWithWindowNumber: ceiling.windowNumber)
+        guard editor.frame.contains(gutter), !frame.contains(gutter), hit == underlying.windowNumber,
+              pinHit == editor.windowNumber, canvas.acceptsFirstMouse(for: nil) else {
+            fputs("FAIL: Pin annotation hit testing (margin \(hit)/\(underlying.windowNumber), pin \(pinHit)/\(editor.windowNumber))\n", stderr)
+            return false
+        }
+        guard let enter = key(kVK_Return, "\r", in: editor) else { return false }
+        editor.resignKey()
+        coordinator.refocus()
+        canvas.keyDown(with: enter)
+        guard pin.window.isVisible, pin.window.frame == frame, pin.zoomScale == zoom,
+              pin.window.contentView === originalView,
+              let result = PixelBufferRGBA(cgImage: pin.cgImage),
+              result.width == 24, result.height == 120,
+              result.pixel(x: 12, y: Int((8 * 120 / frame.height).rounded())).r > 220,
+              result.pixel(x: 0, y: 0).a == 0 else {
+            fputs("FAIL: Applying pin annotation changed its frame or misaligned the source pixels\n", stderr)
+            return false
+        }
+
+        let applied = pin.cgImage
+        coordinator.startPinInlineEdit(pin: pin)
+        guard let reopenedNumber = coordinator.activeWindowNumbers.first,
+              let reopenedEditor = NSApp.window(withWindowNumber: reopenedNumber),
+              let reopened = reopenedEditor.contentView as? OverlayCanvasView,
+              let escape = key(kVK_Escape, "\u{1b}", in: reopenedEditor),
+              coordinator.renderStandaloneAnnotatedOutputSample() != nil else { return false }
+        reopened.keyDown(with: escape)
+        guard coordinator.hasVisibleWindows else {
+            fputs("FAIL: First Escape discarded pending pin annotations\n", stderr)
+            return false
+        }
+        reopened.keyDown(with: escape)
+        guard !coordinator.hasVisibleWindows, pin.window.isVisible, pin.cgImage === applied,
+              pin.window.frame == frame, pin.window.contentView === originalView else {
+            fputs("FAIL: Cancelling pin annotation did not restore the original pin\n", stderr)
+            return false
+        }
+
+        let fullScreen = CaptureSessionCoordinator(config: AirSnipConfig(), mode: .inlinePinEdit(pin))
+        fullScreen.persistConfigChanges = false
+        fullScreen.startPinInlineEdit(pin: pin)
+        defer { fullScreen.cancelSession() }
+        return fullScreen.hasVisibleWindows && !pin.window.isVisible
+    }
+
     public static func run() -> Bool {
         do {
             print("[smoke] 1/7 验证配置往返、无损压缩默认开启与 24 项工具栏可见性...")
@@ -221,6 +337,7 @@ public enum SmokeTestRunner {
                   cfg.askBeforeSave == false,
                   cfg.longshotAutoScroll == true,
                   cfg.longshotScrollSpeed == .normal,
+                  cfg.pinAnnotationCoversDesktop,
                   cfg.swatchColors[1] == RGBAColor(r: 255, g: 0, b: 0),
                   cfg.defaultLineWidth == 2.0,
                   cfg.pngCompressionQuality == .visuallyLossless,
@@ -230,11 +347,14 @@ public enum SmokeTestRunner {
             }
             cfg.toolbar.setVisible(.tool(.ellipse), false)
             cfg.toolbar.setVisible(.ocr, false)
+            cfg.pinAnnotationCoversDesktop = false
             try cfg.save(to: cfgURL)
             let loaded = AirSnipConfig.load(from: cfgURL)
             guard !loaded.toolbar.isVisible(.tool(.ellipse)),
                   !loaded.toolbar.isVisible(.ocr),
                   loaded.toolbar.isVisible(.tool(.rect)),
+                  !loaded.pinAnnotationCoversDesktop,
+                  try JSONDecoder().decode(AirSnipConfig.self, from: Data("{}".utf8)).pinAnnotationCoversDesktop,
                   loaded.smartPngCompression == true else {
                 fputs("FAIL: Config roundtrip mismatch\n", stderr)
                 return false
@@ -457,6 +577,10 @@ public enum SmokeTestRunner {
                 app.setActivationPolicy(.accessory)
                 guard let screen = NSScreen.main ?? NSScreen.screens.first,
                       let rawBuf = PixelBufferRGBA(cgImage: baseCG) else {
+                    return false
+                }
+                guard verifyPinAnnotation(on: screen) else {
+                    fputs("FAIL: Windowed pin annotation, click-through, or image update mismatch\n", stderr)
                     return false
                 }
                 let sFrame = screen.frame

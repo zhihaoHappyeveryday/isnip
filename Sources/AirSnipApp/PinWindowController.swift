@@ -7,6 +7,7 @@ public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
+    var onCloseAll: (() -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
@@ -61,6 +62,7 @@ public final class PinManager: ObservableObject {
     }
 
     public func closeAll() {
+        onCloseAll?()
         for w in windows {
             w.window.orderOut(nil)
         }
@@ -147,8 +149,10 @@ public final class PinWindowController: NSObject {
         window.makeFirstResponder(contentView)
     }
 
-    public func updateImage(_ newImage: CGImage) {
+    public func updateImage(_ newImage: CGImage, preservingFrame: Bool = false) {
         self.cgImage = newImage
+        contentView.needsDisplay = true
+        guard !preservingFrame else { return }
         self.baseSize = NSSize(
             width: max(32.0, Double(newImage.width) / max(1.0, backingScale)),
             height: max(32.0, Double(newImage.height) / max(1.0, backingScale))
@@ -160,7 +164,6 @@ public final class PinWindowController: NSObject {
         frame.origin = NSPoint(x: center.x - baseSize.width * 0.5, y: center.y - baseSize.height * 0.5)
         window.setFrame(frame, display: true)
         contentView.frame = NSRect(origin: .zero, size: baseSize)
-        contentView.needsDisplay = true
     }
 
     public func setShowBorder(_ on: Bool) {

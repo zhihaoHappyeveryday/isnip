@@ -43,6 +43,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         pinManager.onRequestAnnotatePin = { [weak self] pin in
             self?.startPinInlineEditSession(pin: pin)
         }
+        pinManager.onCloseAll = { [weak self] in
+            guard let session = self?.activeCaptureSession, session.isWindowedPinEdit else { return }
+            session.cancelSession()
+        }
         pinManager.onRequestOCRPin = { [weak self] pin in
             guard let self else { return }
             let f = pin.window.frame
@@ -153,6 +157,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         let oldLang = config.language
         let oldSelectionButton = config.translation.showSelectionButton
         mutate(&config)
+        activeCaptureSession?.refreshWindowedPinConfig(config)
         L10n.current = config.language
         try? config.save(to: configURL)
         if config.language != oldLang {
