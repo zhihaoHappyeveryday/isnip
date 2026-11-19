@@ -793,6 +793,32 @@ public enum SmokeTestRunner {
                 return false
             }
 
+            let pinAcceptsFirstMouse: Bool = MainActor.assumeIsolated {
+                let pins = PinManager()
+                let pin = PinWindowController(
+                    cgImage: baseCG,
+                    baseSize: NSSize(width: baseW, height: baseH),
+                    backingScale: 1,
+                    origin: .zero,
+                    showBorder: true,
+                    manager: pins
+                )
+                guard let click = NSEvent.mouseEvent(
+                    with: .leftMouseDown,
+                    location: NSPoint(x: 24, y: 24),
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: pin.window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+                ) else { return false }
+                return !pin.window.isKeyWindow && pin.window.contentView?.acceptsFirstMouse(for: click) == true
+            }
+            guard pinAcceptsFirstMouse else {
+                fputs("FAIL: An unfocused pin should accept the first mouse press\n", stderr)
+                return false
+            }
+            print("[pins] PASS: 失焦贴图接收首次鼠标按下")
+
             print("smoke-test: ok (iSnip v\(UpdateChecker.currentVersion))")
             return true
         } catch {

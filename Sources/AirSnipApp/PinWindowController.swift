@@ -269,6 +269,7 @@ private final class PinCanvasView: NSView {
     private var badgeClearTask: Task<Void, Never>?
 
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     func showBadgeTemporarily(_ text: String) {
         badgeText = text
