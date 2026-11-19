@@ -557,6 +557,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             originalText: clip.originalText
         ) {
             lastPinnedClipboardCopy = clip.copyID
+            if clip.isTextPreviewClipped {
+                ToastHUD.show(
+                    L10n.tr("仅显示部分文字，可复制原文", "Showing part of the text. Use Copy Original Text.", in: config.language),
+                    symbol: "exclamationmark.triangle", tint: .systemOrange
+                )
+            }
         }
     }
 

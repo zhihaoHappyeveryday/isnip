@@ -510,7 +510,7 @@ public enum OutputService {
     static func readPinFromClipboard(
         from pasteboard: NSPasteboard,
         excluding previousCopy: ClipboardCopyID?
-    ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?)? {
+    ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?, isTextPreviewClipped: Bool)? {
         let changeCount = pasteboard.changeCount
         let name = pasteboard.name
         var copyChangeCount = changeCount
@@ -522,11 +522,11 @@ public enum OutputService {
         guard copyID != previousCopy else { return nil }
         if let image = readPasteboardImage(pasteboard) {
             guard pasteboard.changeCount == changeCount else { return nil }
-            return (image.cgImage, image.pointSize, copyID, nil)
+            return (image.cgImage, image.pointSize, copyID, nil, false)
         }
         guard let text = pasteboard.string(forType: .string), !text.isEmpty,
               let image = renderPinText(text), pasteboard.changeCount == changeCount else { return nil }
-        return (image.cgImage, image.pointSize, copyID, text)
+        return (image.cgImage, image.pointSize, copyID, text, image.isClipped)
     }
 
     private static func readPasteboardImage(_ pasteboard: NSPasteboard) -> (cgImage: CGImage, pointSize: NSSize)? {
@@ -542,13 +542,26 @@ public enum OutputService {
         return (cg, ptSize)
     }
 
-    private static func renderPinText(_ text: String) -> (cgImage: CGImage, pointSize: NSSize)? {
+    private static func renderPinText(_ text: String) -> (cgImage: CGImage, pointSize: NSSize, isClipped: Bool)? {
         let font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: CGColor(gray: 0, alpha: 1)
         ]
-        let lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map { line in
+        let padding: CGFloat = 12
+        let scale = max(1, NSScreen.main?.backingScaleFactor ?? 2)
+        let maxSide = 8192
+        let maxBitmapBytes = 32 * 1024 * 1024
+
+        // Bound typesetting work before shaping the clipboard text.
+        let scalars = text.unicodeScalars
+        let preview = scalars.prefix(64 * 1024)
+        let minimumLineHeight = ceil(font.ascender - font.descender + font.leading)
+        let lineLimit = Int((CGFloat(maxSide) / scale - padding * 2) / minimumLineHeight)
+        let sourceLines = String(preview).split(
+            maxSplits: lineLimit, omittingEmptySubsequences: false, whereSeparator: \.isNewline
+        )
+        let lines = sourceLines.prefix(lineLimit).map { line in
             CTLineCreateWithAttributedString(NSAttributedString(string: String(line), attributes: attributes))
         }
         var width: CGFloat = 0
@@ -566,27 +579,38 @@ public enum OutputService {
             leading = max(leading, lineLeading)
         }
 
-        let padding: CGFloat = 12
         let lineHeight = ceil(ascent + descent + leading)
+        let naturalWidth = max(32, ceil(width) + padding * 2)
+        let pixelWidth = Int(min(ceil(naturalWidth * scale), CGFloat(maxSide)))
+        // Align the stride explicitly so row padding is included in the budget.
+        let bytesPerRow = (pixelWidth * 4 + 63) / 64 * 64
+        let maxPixelHeight = min(maxSide, maxBitmapBytes / bytesPerRow)
+        let visibleLineCount = min(lines.count, Int((CGFloat(maxPixelHeight) / scale - padding * 2) / lineHeight))
+        guard visibleLineCount > 0 else { return nil }
         let pointSize = NSSize(
-            width: max(32, ceil(width) + padding * 2),
-            height: lineHeight * CGFloat(lines.count) + padding * 2
+            width: min(naturalWidth, CGFloat(pixelWidth) / scale),
+            height: lineHeight * CGFloat(visibleLineCount) + padding * 2
         )
-        let scale = max(1, NSScreen.main?.backingScaleFactor ?? 2)
+        let pixelHeight = min(Int(ceil(pointSize.height * scale)), maxPixelHeight)
         guard let context = CGContext(
-            data: nil, width: Int(ceil(pointSize.width * scale)), height: Int(ceil(pointSize.height * scale)),
-            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            data: nil, width: pixelWidth, height: pixelHeight,
+            bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
         context.setFillColor(CGColor(gray: 1, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: context.width, height: context.height))
         context.scaleBy(x: scale, y: scale)
-        for (index, line) in lines.enumerated() {
+        let clipsWidth = pointSize.width < naturalWidth
+        if clipsWidth {
+            context.clip(to: CGRect(x: 0, y: 0, width: pointSize.width - padding, height: pointSize.height))
+        }
+        for (index, line) in lines.prefix(visibleLineCount).enumerated() {
             context.textPosition = CGPoint(x: padding, y: pointSize.height - padding - ascent - CGFloat(index) * lineHeight)
             CTLineDraw(line, context)
         }
         guard let cgImage = context.makeImage() else { return nil }
-        return (cgImage, pointSize)
+        let isClipped = clipsWidth || visibleLineCount < sourceLines.count || preview.endIndex != scalars.endIndex
+        return (cgImage, pointSize, isClipped)
     }
 
     public static func readImageFromFileDialog() -> CGImage? {
