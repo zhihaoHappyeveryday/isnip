@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Carbon
 import CoreGraphics
+import CoreText
 import ImageIO
 import QuartzCore
 import ScreenCaptureKit
@@ -402,14 +403,15 @@ public enum OutputService {
 
     private static var lastClipboardRewrite: (changeCount: Int, originalChangeCount: Int)?
 
-    private static func writePngDataToPasteboard(_ pngData: Data, originalChangeCount: Int? = nil) -> Int? {
-        let pb = NSPasteboard.general
-        let changeCount = pb.clearContents()
+    private static func writePngDataToPasteboard(
+        _ pngData: Data, to pasteboard: NSPasteboard, originalChangeCount: Int? = nil
+    ) -> Int? {
+        let changeCount = pasteboard.clearContents()
         let item = NSPasteboardItem()
         // Write PNG data ONLY (omitting uncompressed TIFF avoids 10-20 MB clipboard bloat!)
         item.setData(pngData, forType: .png)
-        guard pb.writeObjects([item]) else { return nil }
-        if let originalChangeCount {
+        guard pasteboard.writeObjects([item]) else { return nil }
+        if let originalChangeCount, pasteboard.name == .general {
             lastClipboardRewrite = (changeCount, originalChangeCount)
         }
         return changeCount
@@ -419,6 +421,7 @@ public enum OutputService {
         _ cgImage: CGImage,
         backingScale: Double = 2.0,
         config: AirSnipConfig? = nil,
+        to pasteboard: NSPasteboard = .general,
         onCompressed: (@MainActor @Sendable (PngCompressionResult) -> Void)? = nil
     ) {
         let effectiveScale = max(1.0, backingScale.isFinite ? backingScale : 2.0)
@@ -429,13 +432,12 @@ public enum OutputService {
         let nsImage = NSImage(cgImage: cgImage, size: pointSize)
 
         guard let rawPngData = try? ImageEncoder.encode(cgImage, format: .png, scale: effectiveScale) else {
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            pb.writeObjects([nsImage])
+            pasteboard.clearContents()
+            pasteboard.writeObjects([nsImage])
             return
         }
 
-        guard let initialChangeCount = writePngDataToPasteboard(rawPngData) else { return }
+        guard let initialChangeCount = writePngDataToPasteboard(rawPngData, to: pasteboard) else { return }
         let shouldCompress = (config?.smartPngCompression ?? true) && (config?.compressClipboardPng ?? true)
         let qualityPreset = config?.pngCompressionQuality ?? .visuallyLossless
 
@@ -459,10 +461,9 @@ public enum OutputService {
                 mode: .fastQuantizeOnly
             )
             let afterStage1Count: Int? = await MainActor.run {
-                let pb = NSPasteboard.general
-                guard pb.changeCount == initialChangeCount else { return nil }
+                guard pasteboard.changeCount == initialChangeCount else { return nil }
                 let nextCount = stage1.compressedBytes < rawPngData.count
-                    ? writePngDataToPasteboard(stage1.data, originalChangeCount: initialChangeCount)
+                    ? writePngDataToPasteboard(stage1.data, to: pasteboard, originalChangeCount: initialChangeCount)
                     : initialChangeCount
                 onCompressed?(stage1)
                 return nextCount
@@ -478,23 +479,29 @@ public enum OutputService {
             )
             guard stage2.compressedBytes < stage1.compressedBytes else { return }
             await MainActor.run {
-                let pb = NSPasteboard.general
-                guard pb.changeCount == expectedCount else { return }
-                _ = writePngDataToPasteboard(stage2.data, originalChangeCount: initialChangeCount)
+                guard pasteboard.changeCount == expectedCount else { return }
+                _ = writePngDataToPasteboard(stage2.data, to: pasteboard, originalChangeCount: initialChangeCount)
             }
         }
     }
 
-    public static func copyStringToClipboard(_ text: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
+    public static func copyStringToClipboard(_ text: String, to pasteboard: NSPasteboard = .general) {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     public static func readImageFromClipboard(
-        from pasteboard: NSPasteboard = .general,
-        excluding previousCopy: ClipboardCopyID? = nil
-    ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID)? {
+        from pasteboard: NSPasteboard = .general
+    ) -> (cgImage: CGImage, pointSize: NSSize)? {
+        let changeCount = pasteboard.changeCount
+        guard let image = readPasteboardImage(pasteboard), pasteboard.changeCount == changeCount else { return nil }
+        return image
+    }
+
+    static func readPinFromClipboard(
+        from pasteboard: NSPasteboard,
+        excluding previousCopy: ClipboardCopyID?
+    ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?)? {
         let changeCount = pasteboard.changeCount
         let name = pasteboard.name
         var copyChangeCount = changeCount
@@ -503,16 +510,74 @@ public enum OutputService {
             copyChangeCount = lastClipboardRewrite.originalChangeCount
         }
         let copyID = ClipboardCopyID(pasteboardName: name, changeCount: copyChangeCount)
-        guard copyID != previousCopy, let nsImage = NSImage(pasteboard: pasteboard) else { return nil }
+        guard copyID != previousCopy else { return nil }
+        if let image = readPasteboardImage(pasteboard) {
+            guard pasteboard.changeCount == changeCount else { return nil }
+            return (image.cgImage, image.pointSize, copyID, nil)
+        }
+        guard let text = pasteboard.string(forType: .string), !text.isEmpty,
+              let image = renderPinText(text), pasteboard.changeCount == changeCount else { return nil }
+        return (image.cgImage, image.pointSize, copyID, text)
+    }
+
+    private static func readPasteboardImage(_ pasteboard: NSPasteboard) -> (cgImage: CGImage, pointSize: NSSize)? {
+        guard let nsImage = NSImage(pasteboard: pasteboard) else { return nil }
         var rect = NSRect(origin: .zero, size: nsImage.size)
         guard let cg = nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil),
-              cg.width > 0, cg.height > 0, pasteboard.changeCount == changeCount else {
+              cg.width > 0, cg.height > 0 else {
             return nil
         }
         let ptSize = nsImage.size.width > 1 && nsImage.size.height > 1
             ? nsImage.size
             : NSSize(width: CGFloat(cg.width) / 2.0, height: CGFloat(cg.height) / 2.0)
-        return (cg, ptSize, copyID)
+        return (cg, ptSize)
+    }
+
+    private static func renderPinText(_ text: String) -> (cgImage: CGImage, pointSize: NSSize)? {
+        let font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: CGColor(gray: 0, alpha: 1)
+        ]
+        let lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map { line in
+            CTLineCreateWithAttributedString(NSAttributedString(string: String(line), attributes: attributes))
+        }
+        var width: CGFloat = 0
+        var ascent = font.ascender
+        var descent = -font.descender
+        var leading = font.leading
+        for line in lines {
+            var lineAscent: CGFloat = 0
+            var lineDescent: CGFloat = 0
+            var lineLeading: CGFloat = 0
+            let lineWidth = CTLineGetTypographicBounds(line, &lineAscent, &lineDescent, &lineLeading)
+            width = max(width, CGFloat(lineWidth))
+            ascent = max(ascent, lineAscent)
+            descent = max(descent, lineDescent)
+            leading = max(leading, lineLeading)
+        }
+
+        let padding: CGFloat = 12
+        let lineHeight = ceil(ascent + descent + leading)
+        let pointSize = NSSize(
+            width: max(32, ceil(width) + padding * 2),
+            height: lineHeight * CGFloat(lines.count) + padding * 2
+        )
+        let scale = max(1, NSScreen.main?.backingScaleFactor ?? 2)
+        guard let context = CGContext(
+            data: nil, width: Int(ceil(pointSize.width * scale)), height: Int(ceil(pointSize.height * scale)),
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: context.width, height: context.height))
+        context.scaleBy(x: scale, y: scale)
+        for (index, line) in lines.enumerated() {
+            context.textPosition = CGPoint(x: padding, y: pointSize.height - padding - ascent - CGFloat(index) * lineHeight)
+            CTLineDraw(line, context)
+        }
+        guard let cgImage = context.makeImage() else { return nil }
+        return (cgImage, pointSize)
     }
 
     public static func readImageFromFileDialog() -> CGImage? {
