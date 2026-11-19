@@ -568,6 +568,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.startStandaloneImageEdit(cgImage: image, backingScale: scale, screen: screen)
     }
 
+    private func preservePinHistoryLimit(in captureConfig: inout AirSnipConfig) {
+        captureConfig.pinHistoryLimit = config.pinHistoryLimit
+    }
+
     private func makeSessionCoordinator(mode: CaptureSessionCoordinator.SessionMode, translateOCR: Bool = false) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
         coordinator.persistConfigChanges = false
@@ -575,7 +579,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.onConfigMutated = { [weak self] updated in
             guard let self else { return }
             var merged = updated
-            merged.pinHistoryLimit = self.config.pinHistoryLimit
+            self.preservePinHistoryLimit(in: &merged)
             try? merged.save(to: self.configURL)
             self.config = merged
         }
@@ -588,7 +592,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
-            cfg.pinHistoryLimit = self?.config.pinHistoryLimit ?? cfg.pinHistoryLimit
+            self?.preservePinHistoryLimit(in: &cfg)
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
             guard OutputService.saveImage(

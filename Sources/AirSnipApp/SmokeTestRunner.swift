@@ -209,15 +209,23 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runPinRestoreChecks(image: CGImage, configURL: URL) -> Bool {
+    private static func withPinRestoreFixture(
+        image: CGImage,
+        configURL: URL,
+        _ check: @MainActor (CGImage, AirSnipAppController, NSPasteboard) -> Bool
+    ) -> Bool {
         let app = AirSnipAppController(configURL: configURL)
-        let pins = app.pinManager
         let pasteboard = NSPasteboard.withUniqueName()
         defer {
-            pins.closeAll()
+            app.pinManager.closeAll()
             pasteboard.releaseGlobally()
         }
+        return check(image, app, pasteboard)
+    }
 
+    @MainActor
+    private static func runPinRestoreChecks(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
+        let pins = app.pinManager
         pins.createPin(cgImage: image, backingScale: 2, preferredScreenOriginAppKit: nil, config: app.config)
         guard let pin = pins.windows.last else {
             fputs("FAIL: Pin restore fixture could not open a pin\n", stderr)
@@ -314,14 +322,8 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runBatchPinRestoreCheck(image: CGImage, configURL: URL) -> Bool {
-        let app = AirSnipAppController(configURL: configURL)
+    private static func runBatchPinRestoreCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         let pins = app.pinManager
-        let pasteboard = NSPasteboard.withUniqueName()
-        defer {
-            pins.closeAll()
-            pasteboard.releaseGlobally()
-        }
 
         for width in [64, 80, 96] {
             guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 48)),
@@ -443,14 +445,8 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runConfiguredPinHistoryCheck(image: CGImage, configURL: URL) -> Bool {
-        let app = AirSnipAppController(configURL: configURL)
+    private static func runConfiguredPinHistoryCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         let pins = app.pinManager
-        let pasteboard = NSPasteboard.withUniqueName()
-        defer {
-            pins.closeAll()
-            pasteboard.releaseGlobally()
-        }
 
         func openPins(widths: ClosedRange<Int>) -> Bool {
             for width in widths {
@@ -512,7 +508,7 @@ public enum SmokeTestRunner {
         }
 
         pins.closeAll()
-        let restarted = AirSnipAppController(configURL: configURL)
+        let restarted = AirSnipAppController(configURL: app.configURL)
         restarted.triggerPinOrRestore(from: pasteboard)
         guard restarted.config.pinHistoryLimit == 10, restarted.pinManager.count == 0 else {
             fputs("FAIL: A new controller should load the saved history limit and start with empty history\n", stderr)
@@ -1163,11 +1159,23 @@ public enum SmokeTestRunner {
             print("[smoke] 验证贴图关闭、恢复与历史设置...")
             let pinSaveConfigURL = tempDir.appendingPathComponent("pin-save", isDirectory: true).appendingPathComponent("config.json")
             let pinRestoreOK = MainActor.assumeIsolated {
-                runPinRestoreChecks(image: baseCG, configURL: tempDir.appendingPathComponent("pin-config.json"))
-                    && runBatchPinRestoreCheck(image: baseCG, configURL: tempDir.appendingPathComponent("pin-batch-config.json"))
+                withPinRestoreFixture(
+                    image: baseCG,
+                    configURL: tempDir.appendingPathComponent("pin-config.json"),
+                    runPinRestoreChecks
+                )
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-batch-config.json"),
+                        runBatchPinRestoreCheck
+                    )
                     && runBatchCloseDuringInlineEditCheck(image: baseCG)
                     && runClosedPinHistoryLimitCheck(image: baseCG)
-                    && runConfiguredPinHistoryCheck(image: baseCG, configURL: tempDir.appendingPathComponent("pin-history-config.json"))
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-history-config.json"),
+                        runConfiguredPinHistoryCheck
+                    )
                     && runPinHistoryCaptureSaveCheck(image: baseCG, configURL: pinSaveConfigURL)
             }
             guard pinRestoreOK else { return false }
