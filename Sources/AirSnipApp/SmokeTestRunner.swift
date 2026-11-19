@@ -793,31 +793,11 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            let pinAcceptsFirstMouse: Bool = MainActor.assumeIsolated {
-                let pins = PinManager()
-                let pin = PinWindowController(
-                    cgImage: baseCG,
-                    baseSize: NSSize(width: baseW, height: baseH),
-                    backingScale: 1,
-                    origin: .zero,
-                    showBorder: true,
-                    manager: pins
-                )
-                guard let click = NSEvent.mouseEvent(
-                    with: .leftMouseDown,
-                    location: NSPoint(x: 24, y: 24),
-                    modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: pin.window.windowNumber,
-                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1
-                ) else { return false }
-                return !pin.window.isKeyWindow && pin.window.contentView?.acceptsFirstMouse(for: click) == true
-            }
-            guard pinAcceptsFirstMouse else {
-                fputs("FAIL: An unfocused pin should accept the first mouse press\n", stderr)
+            guard MainActor.assumeIsolated({
+                checkUnfocusedPinAcceptsFirstMouse(image: baseCG)
+            }) else {
                 return false
             }
-            print("[pins] PASS: 失焦贴图接收首次鼠标按下")
 
             print("smoke-test: ok (iSnip v\(UpdateChecker.currentVersion))")
             return true
@@ -825,5 +805,42 @@ public enum SmokeTestRunner {
             fputs("FAIL: Smoke test threw error: \(error)\n", stderr)
             return false
         }
+    }
+
+    @MainActor
+    private static func checkUnfocusedPinAcceptsFirstMouse(image: CGImage) -> Bool {
+        _ = NSApplication.shared
+        let pinManager = PinManager()
+        let size = NSSize(width: image.width, height: image.height)
+        let pin = PinWindowController(
+            cgImage: image,
+            baseSize: size,
+            backingScale: 1,
+            origin: .zero,
+            showBorder: true,
+            manager: pinManager
+        )
+        let window = pin.window
+        guard !window.isKeyWindow, let pinView = window.contentView else {
+            fputs("FAIL: First-mouse check needs an unfocused pin with a content view\n", stderr)
+            return false
+        }
+        guard let mouseDown = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: size.width / 2, y: size.height / 2),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        ) else {
+            fputs("FAIL: Could not create the pin's first mouse-down event\n", stderr)
+            return false
+        }
+        guard pinView.acceptsFirstMouse(for: mouseDown) else {
+            fputs("FAIL: An unfocused pin should accept the first mouse press\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 失焦贴图接收首次鼠标按下")
+        return true
     }
 }

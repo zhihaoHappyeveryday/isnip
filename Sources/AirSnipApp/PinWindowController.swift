@@ -269,6 +269,8 @@ private final class PinCanvasView: NSView {
     private var badgeClearTask: Task<Void, Never>?
 
     override var acceptsFirstResponder: Bool { true }
+
+    // Let mouseDown record the drag origin on the press that focuses the pin.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     func showBadgeTemporarily(_ text: String) {
