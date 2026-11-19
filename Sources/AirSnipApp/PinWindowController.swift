@@ -7,7 +7,7 @@ public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     let pasteboard: NSPasteboard
     private let history: ClosedPinHistory
-    private let historyDirectory: (AirSnipConfig) -> URL
+    private let historyRootURL: (AirSnipConfig) -> URL
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
@@ -22,10 +22,10 @@ public final class PinManager: ObservableObject {
     init(
         pasteboard: NSPasteboard,
         historyRegistryURL: URL?,
-        historyDirectory: @escaping (AirSnipConfig) -> URL
+        historyRootURL: @escaping (AirSnipConfig) -> URL
     ) {
         self.pasteboard = pasteboard
-        self.historyDirectory = historyDirectory
+        self.historyRootURL = historyRootURL
         history = ClosedPinHistory(registryURL: historyRegistryURL)
         history.onWriteFailure = { [weak self] in
             self?.showHistoryWarning("贴图历史写入失败，这些贴图无法恢复", "Some closed pins could not be saved for recovery")
@@ -85,8 +85,9 @@ public final class PinManager: ObservableObject {
     private func rememberClosedPins(_ pins: [PinWindowController]) {
         let config = getConfig?() ?? AirSnipConfig()
         guard config.pinHistoryLimit > 0 else { return }
-        history.remember(pins.suffix(config.pinHistoryLimit).map { $0.snapshot() },
-                         limit: config.pinHistoryLimit, root: historyDirectory(config))
+        history.remember(
+            pins.map { $0.snapshot() }, limit: config.pinHistoryLimit, historyRoot: historyRootURL(config)
+        )
     }
 
     func trimClosedHistory(to limit: Int) {
@@ -104,12 +105,7 @@ public final class PinManager: ObservableObject {
             showHistoryWarning("部分贴图历史文件无法读取", "Some closed pin files could not be read")
         }
         guard let snapshot = result.snapshot else { return }
-        let state = snapshot.presentation
-        let pin = PinWindowController(
-            cgImage: snapshot.image, baseSize: state.baseSize, backingScale: state.backingScale,
-            origin: state.frame.origin, showBorder: state.showBorder, manager: self, originalText: snapshot.originalText
-        )
-        pin.applyPresentation(state)
+        let pin = PinWindowController(restoring: snapshot, manager: self)
         windows.append(pin)
         pin.show()
     }
@@ -213,6 +209,21 @@ public final class PinWindowController: NSObject {
         contentView.needsDisplay = true
     }
 
+    fileprivate convenience init(restoring snapshot: PinSnapshot, manager: PinManager) {
+        let display = snapshot.displayState
+        self.init(
+            cgImage: snapshot.image, baseSize: display.baseSize, backingScale: display.backingScale,
+            origin: display.frame.origin, showBorder: display.showBorder, manager: manager, originalText: snapshot.originalText
+        )
+        zoomScale = display.zoomScale
+        opacity = display.preferredOpacity
+        isClickThrough = display.isClickThrough
+        window.ignoresMouseEvents = display.isClickThrough
+        window.alphaValue = display.effectiveWindowOpacity
+        window.setFrame(display.frame, display: false)
+        contentView.frame = NSRect(origin: .zero, size: display.frame.size)
+    }
+
     public func show() {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(contentView)
@@ -221,21 +232,12 @@ public final class PinWindowController: NSObject {
     fileprivate func snapshot() -> PinSnapshot {
         PinSnapshot(
             image: cgImage, originalText: originalText,
-            presentation: PinPresentation(
+            displayState: PinDisplayState(
                 frame: window.frame, baseSize: baseSize, backingScale: backingScale, zoomScale: zoomScale,
-                opacity: opacity, windowAlpha: window.alphaValue, showBorder: showBorder, isClickThrough: isClickThrough
+                preferredOpacity: opacity, effectiveWindowOpacity: window.alphaValue,
+                showBorder: showBorder, isClickThrough: isClickThrough
             )
         )
-    }
-
-    fileprivate func applyPresentation(_ state: PinPresentation) {
-        zoomScale = state.zoomScale
-        opacity = state.opacity
-        isClickThrough = state.isClickThrough
-        window.ignoresMouseEvents = state.isClickThrough
-        window.alphaValue = state.windowAlpha
-        window.setFrame(state.frame, display: false)
-        contentView.frame = NSRect(origin: .zero, size: state.frame.size)
     }
 
     func finishInlineEdit(image: CGImage? = nil) {
@@ -341,20 +343,15 @@ public final class PinWindowController: NSObject {
     }
 
     public func savePin(forceDialog: Bool = false) {
-        guard var cfg = manager?.getConfig?() else { return }
-        let showToast = cfg.showCompletionToast
-        if OutputService.saveImage(
-            for: cgImage,
-            backingScale: backingScale,
-            config: &cfg,
-            forceDialog: forceDialog,
-            parentWindow: window
-        ) != nil {
-            let finalCfg = cfg
-            manager?.updateConfig? { $0 = finalCfg }
-            if showToast {
-                ToastHUD.show(L10n.tr("已保存", "Saved"))
-            }
+        guard let config = manager?.getConfig?(),
+              let saved = OutputService.saveImage(
+                  for: cgImage, backingScale: backingScale, config: config, forceDialog: forceDialog
+              ) else { return }
+        if let updatePreferences = saved.updatePreferences {
+            manager?.updateConfig?(updatePreferences)
+        }
+        if config.showCompletionToast {
+            ToastHUD.show(L10n.tr("已保存", "Saved"))
         }
     }
 

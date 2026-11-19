@@ -1834,7 +1834,7 @@ private struct PinHistoryDirectoryRow: View {
     var subtitle: String? = nil
 
     var body: some View {
-        let directory = OutputService.pinHistoryDirectoryURL(for: app.config)
+        let historyRoot = OutputService.pinHistoryRootURL(for: app.config)
         MagpieSettingRow(
             title: L10n.tr("贴图历史目录", "Pin History Directory", in: lang),
             subtitle: subtitle,
@@ -1844,24 +1844,24 @@ private struct PinHistoryDirectoryRow: View {
             )
         ) {
             HStack(spacing: 6) {
-                Text(OutputService.displayPath(for: directory))
+                Text(OutputService.displayPath(for: historyRoot))
                     .font(.system(size: 12.5, design: .monospaced))
                     .foregroundStyle(MagpiePalette(colorScheme: colorScheme).inkMono)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: 260, alignment: .trailing)
-                MagpieCopyButton(value: directory.path)
+                MagpieCopyButton(value: historyRoot.path)
                 MagpieTextAction(L10n.tr("打开", "Open", in: lang)) {
                     do {
-                        try ClosedPinHistory.prepareRoot(directory)
-                        NSWorkspace.shared.open(directory)
+                        try ClosedPinHistory.ensureHistoryRootExists(historyRoot)
+                        NSWorkspace.shared.open(historyRoot)
                     } catch {
                         ToastHUD.show(L10n.tr("无法打开贴图历史目录", "Could not open the pin history directory", in: lang),
                                       symbol: "exclamationmark.triangle", tint: .systemOrange)
                     }
                 }
                 MagpieTextAction(L10n.tr("更改…", "Change…", in: lang)) {
-                    if let chosen = OutputService.chooseSaveDirectory(initial: directory.deletingLastPathComponent()) {
+                    if let chosen = OutputService.chooseSaveDirectory(initial: historyRoot.deletingLastPathComponent()) {
                         app.updateConfig { $0.pinHistoryParentDirectory = chosen.path }
                     }
                 }

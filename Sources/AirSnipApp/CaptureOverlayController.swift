@@ -119,13 +119,12 @@ public final class CaptureSessionCoordinator {
     private(set) var config: AirSnipConfig
     public let mode: SessionMode
 
-    public var persistConfigChanges: Bool = true
     public var onCompleteCopy: ((CGImage, Double) -> Void)?
-    public var onCompleteSave: ((CGImage, Double, Bool, inout AirSnipConfig) -> Bool)?
+    var onSaveImage: ((CGImage, Double, Bool, AirSnipConfig) -> Bool)?
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
     public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, Bool) -> Void)?
-    public var onConfigMutated: ((AirSnipConfig) -> Void)?
+    var onUpdatePreferences: (((inout AirSnipConfig) -> Void) -> Void)?
     public var onSessionEnded: (() -> Void)?
 
     public init(config: AirSnipConfig, mode: SessionMode = .normalCapture) {
@@ -342,12 +341,9 @@ public final class CaptureSessionCoordinator {
         }
     }
 
-    func mutateConfig(_ block: (inout AirSnipConfig) -> Void) {
-        block(&config)
-        if persistConfigChanges {
-            try? config.save()
-        }
-        onConfigMutated?(config)
+    func mutateConfig(_ change: (inout AirSnipConfig) -> Void) {
+        change(&config)
+        onUpdatePreferences?(change)
     }
 
     func finishWithCopy(image: CGImage, scale: Double) {
@@ -365,10 +361,7 @@ public final class CaptureSessionCoordinator {
     func finishWithSave(image: CGImage, scale: Double, forceDialog: Bool = false) {
         if !forceDialog && !config.askBeforeSave {
             closeAllWindows()
-            var cfg = config
-            if onCompleteSave?(image, scale, false, &cfg) ?? false {
-                self.config = cfg
-            }
+            _ = onSaveImage?(image, scale, false, config)
             if case .inlinePinEdit(let pin) = mode {
                 pin.finishInlineEdit(image: image)
             }
@@ -380,10 +373,8 @@ public final class CaptureSessionCoordinator {
         for c in screenControllers {
             c.panel.orderOut(nil)
         }
-        var cfg = config
-        let saved = onCompleteSave?(image, scale, true, &cfg) ?? false
+        let saved = onSaveImage?(image, scale, true, config) ?? false
         if saved {
-            self.config = cfg
             if case .inlinePinEdit(let pin) = mode {
                 pin.finishInlineEdit(image: image)
             }

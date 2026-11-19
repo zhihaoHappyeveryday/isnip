@@ -740,6 +740,20 @@ public enum SmokeTestRunner {
         return true
     }
 
+    private static func pinHistoryPNGCount(at directory: URL) -> Int {
+        let items = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil)
+        return items?.allObjects.compactMap { $0 as? URL }.filter { $0.pathExtension == "png" }.count ?? 0
+    }
+
+    @MainActor
+    private static func waitForPinHistoryWork(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition(), Date() < deadline {
+            autoreleasepool { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        }
+        return condition()
+    }
+
     @MainActor
     private static func runDiskPinHistoryCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         let files = FileManager.default
@@ -750,19 +764,6 @@ public enum SmokeTestRunner {
         let customDirectory = customParent.appendingPathComponent("iSnip Pin History", isDirectory: true)
         guard (try? files.createDirectory(at: customParent, withIntermediateDirectories: false)) != nil,
               (try? files.createDirectory(at: defaultDirectory, withIntermediateDirectories: true)) != nil else { return false }
-
-        func pngCount(at directory: URL) -> Int {
-            let items = files.enumerator(at: directory, includingPropertiesForKeys: nil)
-            return items?.allObjects.compactMap { $0 as? URL }.filter { $0.pathExtension == "png" }.count ?? 0
-        }
-
-        func waitForWrite(_ condition: () -> Bool) -> Bool {
-            let deadline = Date().addingTimeInterval(5)
-            while !condition(), Date() < deadline {
-                autoreleasepool { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-            }
-            return condition()
-        }
 
         let text = "  原文 🚀\r\n\t第二行  "
         weak var firstImage: CGImage?
@@ -797,7 +798,9 @@ public enum SmokeTestRunner {
             pin.closeSelf()
             return pins.count == 0
         }
-        guard closedFirst, waitForWrite({ firstImage == nil && firstWindow == nil && pngCount(at: defaultDirectory) == 1 }) else {
+        guard closedFirst, waitForPinHistoryWork({
+            firstImage == nil && firstWindow == nil && pinHistoryPNGCount(at: defaultDirectory) == 1
+        }) else {
             fputs("FAIL: Closed pins should write under the screenshot save directory and release their windows and bitmaps\n", stderr)
             return false
         }
@@ -812,8 +815,8 @@ public enum SmokeTestRunner {
             pin.closeSelf()
             return pins.count == 0
         }
-        guard closedSecond, waitForWrite({ secondImage == nil && pngCount(at: customDirectory) == 1 }),
-              pngCount(at: defaultDirectory) == 1 else {
+        guard closedSecond, waitForPinHistoryWork({ secondImage == nil && pinHistoryPNGCount(at: customDirectory) == 1 }),
+              pinHistoryPNGCount(at: defaultDirectory) == 1 else {
             fputs("FAIL: Changing the history directory should apply to the next close and retain existing history\n", stderr)
             return false
         }
@@ -826,7 +829,7 @@ public enum SmokeTestRunner {
         guard pins.count == 0 else { return false }
 
         app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 1, pins.windows.last?.cgImage.width == 64, pngCount(at: customDirectory) == 0 else {
+        guard pins.count == 1, pins.windows.last?.cgImage.width == 64, pinHistoryPNGCount(at: customDirectory) == 0 else {
             fputs("FAIL: A failed close should leave the next recoverable pin and its existing file available\n", stderr)
             return false
         }
@@ -835,7 +838,7 @@ public enum SmokeTestRunner {
               restored.cgImage.colorSpace?.isWideGamutRGB == true, PixelBufferRGBA(cgImage: restored.cgImage) == expectedImage,
               restored.window.frame == expectedFrame, restored.backingScale == 2, restored.zoomScale == expectedZoom,
               restored.opacity == expectedOpacity, restored.window.alphaValue == 0.82,
-              restored.window.ignoresMouseEvents, !restored.showBorder, pngCount(at: defaultDirectory) == 0 else {
+              restored.window.ignoresMouseEvents, !restored.showBorder, pinHistoryPNGCount(at: defaultDirectory) == 0 else {
             fputs("FAIL: Disk restoration should preserve image color, alpha and display state and remove the consumed file\n", stderr)
             return false
         }
@@ -845,6 +848,57 @@ public enum SmokeTestRunner {
             return false
         }
         print("[pins] PASS: 已关闭贴图释放窗口和位图，换目录即时生效，磁盘恢复保留图像、状态和原文")
+        return true
+    }
+
+    @MainActor
+    private static func runFailedPinHistoryWriteCheck(image: CGImage, directory: URL) throws -> Bool {
+        let files = FileManager.default
+        let history = ClosedPinHistory(registryURL: nil)
+        defer { history.finishSession() }
+        let workingRoot = directory.appendingPathComponent("write-history", isDirectory: true)
+        let failingRoot = directory.appendingPathComponent("unavailable-history", isDirectory: true)
+        let displayState = PinDisplayState(
+            frame: CGRect(x: 0, y: 0, width: 32, height: 32), baseSize: CGSize(width: 32, height: 32),
+            backingScale: 1, zoomScale: 1, preferredOpacity: 1, effectiveWindowOpacity: 1,
+            showBorder: true, isClickThrough: false
+        )
+        func snapshot(_ image: CGImage, text: String) -> PinSnapshot {
+            PinSnapshot(image: image, originalText: text, displayState: displayState)
+        }
+
+        // Make a valid session directory first, then replace it with a file so the actual write fails.
+        weak var seedImage: CGImage?
+        let seeded = autoreleasepool {
+            guard let sample = image.cropping(to: displayState.frame) else { return false }
+            seedImage = sample
+            history.remember([snapshot(sample, text: "seed")], limit: 2, historyRoot: failingRoot)
+            return true
+        }
+        guard seeded, waitForPinHistoryWork({ seedImage == nil }),
+              history.restoreLast().snapshot?.originalText == "seed",
+              let sessionDirectory = try files.contentsOfDirectory(
+                  at: failingRoot, includingPropertiesForKeys: nil
+              ).first else {
+            fputs("FAIL: Could not prepare a writable pin history session for the failure fixture\n", stderr)
+            return false
+        }
+        try files.removeItem(at: sessionDirectory)
+        try Data().write(to: URL(fileURLWithPath: sessionDirectory.path, isDirectory: false))
+
+        var failures = 0
+        history.onWriteFailure = { failures += 1 }
+        history.remember(
+            [snapshot(image, text: "oldest"), snapshot(image, text: "newest")], limit: 2, historyRoot: workingRoot
+        )
+        history.remember([snapshot(image, text: "failed")], limit: 2, historyRoot: failingRoot)
+        guard waitForPinHistoryWork({ failures > 0 }), failures == 1,
+              history.restoreLast().snapshot?.originalText == "newest", history.isEmpty,
+              pinHistoryPNGCount(at: workingRoot) == 0 else {
+            fputs("FAIL: A failed history write should drop its entry and clean up the earlier eviction\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 写盘失败移除失败项，保留其余历史并清理已淘汰的在途文件")
         return true
     }
 
@@ -953,33 +1007,59 @@ public enum SmokeTestRunner {
         app.updateConfig {
             $0.pinHistoryLimit = 5
             $0.pinHistoryParentDirectory = directory.path
+            $0.pinBorder = false
         }
         pressKey(kVK_ANSI_2, "2")
         let savedConfig = AirSnipConfig.load(from: configURL)
         guard app.config.pinHistoryLimit == 5, app.config.lastTool == .arrow,
               app.config.pinHistoryParentDirectory == directory.path, savedConfig.pinHistoryParentDirectory == directory.path,
-              savedConfig.pinHistoryLimit == 5, savedConfig.lastTool == .arrow else {
-            fputs("FAIL: Tool changes from an older capture session should preserve the current pin history settings\n", stderr)
+              savedConfig.pinHistoryLimit == 5, savedConfig.lastTool == .arrow,
+              !app.config.pinBorder, !savedConfig.pinBorder else {
+            fputs("FAIL: Tool changes from an older capture session should preserve current pin history and border settings\n", stderr)
             return false
         }
 
+        let quickSaveDirectory = directory.appendingPathComponent("quick-save", isDirectory: true)
+        guard (try? FileManager.default.createDirectory(at: quickSaveDirectory, withIntermediateDirectories: false)) != nil else {
+            return false
+        }
         app.updateConfig {
             $0.pinHistoryLimit = 10
             $0.pinHistoryParentDirectory = nil
+            $0.lastSaveDirectory = quickSaveDirectory.path
         }
         pressKey(kVK_ANSI_S, "s", modifiers: .command)
         guard !editor.isVisible, pin.window.isVisible,
-              (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.contains(where: { $0.hasSuffix(".png") }) == true else {
-            fputs("FAIL: Quick save should write the edited pin and close the editor\n", stderr)
+              (try? FileManager.default.contentsOfDirectory(atPath: quickSaveDirectory.path))?.contains(where: { $0.hasSuffix(".png") }) == true else {
+            fputs("FAIL: Quick save from an older session should use the current save directory\n", stderr)
             return false
         }
         let savedAfterQuickSave = AirSnipConfig.load(from: configURL)
         guard app.config.pinHistoryLimit == 10, savedAfterQuickSave.pinHistoryLimit == 10,
-              app.config.pinHistoryParentDirectory == nil, savedAfterQuickSave.pinHistoryParentDirectory == nil else {
-            fputs("FAIL: Saving from an older capture session should retain the current pin history settings\n", stderr)
+              app.config.pinHistoryParentDirectory == nil, savedAfterQuickSave.pinHistoryParentDirectory == nil,
+              !app.config.pinBorder, !savedAfterQuickSave.pinBorder else {
+            fputs("FAIL: Quick save from an older session should preserve the current pin settings\n", stderr)
             return false
         }
-        print("[pins] PASS: 旧编辑会话调整工具或保存图片时都保留最新可恢复贴图数")
+
+        let saveAsURL = directory.appendingPathComponent("save-as.jpg")
+        let saveAs = app.makeSessionCoordinator(mode: .normalCapture, chooseSaveDestination: { _ in
+            app.updateConfig {
+                $0.pinHistoryLimit = 15
+                $0.pinHistoryParentDirectory = quickSaveDirectory.path
+            }
+            return OutputService.SavePanelSelection(url: saveAsURL, format: .jpeg, smartPngCompression: false, quality: .compact)
+        })
+        saveAs.finishWithSave(image: image, scale: 1, forceDialog: true)
+        let savedAfterSaveAs = AirSnipConfig.load(from: configURL)
+        guard FileManager.default.fileExists(atPath: saveAsURL.path),
+              savedAfterSaveAs.lastSaveDirectory == directory.path, savedAfterSaveAs.lastSaveFormat == .jpeg,
+              savedAfterSaveAs.pngCompressionQuality == .compact, savedAfterSaveAs.pinHistoryLimit == 15,
+              savedAfterSaveAs.pinHistoryParentDirectory == quickSaveDirectory.path else {
+            fputs("FAIL: Save As should apply its selected preferences without replacing newer pin settings\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 旧编辑会话改工具、快速保存或另存为时保留当前贴图设置")
         return true
     }
 
@@ -1251,11 +1331,11 @@ public enum SmokeTestRunner {
                 defaultCfg.lastSaveDirectory = tempDir.path
                 var saveCfg = defaultCfg
                 saveCfg.smartPngCompression = false
-                guard let quickSaved1 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: &saveCfg, configSaveURL: cfgURL),
+                guard let quickSaved1 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: saveCfg)?.url,
                       FileManager.default.fileExists(atPath: quickSaved1.path),
                       let saved1Img = NSImage(contentsOf: quickSaved1),
                       abs(Double(saved1Img.size.width) - Double(baseW) / snap.backingScale) < 0.5,
-                      let quickSaved2 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: &saveCfg, configSaveURL: cfgURL),
+                      let quickSaved2 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: saveCfg)?.url,
                       FileManager.default.fileExists(atPath: quickSaved2.path),
                       quickSaved1 != quickSaved2 else {
                     return false
@@ -1300,7 +1380,6 @@ public enum SmokeTestRunner {
                 }
 
                 let coordinator = CaptureSessionCoordinator(config: defaultCfg, mode: .normalCapture)
-                coordinator.persistConfigChanges = false
                 coordinator.onSessionEnded = { ended = true }
                 coordinator.startWithSnapshots([snap])
                 let visibleAndPersistent = coordinator.hasVisibleWindows
@@ -1371,7 +1450,7 @@ public enum SmokeTestRunner {
                 var smartSaveImmediateCfg = defaultCfg
                 smartSaveImmediateCfg.smartPngCompression = true
                 var smartSaveImmediateOK = false
-                if let immURL = OutputService.saveImage(for: baked, config: &smartSaveImmediateCfg, configSaveURL: cfgURL),
+                if let immURL = OutputService.saveImage(for: baked, config: smartSaveImmediateCfg)?.url,
                    let immData = try? Data(contentsOf: immURL),
                    immData.count > 64 {
                     smartSaveImmediateOK = true
@@ -1400,7 +1479,6 @@ public enum SmokeTestRunner {
                         config: defaultCfg,
                         mode: .standaloneImageEdit(tallCG, max(1.0, Double(screen.backingScaleFactor)), screen)
                     )
-                    tallEditCoord.persistConfigChanges = false
                     tallEditCoord.startStandaloneImageEdit(
                         cgImage: tallCG,
                         backingScale: max(1.0, Double(screen.backingScaleFactor)),
@@ -1572,9 +1650,9 @@ public enum SmokeTestRunner {
             // Opening and closing many pin windows can delay async OCR in the smoke process.
             print("[smoke] 验证贴图关闭、恢复与历史设置...")
             let pinSaveConfigURL = tempDir.appendingPathComponent("pin-save", isDirectory: true).appendingPathComponent("config.json")
-            let pinRestoreOK = MainActor.assumeIsolated {
+            let pinRestoreOK = try MainActor.assumeIsolated {
                 guard let screen = NSScreen.main ?? NSScreen.screens.first else { return false }
-                return runCroppedPinStorageCheck(on: screen)
+                return try runCroppedPinStorageCheck(on: screen)
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-config.json"),
@@ -1612,6 +1690,7 @@ public enum SmokeTestRunner {
                         configURL: tempDir.appendingPathComponent("pin-history-disk-config.json"),
                         runDiskPinHistoryCheck
                     )
+                    && runFailedPinHistoryWriteCheck(image: baseCG, directory: tempDir)
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-history-config.json"),
