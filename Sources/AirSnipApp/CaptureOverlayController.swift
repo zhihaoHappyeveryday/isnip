@@ -523,6 +523,7 @@ final class OverlayCanvasView: NSView {
         var includeShadow: Bool
         let ownerName: String
         var isWindowCapture: Bool = true
+        var isScreenCrop: Bool = false
     }
 
     private var snapshot: CapturedScreenSnapshot
@@ -729,7 +730,7 @@ final class OverlayCanvasView: NSView {
             ),
             select: false
         )
-        return bakeCurrentSelectionOutput(applyWindowShadow: true)
+        return bakeCurrentSelectionOutput()
     }
 
     func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
@@ -757,7 +758,7 @@ final class OverlayCanvasView: NSView {
             ),
             select: false
         )
-        let out = bakeCurrentSelectionOutput(applyWindowShadow: true)
+        let out = bakeCurrentSelectionOutput()
         isolatedWindowCapture = nil
         selection = nil
         selectionLocked = false
@@ -4030,8 +4031,10 @@ final class OverlayCanvasView: NSView {
             defer { self.isCapturingIsolatedWindow = false }
 
             let capturedCG: CGImage
+            let isScreenCrop: Bool
             if let singleCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) {
                 capturedCG = singleCG
+                isScreenCrop = false
             } else {
                 let pxRect = CGRect(
                     x: (candidate.rect.minX * fallbackScale).rounded(.down),
@@ -4041,6 +4044,7 @@ final class OverlayCanvasView: NSView {
                 )
                 guard let fallbackCG = self.snapshot.cgImage.cropping(to: pxRect) else { return }
                 capturedCG = fallbackCG
+                isScreenCrop = true
             }
             guard let rawBuf = PixelBufferRGBA(cgImage: capturedCG) else { return }
 
@@ -4080,7 +4084,8 @@ final class OverlayCanvasView: NSView {
                 rawBuffer: rawBuf,
                 pixelScale: effectiveScale,
                 includeShadow: includeShadow,
-                ownerName: candidate.ownerName
+                ownerName: candidate.ownerName,
+                isScreenCrop: isScreenCrop
             )
             self.selection = displayRect
             self.selectionLocked = true
@@ -4104,7 +4109,23 @@ final class OverlayCanvasView: NSView {
         return snapshot.cgImage.cropping(to: pxRect)
     }
 
-    private func bakeCurrentSelectionOutput(applyWindowShadow: Bool = true) -> CGImage? {
+    private func independentPinCrop(_ crop: CGImage) -> CGImage? {
+        if crop.width == snapshot.cgImage.width && crop.height == snapshot.cgImage.height {
+            return crop
+        }
+        // A cropped CGImage keeps the source screenshot alive. Draw just the crop into its own bitmap.
+        let colorSpace = crop.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = crop.bitmapInfo.intersection(.floatComponents).rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(
+            data: nil, width: crop.width, height: crop.height, bitsPerComponent: crop.bitsPerComponent,
+            bytesPerRow: 0, space: colorSpace, bitmapInfo: bitmapInfo
+        ) else { return nil }
+        context.setBlendMode(.copy)
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+        return context.makeImage()
+    }
+
+    private func bakeCurrentSelectionOutput(forPin: Bool = false) -> CGImage? {
         commitInlineEditorsIfNeeded()
         if let iso = isolatedWindowCapture, let sel = selection {
             let baseCG = iso.rawImage
@@ -4119,7 +4140,10 @@ final class OverlayCanvasView: NSView {
                     pixelScale: iso.pixelScale
                 ) ?? baseCG
             }
-            if applyWindowShadow && iso.includeShadow {
+            if forPin && iso.isScreenCrop && baked === baseCG {
+                return independentPinCrop(baked)
+            }
+            if !forPin && iso.includeShadow {
                 let shadowScale = iso.isWindowCapture ? iso.pixelScale : snapshot.backingScale
                 return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: shadowScale) ?? baked
             }
@@ -4128,7 +4152,7 @@ final class OverlayCanvasView: NSView {
 
         guard let sel = selection, let rawCG = cropRawSelectionImage() else { return nil }
         if document.isEmpty {
-            return rawCG
+            return forPin ? independentPinCrop(rawCG) : rawCG
         }
         return AnnotationRenderer.bakeOutput(
             rawSelection: rawCG,
@@ -4146,17 +4170,17 @@ final class OverlayCanvasView: NSView {
     }
 
     private func triggerCopyOutput() {
-        guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
+        guard let out = bakeCurrentSelectionOutput() else { return }
         coordinator?.finishWithCopy(image: out, scale: outputBackingScale)
     }
 
     private func triggerSaveOutput(forceDialog: Bool = false) {
-        guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
+        guard let out = bakeCurrentSelectionOutput() else { return }
         coordinator?.finishWithSave(image: out, scale: outputBackingScale, forceDialog: forceDialog)
     }
 
     private func triggerPinOutput() {
-        guard let sel = selection, let out = bakeCurrentSelectionOutput(applyWindowShadow: false) else { return }
+        guard let sel = selection, let out = bakeCurrentSelectionOutput(forPin: true) else { return }
         let sFrame = snapshot.frameInGlobalAppKit
         let appKitOrigin = CGPoint(
             x: sFrame.minX + CGFloat(sel.minX),

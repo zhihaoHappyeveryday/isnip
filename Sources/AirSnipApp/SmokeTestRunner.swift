@@ -209,6 +209,66 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func runCroppedPinStorageCheck(on screen: NSScreen) -> Bool {
+        let config = AirSnipConfig()
+        let pins = PinManager()
+        defer { pins.closeAll() }
+        weak var screenshot: CGImage?
+        var expectedPixels: PixelBufferRGBA?
+
+        let didCapture = autoreleasepool {
+            let frame = CGRect(origin: screen.frame.origin, size: CGSize(width: 160, height: 128))
+            guard let p3 = CGColorSpace(name: CGColorSpace.displayP3),
+                  let context = CGContext(
+                      data: nil, width: 320, height: 256, bitsPerComponent: 8, bytesPerRow: 320 * 4,
+                      space: p3, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            context.setFillColor(NSColor(displayP3Red: 1, green: 0.3, blue: 0, alpha: 0.5).cgColor)
+            context.fill(CGRect(x: 42, y: 172, width: 46, height: 26))
+            context.setFillColor(NSColor(displayP3Red: 0, green: 0.8, blue: 1, alpha: 1).cgColor)
+            context.fill(CGRect(x: 100, y: 155, width: 20, height: 24))
+            guard let source = context.makeImage(),
+                  let rawBuffer = PixelBufferRGBA(cgImage: source) else { return false }
+            screenshot = source
+            expectedPixels = rawBuffer.cropped(to: PixelRect(x: 32, y: 40, width: 96, height: 64))
+            let snapshot = CapturedScreenSnapshot(
+                screen: screen, frameInGlobalAppKit: frame,
+                frameTopDown: ASRect(x: 0, y: 0, width: 160, height: 128),
+                cgImage: source, rawBuffer: rawBuffer, backingScale: 2, windowsLocalTopDown: []
+            )
+
+            let session = CaptureSessionCoordinator(config: config)
+            session.onCompletePin = { image, scale, origin in
+                pins.createPin(cgImage: image, backingScale: scale, preferredScreenOriginAppKit: origin, config: config)
+            }
+            let overlay = OverlayScreenController(
+                snapshot: snapshot, coordinator: session, lockedInitialSelection: ASRect(x: 16, y: 20, width: 48, height: 32)
+            )
+            defer { overlay.panel.contentView = nil }
+            guard let pinKey = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: overlay.panel.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: UInt16(kVK_F3)
+            ) else { return false }
+            overlay.canvasView.keyDown(with: pinKey)
+            return true
+        }
+
+        guard didCapture, let pin = pins.windows.last, let expectedPixels,
+              pin.backingScale == 2, pin.cgImage.colorSpace?.name == CGColorSpace.displayP3,
+              PixelBufferRGBA(cgImage: pin.cgImage) == expectedPixels else {
+            fputs("FAIL: A pinned crop should keep the selection's pixels, color space and scale\n", stderr)
+            return false
+        }
+        guard screenshot == nil else {
+            fputs("FAIL: A pinned crop should release the source screenshot\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 裁剪贴图保留选区像素与色彩空间，释放整屏原图")
+        return true
+    }
+
+    @MainActor
     private static func withPinRestoreFixture(
         image: CGImage,
         configURL: URL,
@@ -441,6 +501,46 @@ public enum SmokeTestRunner {
             return false
         }
         print("[pins] PASS: 单张关闭和关闭全部共用最近 20 张的历史")
+        return true
+    }
+
+    @MainActor
+    private static func runClosedPinHistoryBudgetCheck() -> Bool {
+        let config = AirSnipConfig()
+        // The 36- and 40-pixel images, including row padding, exactly fill the budget.
+        let pins = PinManager(historyByteLimit: 5_376)
+        defer { pins.closeAll() }
+
+        func openPin(width: Int) -> Bool {
+            guard let context = CGContext(
+                data: nil, width: width, height: 16, bitsPerComponent: 8, bytesPerRow: width * 4 + 16,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ), let image = context.makeImage() else { return false }
+            return pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: config)
+        }
+
+        guard openPin(width: 32) else { return false }
+        pins.windows.last?.closeSelf()
+        for width in [36, 84, 40] {
+            guard openPin(width: width) else { return false }
+        }
+        pins.closeAll()
+        guard openPin(width: 88) else { return false }
+        pins.windows.last?.closeSelf()
+
+        for width in [40, 36] {
+            pins.restoreLastClosedPin(config: config)
+            guard pins.windows.last?.cgImage.width == width else {
+                fputs("FAIL: An oversized pin should not enter history or displace eligible pins\n", stderr)
+                return false
+            }
+        }
+        pins.restoreLastClosedPin(config: config)
+        guard pins.count == 2 else {
+            fputs("FAIL: Pin history should discard the oldest pin when the image byte budget is exceeded\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 历史按位图字节淘汰最旧的贴图，跳过超大图并保留已有历史")
         return true
     }
 
@@ -1159,11 +1259,13 @@ public enum SmokeTestRunner {
             print("[smoke] 验证贴图关闭、恢复与历史设置...")
             let pinSaveConfigURL = tempDir.appendingPathComponent("pin-save", isDirectory: true).appendingPathComponent("config.json")
             let pinRestoreOK = MainActor.assumeIsolated {
-                withPinRestoreFixture(
-                    image: baseCG,
-                    configURL: tempDir.appendingPathComponent("pin-config.json"),
-                    runPinRestoreChecks
-                )
+                guard let screen = NSScreen.main ?? NSScreen.screens.first else { return false }
+                return runCroppedPinStorageCheck(on: screen)
+                    && withPinRestoreFixture(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-config.json"),
+                        runPinRestoreChecks
+                    )
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-batch-config.json"),
@@ -1171,6 +1273,7 @@ public enum SmokeTestRunner {
                     )
                     && runBatchCloseDuringInlineEditCheck(image: baseCG)
                     && runClosedPinHistoryLimitCheck(image: baseCG)
+                    && runClosedPinHistoryBudgetCheck()
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-history-config.json"),
