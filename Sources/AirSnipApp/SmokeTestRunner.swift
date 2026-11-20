@@ -388,6 +388,163 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func runUsedClipboardImageAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        guard let copied = image.cropping(to: CGRect(x: 0, y: 0, width: 64, height: 48)),
+              let png = try? ImageEncoder.encode(copied, format: .png, scale: 1) else { return false }
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        let item = NSPasteboardItem()
+        guard item.setData(png, forType: .png), item.setString("Image caption", forType: .string),
+              pasteboard.writeObjects([item]) else { return false }
+        let copyRevision = pasteboard.changeCount
+        app.triggerPinOrRestore()
+        guard let opened = app.pinManager.windows.last, opened.cgImage.width == copied.width,
+              opened.originalText == nil, pasteboard.changeCount == copyRevision else {
+            fputs("FAIL: F3 should prefer the clipboard image over the caption and leave the clipboard unchanged\n", stderr)
+            return false
+        }
+        opened.closeSelf()
+        for width in [96, 128] {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 48)),
+                  app.pinManager.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+            else { return false }
+            app.pinManager.windows.last?.closeSelf()
+        }
+        app.pinManager.finishHistoryWrites()
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+
+        for (index, width) in [128, 96, copied.width].enumerated() {
+            app.triggerPinOrRestore()
+            guard app.pinManager.count == index + 1, let restored = app.pinManager.windows.last,
+                  restored.window.isVisible, restored.cgImage.width == width else {
+                fputs("FAIL: A used clipboard image should restore closed pins in order after relaunch (press \(index + 1))\n", stderr)
+                return false
+            }
+        }
+        print("[pins] PASS: 重开后同一次图片复制按顺序恢复已关闭贴图")
+        return true
+    }
+
+    @MainActor
+    private static func runUsedClipboardCompressionAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        guard let historyImage = image.cropping(to: CGRect(x: 0, y: 0, width: 96, height: 48)) else { return false }
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        OutputService.copyImageToClipboard(image, config: app.config, to: pasteboard)
+        let originalRevision = pasteboard.changeCount
+        guard let originalPNG = pasteboard.data(forType: .png) else { return false }
+        app.triggerPinOrRestore()
+        guard let opened = app.pinManager.windows.last, opened.cgImage.width == image.width else { return false }
+        opened.closeSelf()
+        guard app.pinManager.createPin(cgImage: historyImage, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        else { return false }
+        app.pinManager.windows.last?.closeSelf()
+        app.pinManager.finishHistoryWrites()
+
+        guard waitForPinHistoryWork({ pasteboard.changeCount != originalRevision }),
+              let compressedPNG = pasteboard.data(forType: .png), compressedPNG.count < originalPNG.count else {
+            fputs("FAIL: The clipboard compression fixture should rewrite the clipboard with a smaller PNG\n", stderr)
+            return false
+        }
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == historyImage.width else {
+            fputs("FAIL: After relaunch, compression of a used clipboard image should still let F3 restore history first\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 2, app.pinManager.windows.last?.cgImage.width == image.width,
+              let compressedItem = pasteboard.pasteboardItems?.first else { return false }
+
+        // Clipboard managers can recopy the image along with all its pasteboard types.
+        let recopied = NSPasteboardItem()
+        for type in compressedItem.types {
+            guard let data = compressedItem.data(forType: type), recopied.setData(data, forType: type) else { return false }
+        }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([recopied]) else { return false }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 3, app.pinManager.windows.last?.cgImage.width == image.width else {
+            fputs("FAIL: Recopied compressed clipboard data should allow a new pin\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 重开后后台压缩写回仍属同一次复制，主动复制相同内容可以再贴")
+        return true
+    }
+
+    @MainActor
+    private static func runUsedClipboardTextAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig {
+            $0.lastSaveDirectory = configURL.deletingLastPathComponent().path
+            $0.pinMaxCount = 1
+        }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        let text = "  贴图原文\n\tkeep this text  "
+        OutputService.copyStringToClipboard(text, to: pasteboard)
+        let copyRevision = pasteboard.changeCount
+        app.triggerPinOrRestore()
+        guard let textPin = app.pinManager.windows.last, textPin.originalText == text,
+              pasteboard.changeCount == copyRevision else {
+            fputs("FAIL: F3 should pin the original text and leave the clipboard unchanged\n", stderr)
+            return false
+        }
+        textPin.closeSelf()
+        guard app.pinManager.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        else { return false }
+        app.pinManager.windows.last?.closeSelf()
+        app.pinManager.finishHistoryWrites()
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, let restored = app.pinManager.windows.last,
+              restored.originalText == nil, restored.cgImage.width == image.width else {
+            fputs("FAIL: After relaunch, a used text copy should let F3 restore history first\n", stderr)
+            return false
+        }
+
+        OutputService.copyStringToClipboard(text, to: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1 else {
+            fputs("FAIL: Recopied text should still respect the on-screen pin limit\n", stderr)
+            return false
+        }
+        restored.closeSelf()
+        app.pinManager.finishHistoryWrites()
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.originalText == text else {
+            fputs("FAIL: After relaunch, a recopy previously blocked by the pin limit should still take priority over history\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 重开后已贴过的文字进入历史恢复，重新复制遇到同屏上限后仍可重试")
+        return true
+    }
+
+    @MainActor
     private static func runClipboardTextPinCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         let pins = app.pinManager
         pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
@@ -1994,6 +2151,18 @@ public enum SmokeTestRunner {
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-config.json"),
                         runPinRestoreChecks
+                    )
+                    && runUsedClipboardImageAfterRelaunchCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("used-clipboard-image/config.json")
+                    )
+                    && runUsedClipboardCompressionAfterRelaunchCheck(
+                        image: baked,
+                        configURL: tempDir.appendingPathComponent("used-clipboard-compression/config.json")
+                    )
+                    && runUsedClipboardTextAfterRelaunchCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("used-clipboard-text/config.json")
                     )
                     && withPinRestoreFixture(
                         image: baseCG,

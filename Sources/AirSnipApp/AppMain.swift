@@ -17,6 +17,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private let statusMenu = NSMenu(title: "iSnip")
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
+    private let lastPinnedClipboardCopyURL: URL
     private var lastPinnedClipboardCopy: OutputService.ClipboardCopyID?
     private var isCapturingSnapshots = false
     private let selectionTranslation = SelectionTranslationController()
@@ -31,6 +32,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     init(configURL: URL, pinPasteboard: NSPasteboard, pinHistoryCloseTime: @escaping () -> Date) {
         self.configURL = configURL
+        lastPinnedClipboardCopyURL = configURL.deletingPathExtension().appendingPathExtension("pinned-clipboard-copy.json")
+        if let data = try? Data(contentsOf: lastPinnedClipboardCopyURL) {
+            lastPinnedClipboardCopy = try? JSONDecoder().decode(OutputService.ClipboardCopyID.self, from: data)
+        }
         self.pinManager = PinManager(
             pasteboard: pinPasteboard,
             historyConfigURL: configURL,
@@ -562,7 +567,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             config: pinCfg,
             originalText: clip.originalText
         ) {
-            lastPinnedClipboardCopy = clip.copyID
+            rememberPinnedClipboardCopy(clip.copyID)
             if clip.isTextPreviewClipped {
                 ToastHUD.show(
                     L10n.tr("仅显示部分文字，可复制原文", "Showing part of the text. Use Copy Original Text.", in: config.language),
@@ -570,6 +575,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 )
             }
         }
+    }
+
+    private func rememberPinnedClipboardCopy(_ copyID: OutputService.ClipboardCopyID) {
+        lastPinnedClipboardCopy = copyID
+        try? FileManager.default.createDirectory(
+            at: lastPinnedClipboardCopyURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try? JSONEncoder().encode(copyID).write(to: lastPinnedClipboardCopyURL, options: .atomic)
     }
 
     private func startPinInlineEditSession(pin: PinWindowController) {
