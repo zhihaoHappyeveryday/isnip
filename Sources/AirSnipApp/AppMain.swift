@@ -124,8 +124,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if config.autoCheckUpdate {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard let self else { return }
-                if case .success(let rel?) = await UpdateChecker.checkLatest(),
+                guard let self, self.config.autoCheckUpdate else { return }
+                if case .success(.available(let rel)) = await UpdateChecker.checkLatest(),
+                   self.config.autoCheckUpdate,
                    self.config.skippedVersion != rel.version {
                     ToastHUD.show(
                         L10n.tr("发现新版本 v\(rel.version)", "New version v\(rel.version) available", in: self.config.language),

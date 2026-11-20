@@ -24,6 +24,11 @@ let package = Package(
             name: "AirSnipCoreTests",
             dependencies: ["AirSnipCore"],
             path: "Tests/AirSnipCoreTests"
+        ),
+        .testTarget(
+            name: "AirSnipAppTests",
+            dependencies: ["AirSnipApp"],
+            path: "Tests/AirSnipAppTests"
         )
     ]
 )

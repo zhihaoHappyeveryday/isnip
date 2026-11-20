@@ -38,6 +38,6 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>iSnip 需要屏幕录制权限以完成截图、页面长截图、标注、贴图与离线文字识别。</string>
     <key>AirSnipUpdateRepository</key>
-    <string>zzusec/isnip</string>
+    <string>zhihaoHappyeveryday/isnip</string>
 </dict>
 </plist>

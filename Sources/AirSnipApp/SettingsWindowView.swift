@@ -107,6 +107,7 @@ final class SettingsUpdateState: ObservableObject {
         case checking
         case available(String)
         case upToDate
+        case noPublishedRelease
         case failed(String)
     }
 
@@ -120,6 +121,8 @@ final class SettingsUpdateState: ObservableObject {
             return lang.isEnglish ? "\(ver) available" : "\(ver) 可更新"
         case .upToDate:
             return lang.isEnglish ? "Up to date" : "已是最新版本"
+        case .noPublishedRelease:
+            return lang.isEnglish ? "No published releases" : "暂无已发布版本"
         case .failed(let msg):
             return lang.isEnglish ? "Update check failed: \(msg)" : "检查失败：\(msg)"
         }
@@ -133,7 +136,7 @@ final class SettingsUpdateState: ObservableObject {
             let res = await UpdateChecker.checkLatest()
             isChecking = false
             switch res {
-            case .success(let info?):
+            case .success(.available(let info)):
                 latestRelease = info
                 statusKind = .available(info.version)
                 if showToast {
@@ -142,7 +145,7 @@ final class SettingsUpdateState: ObservableObject {
                         symbol: "arrow.down.circle"
                     )
                 }
-            case .success(nil):
+            case .success(.upToDate):
                 latestRelease = nil
                 statusKind = .upToDate
                 if showToast {
@@ -150,6 +153,12 @@ final class SettingsUpdateState: ObservableObject {
                         L10n.tr("已是最新版本 v\(UpdateChecker.currentVersion)", "Up to date (v\(UpdateChecker.currentVersion))", in: lang),
                         symbol: "checkmark"
                     )
+                }
+            case .success(.noPublishedRelease):
+                latestRelease = nil
+                statusKind = .noPublishedRelease
+                if showToast {
+                    ToastHUD.show(statusText(in: lang), symbol: "info.circle")
                 }
             case .failure(let err):
                 statusKind = .failed(err.localizedDescription)
@@ -1760,6 +1769,43 @@ private struct PinHistoryDirectoryRow: View {
     }
 }
 
+private struct UpdateVersionRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appLanguage) private var lang
+    @ObservedObject var updateState: SettingsUpdateState
+    var idleSubtitle: String?
+
+    var body: some View {
+        let p = MagpiePalette(colorScheme: colorScheme)
+        let status = updateState.statusText(in: lang)
+        MagpieSettingRow(
+            title: L10n.tr("版本", "Version", in: lang),
+            subtitle: status.isEmpty ? idleSubtitle : status
+        ) {
+            HStack(spacing: 12) {
+                Text(UpdateChecker.currentVersion)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(p.inkMono)
+
+                if let rel = updateState.latestRelease {
+                    MagpieTextAction(L10n.tr("下载 v\(rel.version)", "Download v\(rel.version)", in: lang), prominent: true) {
+                        NSWorkspace.shared.open(rel.downloadURL ?? rel.htmlURL)
+                    }
+                } else {
+                    MagpieTextAction(
+                        updateState.isChecking
+                            ? L10n.tr("检查中…", "Checking…", in: lang)
+                            : L10n.tr("检查更新", "Check for Updates", in: lang)
+                    ) {
+                        updateState.checkNow(lang: lang)
+                    }
+                    .disabled(updateState.isChecking)
+                }
+            }
+        }
+    }
+}
+
 private struct AboutSettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appLanguage) private var lang
@@ -1772,42 +1818,16 @@ private struct AboutSettingsPane: View {
         let configDisplayPath = OutputService.displayPath(for: configDirURL)
         let saveDirURL = OutputService.defaultSaveDirectoryURL(for: app.config)
         let saveDisplayPath = OutputService.displayPath(for: saveDirURL)
-        let repoURL = URL(string: "https://github.com/zzusec/isnip")!
-        let releasesURL = URL(string: "https://github.com/zzusec/isnip/releases")!
-        let subText = updateState.statusText(in: lang)
+        let repoURL = UpdateChecker.repositoryURL
 
         MagpieCard {
-            MagpieSettingRow(
-                title: L10n.tr("版本", "Version", in: lang),
-                subtitle: subText.isEmpty ? nil : subText
-            ) {
-                HStack(spacing: 12) {
-                    Text(UpdateChecker.currentVersion)
-                        .font(.system(size: 13, weight: .regular, design: .monospaced))
-                        .foregroundStyle(p.inkMono)
-
-                    if let rel = updateState.latestRelease {
-                        MagpieTextAction(L10n.tr("下载 v\(rel.version)", "Download v\(rel.version)", in: lang), prominent: true) {
-                            NSWorkspace.shared.open(rel.downloadURL ?? rel.htmlURL)
-                        }
-                    } else {
-                        MagpieTextAction(
-                            updateState.isChecking
-                                ? L10n.tr("检查中…", "Checking…", in: lang)
-                                : L10n.tr("检查更新", "Check for Updates", in: lang)
-                        ) {
-                            updateState.checkNow(lang: lang)
-                        }
-                        .disabled(updateState.isChecking)
-                    }
-                }
-            }
+            UpdateVersionRow(updateState: updateState)
 
             MagpieRowDivider()
 
             MagpieSettingRow(title: L10n.tr("更新内容", "Release Notes", in: lang)) {
                 MagpieTextAction(L10n.tr("打开", "Open", in: lang)) {
-                    NSWorkspace.shared.open(releasesURL)
+                    NSWorkspace.shared.open(repoURL.appendingPathComponent("releases"))
                 }
             }
 
@@ -1844,7 +1864,7 @@ private struct AboutSettingsPane: View {
 
             MagpieSettingRow(title: L10n.tr("下载源", "Repository", in: lang)) {
                 HStack(spacing: 10) {
-                    Text("github.com/zzusec/isnip")
+                    Text("github.com/\(UpdateChecker.releaseRepo)")
                         .font(.system(size: 12.5, design: .monospaced))
                         .foregroundStyle(p.inkMono)
                     MagpieTextAction(L10n.tr("打开", "Open", in: lang)) {
@@ -2153,14 +2173,7 @@ private struct SettingsSearchResultsPane: View {
                 })
             },
             SearchEntry(id: "ab.ver", keywords: "关于 about 版本 更新 检查更新 自动更新 version update") {
-                AnyView(MagpieSettingRow(title: L10n.tr("版本", "Version", in: lang), subtitle: SettingsTab.about.title(in: lang)) {
-                    HStack(spacing: 12) {
-                        Text(UpdateChecker.currentVersion)
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundStyle(p.inkMono)
-                        MagpieTextAction(L10n.tr("检查更新", "Check for Updates", in: lang)) { updateState.checkNow(lang: lang) }
-                    }
-                })
+                AnyView(UpdateVersionRow(updateState: updateState, idleSubtitle: SettingsTab.about.title(in: lang)))
             },
             SearchEntry(id: "ab.cfg", keywords: "关于 about 配置目录 config.json 路径 协议 github directory license") {
                 AnyView(MagpieSettingRow(title: L10n.tr("配置目录", "Config Directory", in: lang), subtitle: SettingsTab.about.title(in: lang)) {

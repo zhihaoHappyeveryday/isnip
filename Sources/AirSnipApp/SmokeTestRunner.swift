@@ -1255,6 +1255,7 @@ public enum SmokeTestRunner {
             guard cfg.smartPngCompression == true,
                   cfg.compressClipboardPng == true,
                   cfg.askBeforeSave == false,
+                  cfg.autoCheckUpdate,
                   cfg.longshotAutoScroll == true,
                   cfg.longshotScrollSpeed == .normal,
                   cfg.pinAnnotationCoversDesktop,
@@ -1268,12 +1269,14 @@ public enum SmokeTestRunner {
             cfg.toolbar.setVisible(.tool(.ellipse), false)
             cfg.toolbar.setVisible(.ocr, false)
             cfg.pinAnnotationCoversDesktop = false
+            cfg.autoCheckUpdate = false
             try cfg.save(to: cfgURL)
             let loaded = AirSnipConfig.load(from: cfgURL)
             guard !loaded.toolbar.isVisible(.tool(.ellipse)),
                   !loaded.toolbar.isVisible(.ocr),
                   loaded.toolbar.isVisible(.tool(.rect)),
                   !loaded.pinAnnotationCoversDesktop,
+                  !loaded.autoCheckUpdate,
                   try JSONDecoder().decode(AirSnipConfig.self, from: Data("{}".utf8)).pinAnnotationCoversDesktop,
                   loaded.smartPngCompression == true else {
                 fputs("FAIL: Config roundtrip mismatch\n", stderr)

@@ -1166,36 +1166,56 @@ public struct UpdateReleaseInfo: Sendable {
 }
 
 public enum UpdateChecker {
+    public enum Status: Sendable {
+        case available(UpdateReleaseInfo)
+        case upToDate
+        case noPublishedRelease
+    }
+
     public static var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.3.12"
     }
 
     public static var releaseRepo: String {
-        (Bundle.main.infoDictionary?["AirSnipUpdateRepository"] as? String) ?? "zzusec/isnip"
+        (Bundle.main.infoDictionary?["AirSnipUpdateRepository"] as? String) ?? "zhihaoHappyeveryday/isnip"
     }
 
-    public static func checkLatest() async -> Result<UpdateReleaseInfo?, Error> {
+    public static var repositoryURL: URL {
+        URL(string: "https://github.com/\(releaseRepo)")!
+    }
+
+    public static func checkLatest(
+        installedVersion: String = currentVersion,
+        fetch: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
+    ) async -> Result<Status, Error> {
         guard let apiURL = URL(string: "https://api.github.com/repos/\(releaseRepo)/releases/latest") else {
-            return .success(nil)
+            return .failure(URLError(.badURL))
         }
         var req = URLRequest(url: apiURL)
         req.timeoutInterval = 8
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            if let http = resp as? HTTPURLResponse, http.statusCode == 404 {
-                return .success(nil)
+            let (data, resp) = try await fetch(req)
+            guard let http = resp as? HTTPURLResponse else {
+                throw URLError(.badServerResponse)
             }
+            if http.statusCode == 404 {
+                return .success(.noPublishedRelease)
+            }
+            guard http.statusCode == 200 else { throw URLError(.badServerResponse) }
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String,
                   let htmlStr = json["html_url"] as? String,
-                  let htmlURL = URL(string: htmlStr) else {
-                return .success(nil)
+                  let htmlURL = URL(string: htmlStr), htmlURL.host == "github.com", htmlURL.scheme == "https" else {
+                throw URLError(.cannotParseResponse)
             }
             let remoteVer = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-            guard isVersionNewer(remoteVer, than: currentVersion) else {
-                return .success(nil)
+            guard remoteVer.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil else {
+                throw URLError(.cannotParseResponse)
+            }
+            guard isVersionNewer(remoteVer, than: installedVersion) else {
+                return .success(.upToDate)
             }
             let notes = (json["body"] as? String) ?? ""
             var dmgURL: URL?
@@ -1209,7 +1229,7 @@ public enum UpdateChecker {
                 }
                 dmgURL = ReleaseAssetSelector.selectDownloadURL(assets: parsed)
             }
-            return .success(UpdateReleaseInfo(version: remoteVer, htmlURL: htmlURL, downloadURL: dmgURL, body: notes))
+            return .success(.available(UpdateReleaseInfo(version: remoteVer, htmlURL: htmlURL, downloadURL: dmgURL, body: notes)))
         } catch {
             return .failure(error)
         }

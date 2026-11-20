@@ -40,7 +40,7 @@ def main() -> None:
         fail(f"Unexpected CFBundleIdentifier: {bundle_id!r}")
     if bundle_name != "iSnip" or executable != "iSnip":
         fail(f"Expected iSnip bundle/executable name, got {bundle_name!r} / {executable!r}")
-    if update_repo != "zzusec/isnip":
+    if update_repo != "zhihaoHappyeveryday/isnip":
         fail(f"Unexpected AirSnipUpdateRepository: {update_repo!r}")
 
     if not CHANGELOG_PATH.is_file():
