@@ -172,14 +172,15 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         let oldPinHistoryLimit = config.pinHistoryLimit
         var next = config
         mutate(&next)
-        // Retry a failed trim at launch before raising the saved limit.
-        if next.pinHistoryLimit != oldPinHistoryLimit,
-           !pinManager.trimClosedHistory(to: min(oldPinHistoryLimit, next.pinHistoryLimit)) {
-            next.pinHistoryLimit = oldPinHistoryLimit
+        let pinHistoryLimitChanged = next.pinHistoryLimit != oldPinHistoryLimit
+        if pinHistoryLimitChanged {
+            next = savePinHistoryLimitChange(next, from: oldPinHistoryLimit)
         }
         config = next
         L10n.current = config.language
-        try? config.save(to: configURL)
+        if !pinHistoryLimitChanged {
+            try? config.save(to: configURL)
+        }
         if config.language != oldLang {
             ocrBubbleManager.appLanguage = config.language
             selectionTranslation.refreshLanguage()
@@ -191,6 +192,35 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             if config.translation.showSelectionButton { SelectedTextService.requestAccess() }
             selectionTranslation.setEnabled(config.translation.showSelectionButton)
         }
+    }
+
+    private func savePinHistoryLimitChange(_ requested: AirSnipConfig, from previousLimit: Int) -> AirSnipConfig {
+        let limit = requested.pinHistoryLimit
+        var fallback = requested
+        fallback.pinHistoryLimit = previousLimit
+
+        // Retry an incomplete trim before raising the saved limit.
+        if limit > previousLimit, !pinManager.trimClosedHistory(to: previousLimit) {
+            try? fallback.save(to: configURL)
+            return fallback
+        }
+
+        do {
+            // Save reductions before deleting any history. Startup enforces the saved limit.
+            try requested.save(to: configURL)
+        } catch {
+            ToastHUD.show(
+                L10n.tr("无法保存可恢复贴图数，请重试", "Could not save the recoverable pin limit. Please try again.", in: requested.language),
+                symbol: "exclamationmark.triangle", tint: .systemOrange
+            )
+            return fallback
+        }
+
+        if limit < previousLimit, !pinManager.trimClosedHistory(to: limit) {
+            // If rollback cannot be saved, keep the limit that is already on disk.
+            if (try? fallback.save(to: configURL)) != nil { return fallback }
+        }
+        return requested
     }
 
     // MARK: - Menu Bar Status Item
@@ -769,9 +799,7 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
-        guard let pins = controller?.pinManager else { return }
-        pins.closeAll()
-        pins.finishHistoryWrites()
+        controller?.pinManager.saveOpenPinsOnQuit()
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

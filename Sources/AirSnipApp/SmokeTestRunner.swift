@@ -1226,6 +1226,18 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func openFixturePin(
+        image: CGImage, width: Int, app: AirSnipAppController, originalText: String? = nil
+    ) -> PinWindowController? {
+        guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
+              app.pinManager.createPin(
+                  cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil,
+                  config: app.config, originalText: originalText
+              ) else { return nil }
+        return app.pinManager.windows.last
+    }
+
+    @MainActor
     private static func runPinHistoryQuitCheck(image: CGImage, configURL: URL) -> Bool {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
@@ -1254,16 +1266,8 @@ public enum SmokeTestRunner {
             pasteboard.releaseGlobally()
         }
 
-        func openPin(width: Int, originalText: String? = nil) -> PinWindowController? {
-            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
-                  app.pinManager.createPin(
-                      cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil,
-                      config: app.config, originalText: originalText
-                  ) else { return nil }
-            return app.pinManager.windows.last
-        }
-
-        guard let oldest = openPin(width: 35), let immediatelyRestored = openPin(width: 40) else { return false }
+        guard let oldest = openFixturePin(image: image, width: 35, app: app),
+              let immediatelyRestored = openFixturePin(image: image, width: 40, app: app) else { return false }
         oldest.closeSelf()
         immediatelyRestored.closeSelf()
         app.triggerPinOrRestore()
@@ -1273,11 +1277,12 @@ public enum SmokeTestRunner {
         }
 
         now = batchTime
-        guard openPin(width: 50) != nil else { return false }
+        guard openFixturePin(image: image, width: 50, app: app) != nil else { return false }
         app.pinManager.closeAll()
         let originalText = "  Quit with this text\n\tstill open  "
-        guard let manuallyClosed = openPin(width: 60), openPin(width: 70) != nil,
-              let newest = openPin(width: 80, originalText: originalText) else { return false }
+        guard let manuallyClosed = openFixturePin(image: image, width: 60, app: app),
+              openFixturePin(image: image, width: 70, app: app) != nil,
+              let newest = openFixturePin(image: image, width: 80, app: app, originalText: originalText) else { return false }
         newest.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: 24, y: 16))
         newest.adjustOpacity(delta: -1)
         newest.window.setFrameOrigin(NSPoint(x: newest.window.frame.minX + 24, y: newest.window.frame.minY + 16))
@@ -1336,6 +1341,127 @@ public enum SmokeTestRunner {
             return false
         }
         print("[pins] PASS: 退出保存未关闭贴图，重开按顺序恢复图像、状态和原文，并遵守全局上限")
+        return true
+    }
+
+    @MainActor
+    private static func runInterruptedPinHistoryWriteCheck(image: CGImage, configURL: URL) throws -> Bool {
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.pinManager.finishHistoryWrites()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        let root = OutputService.pinHistoryRootURL(for: app.config)
+        let manifest = ClosedPinHistory.manifestURL(for: configURL)
+
+        guard let first = openFixturePin(image: image, width: 48, app: app) else { return false }
+        first.closeSelf()
+        app.pinManager.finishHistoryWrites()
+        guard pinHistoryPNGCount(at: root) == 1,
+              let second = openFixturePin(image: image, width: 64, app: app, originalText: "Interrupted write") else {
+            fputs("FAIL: Could not stage a second pin after saving the first pin\n", stderr)
+            return false
+        }
+        second.closeSelf()
+        // Capture the cleanup registration before the main-actor completion publishes the second pin.
+        let interruptedManifest = try Data(contentsOf: manifest)
+        app.pinManager.finishHistoryWrites()
+        let files = FileManager.default
+        let items = files.enumerator(at: root, includingPropertiesForKeys: nil)
+        guard pinHistoryPNGCount(at: root) == 2,
+              let textFile = items?.allObjects.compactMap({ $0 as? URL }).first(where: { $0.pathExtension == "txt" }) else {
+            fputs("FAIL: Could not prepare the interrupted pin's PNG and text files\n", stderr)
+            return false
+        }
+        try files.removeItem(at: textFile)
+        try interruptedManifest.write(to: manifest, options: .atomic)
+
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        guard pinHistoryPNGCount(at: root) == 1 else {
+            fputs("FAIL: Reopening should clean up the interrupted pin and preserve the fully saved pin\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == 48,
+              pinHistoryPNGCount(at: root) == 0 else {
+            fputs("FAIL: F3 should only restore the fully saved pin after an interrupted write\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 写盘中断后重开会清理未保存完成的文件，已保存贴图仍可恢复")
+        return true
+    }
+
+    @MainActor
+    private static func runPinHistoryLimitRecoveryCheck(image: CGImage, configURL: URL) throws -> Bool {
+        let pasteboard = NSPasteboard.withUniqueName()
+        let directory = configURL.deletingLastPathComponent()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig {
+            $0.lastSaveDirectory = directory.path
+            $0.pinHistoryLimit = 2
+        }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.pinManager.finishHistoryWrites()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        let root = OutputService.pinHistoryRootURL(for: app.config)
+        let manifest = ClosedPinHistory.manifestURL(for: configURL)
+        let files = FileManager.default
+
+        func reopenWithTrimBlocked(limit: Int) throws {
+            // The setting was saved before interruption, but the history was not trimmed.
+            var savedConfig = app.config
+            savedConfig.pinHistoryLimit = limit
+            try savedConfig.save(to: configURL)
+            try files.setAttributes([.immutable: true], ofItemAtPath: manifest.path)
+            app.settingsController = nil
+            app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+            try files.setAttributes([.immutable: false], ofItemAtPath: manifest.path)
+        }
+
+        guard openFixturePin(image: image, width: 48, app: app) != nil,
+              openFixturePin(image: image, width: 64, app: app) != nil else { return false }
+        app.pinManager.closeAll()
+        app.pinManager.finishHistoryWrites()
+        try reopenWithTrimBlocked(limit: 1)
+        guard app.config.pinHistoryLimit == 1, pinHistoryPNGCount(at: root) == 2 else {
+            fputs("FAIL: Could not reopen with a saved limit and blocked history trim\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == 64,
+              pinHistoryPNGCount(at: root) == 0 else {
+            fputs("FAIL: F3 should enforce the saved limit when storage is writable again\n", stderr)
+            return false
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 2 }
+        guard openFixturePin(image: image, width: 80, app: app) != nil else { return false }
+        app.pinManager.closeAll()
+        app.pinManager.finishHistoryWrites()
+        try reopenWithTrimBlocked(limit: 0)
+        guard app.config.pinHistoryLimit == 0, pinHistoryPNGCount(at: root) == 2 else {
+            fputs("FAIL: Could not reopen with history disabled and blocked history trim\n", stderr)
+            return false
+        }
+        let willTerminate = Notification(name: NSApplication.willTerminateNotification, object: NSApp)
+        AirSnipAppDelegate(controller: app).applicationWillTerminate(willTerminate)
+        guard pinHistoryPNGCount(at: root) == 0 else {
+            fputs("FAIL: Quitting should retry a blocked history clear when storage is writable again\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 启动时无法裁剪历史，恢复可写后按 F3 和正常退出会执行已保存的上限")
         return true
     }
 
@@ -1435,15 +1561,32 @@ public enum SmokeTestRunner {
 
         pins.closeAll()
         pins.finishHistoryWrites()
-        do {
+        func disableHistoryWithWriteBlocked(at url: URL) throws {
             let files = FileManager.default
-            let manifest = app.configURL.deletingPathExtension().appendingPathExtension("pin-history.json")
-            let backup = manifest.appendingPathExtension("fixture-backup")
-            try files.moveItem(at: manifest, to: backup)
-            try files.createDirectory(at: manifest, withIntermediateDirectories: false)
+            let backup = url.appendingPathExtension("fixture-backup")
+            try files.moveItem(at: url, to: backup)
+            try files.createDirectory(at: url, withIntermediateDirectories: false)
             app.updateConfig { $0.pinHistoryLimit = 0 }
-            try files.removeItem(at: manifest)
-            try files.moveItem(at: backup, to: manifest)
+            try files.removeItem(at: url)
+            try files.moveItem(at: backup, to: url)
+        }
+
+        do {
+            try disableHistoryWithWriteBlocked(at: app.configURL)
+        } catch {
+            fputs("FAIL: Could not simulate a settings write failure while disabling pin history: \(error)\n", stderr)
+            return false
+        }
+        guard app.config.pinHistoryLimit == 10, AirSnipConfig.load(from: app.configURL).pinHistoryLimit == 10,
+              pinHistoryPNGCount(at: directory) == 5 else {
+            fputs("FAIL: A failed settings save should keep the previous limit and leave saved pins intact\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 设置保存失败时保留原上限和贴图历史")
+
+        do {
+            let manifest = ClosedPinHistory.manifestURL(for: app.configURL)
+            try disableHistoryWithWriteBlocked(at: manifest)
         } catch {
             fputs("FAIL: Could not simulate a manifest write failure while disabling pin history: \(error)\n", stderr)
             return false
@@ -2239,6 +2382,14 @@ public enum SmokeTestRunner {
                     && runPinHistoryQuitCheck(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-history-quit/config.json")
+                    )
+                    && runInterruptedPinHistoryWriteCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-history-interrupted/config.json")
+                    )
+                    && runPinHistoryLimitRecoveryCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-history-limit-recovery/config.json")
                     )
                     && runFailedPinHistoryWriteCheck(image: baseCG, directory: tempDir)
                     && withPinRestoreFixture(

@@ -114,7 +114,9 @@ public final class PinManager: ObservableObject {
 
     public func restoreLastClosedPin(config: AirSnipConfig) {
         history.cleanUnusedFiles()
-        guard config.pinHistoryLimit > 0, !history.isEmpty, canOpenPin(config: config) else { return }
+        let limit = config.pinHistoryLimit
+        guard trimClosedHistory(to: limit), limit > 0, !history.isEmpty,
+              canOpenPin(config: config) else { return }
         let result = history.restoreLast()
         if result.skippedUnreadable {
             showHistoryWarning("部分贴图历史文件无法读取", "Some closed pin files could not be read")
@@ -146,6 +148,14 @@ public final class PinManager: ObservableObject {
         }
         windows.removeAll()
         rememberClosedPins(pins, closedAt: closedAt)
+    }
+
+    func saveOpenPinsOnQuit() {
+        closeAll()
+        if let config = getConfig?() {
+            _ = trimClosedHistory(to: config.pinHistoryLimit)
+        }
+        finishHistoryWrites()
     }
 
     public func restoreAllClickThrough() {

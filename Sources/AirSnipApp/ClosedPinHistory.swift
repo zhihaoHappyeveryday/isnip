@@ -74,7 +74,14 @@ final class ClosedPinHistory {
 
     private struct Manifest: Codable {
         let records: [Record]
-        let filesToRemove: Set<PinFiles>
+        // Register files before writing. Publishing a saved record takes its files off this list.
+        // Retired records and unfinished writes stay listed until their files are removed.
+        let cleanupCandidates: Set<PinFiles>
+
+        private enum CodingKeys: String, CodingKey {
+            case records
+            case cleanupCandidates = "filesToRemove"
+        }
     }
 
     private struct Entry {
@@ -90,6 +97,12 @@ final class ClosedPinHistory {
             if case .stored = content { return record }
             return nil
         }
+    }
+
+    private enum SnapshotReadResult {
+        case loaded(PinSnapshot)
+        case rootUnavailable
+        case unreadable
     }
 
     private final class Write: @unchecked Sendable {
@@ -120,19 +133,23 @@ final class ClosedPinHistory {
     private let legacySessions: LegacyPinHistorySessions
     private let writeQueue = DispatchQueue(label: "io.zzusec.airsnip.closed-pin-history", qos: .utility)
     private var entries: [Entry] = []
-    private var filesToRemove: Set<PinFiles> = []
+    private var cleanupCandidates: Set<PinFiles> = []
     private var inFlightWrite: Write?
     var onWriteFailure: (() -> Void)?
 
+    static func manifestURL(for configURL: URL) -> URL {
+        configURL.deletingPathExtension().appendingPathExtension("pin-history.json")
+    }
+
     init(configURL: URL?) {
-        let configBase = configURL?.deletingPathExtension()
-        let manifestURL = configBase?.appendingPathExtension("pin-history.json")
+        let manifestURL = configURL.map(Self.manifestURL(for:))
         self.manifestURL = manifestURL
-        legacySessions = LegacyPinHistorySessions(registryURL: configBase?.appendingPathExtension("pin-history-sessions.json"))
+        let legacyRegistryURL = configURL?.deletingPathExtension().appendingPathExtension("pin-history-sessions.json")
+        legacySessions = LegacyPinHistorySessions(registryURL: legacyRegistryURL)
         guard let manifestURL, let data = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else { return }
         entries = manifest.records.filter { $0.files.dayDirectory.isFileURL }.map { Entry(record: $0, content: .stored) }
-        filesToRemove = manifest.filesToRemove.filter { $0.dayDirectory.isFileURL }
+        cleanupCandidates = manifest.cleanupCandidates.filter { $0.dayDirectory.isFileURL }
         cleanUnusedFiles()
     }
 
@@ -180,15 +197,14 @@ final class ClosedPinHistory {
     func restoreLast() -> (snapshot: PinSnapshot?, skippedUnreadable: Bool) {
         var skippedUnreadable = false
         for index in entries.indices.reversed() {
-            let entry = entries[index]
             let snapshot: PinSnapshot?
-            switch entry.content {
-            case .pending(let image, let originalText, _):
-                snapshot = PinSnapshot(image: image, originalText: originalText, displayState: entry.record.displayState)
-            case .stored:
-                guard entry.record.files.isHistoryRootAvailable else { continue }
-                snapshot = Self.readSnapshot(entry.record)
-                if snapshot == nil, !entry.record.files.isHistoryRootAvailable { continue }
+            switch Self.readSnapshot(entries[index]) {
+            case .loaded(let restored):
+                snapshot = restored
+            case .rootUnavailable:
+                continue
+            case .unreadable:
+                snapshot = nil
             }
 
             var next = entries
@@ -221,8 +237,7 @@ final class ClosedPinHistory {
         while let index = entries.firstIndex(where: { $0.storedRecord == nil }),
               case .pending(let image, let originalText, let batch) = entries[index].content {
             let files = entries[index].record.files
-            // Register files before writing so a partial or interrupted write can be cleaned up on launch.
-            guard commit(entries, removing: filesToRemove.union([files])) else {
+            guard saveAndApply(entries, cleanupCandidates: cleanupCandidates.union([files])) else {
                 entries.remove(at: index)
                 reportWriteFailure(in: batch)
                 continue
@@ -251,7 +266,7 @@ final class ClosedPinHistory {
         if saved {
             var next = entries
             next[index].content = .stored
-            if commit(next, removing: filesToRemove.subtracting([files])) { return }
+            if saveAndApply(next, cleanupCandidates: cleanupCandidates.subtracting([files])) { return }
         }
         entries.remove(at: index)
         reportWriteFailure(in: batch)
@@ -270,21 +285,21 @@ final class ClosedPinHistory {
             entries = next
             return true
         }
-        guard commit(next, removing: filesToRemove.union(retiredFiles)) else { return false }
+        guard saveAndApply(next, cleanupCandidates: cleanupCandidates.union(retiredFiles)) else { return false }
         cleanUnusedFiles()
         return true
     }
 
     func cleanUnusedFiles() {
-        let removed = filesToRemove.filter { $0 != inFlightWrite?.files && Self.removeFiles($0) }
+        let removed = cleanupCandidates.filter { $0 != inFlightWrite?.files && Self.removeFiles($0) }
         if !removed.isEmpty {
-            _ = commit(entries, removing: filesToRemove.subtracting(removed))
+            _ = saveAndApply(entries, cleanupCandidates: cleanupCandidates.subtracting(removed))
         }
     }
 
-    private func commit(_ next: [Entry], removing nextFilesToRemove: Set<PinFiles>) -> Bool {
+    private func saveAndApply(_ next: [Entry], cleanupCandidates nextCleanupCandidates: Set<PinFiles>) -> Bool {
         if let manifestURL {
-            let manifest = Manifest(records: next.compactMap(\.storedRecord), filesToRemove: nextFilesToRemove)
+            let manifest = Manifest(records: next.compactMap(\.storedRecord), cleanupCandidates: nextCleanupCandidates)
             do {
                 try FileManager.default.createDirectory(at: manifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try JSONEncoder().encode(manifest).write(to: manifestURL, options: .atomic)
@@ -293,7 +308,7 @@ final class ClosedPinHistory {
             }
         }
         entries = next
-        filesToRemove = nextFilesToRemove
+        cleanupCandidates = nextCleanupCandidates
         return true
     }
 
@@ -317,7 +332,20 @@ final class ClosedPinHistory {
         }
     }
 
-    private static func readSnapshot(_ record: Record) -> PinSnapshot? {
+    private static func readSnapshot(_ entry: Entry) -> SnapshotReadResult {
+        let record = entry.record
+        switch entry.content {
+        case .pending(let image, let originalText, _):
+            return .loaded(PinSnapshot(image: image, originalText: originalText, displayState: record.displayState))
+        case .stored:
+            guard record.files.isHistoryRootAvailable else { return .rootUnavailable }
+            if let snapshot = readStoredSnapshot(record) { return .loaded(snapshot) }
+            // Keep the record if its directory went offline while reading.
+            return record.files.isHistoryRootAvailable ? .unreadable : .rootUnavailable
+        }
+    }
+
+    private static func readStoredSnapshot(_ record: Record) -> PinSnapshot? {
         let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
         guard let source = CGImageSourceCreateWithURL(record.files.imageURL as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, options) else { return nil }
