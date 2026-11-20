@@ -81,7 +81,54 @@ public enum SmokeTestRunner {
                 }
             }
         }
+        func findSplitView(in view: NSView) -> NSSplitView? {
+            if let split = view as? NSSplitView {
+                if !split.isVertical, split.arrangedSubviews.count == 2 { return split }
+            }
+            return view.subviews.lazy.compactMap { findSplitView(in: $0) }.first
+        }
+        panel.setContentSize(NSSize(width: 800, height: 650))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        guard let contentView = panel.contentView, let split = findSplitView(in: contentView),
+              !split.isVertical, split.arrangedSubviews.count == 2 else {
+            fputs("FAIL: Translation requires a native horizontal split view\n", stderr)
+            return false
+        }
+        let panes = split.arrangedSubviews
+        let sourceHeight = panes[0].frame.height
+        split.setPosition(300, ofDividerAt: 0)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        guard abs(panes[0].frame.height - 300) < 2,
+              abs(panes[0].frame.height - sourceHeight) > 10 else {
+            fputs("FAIL: Translation divider did not resize source pane\n", stderr)
+            return false
+        }
+        manager.requestTranslation()
+        let splitDeadline = Date().addingTimeInterval(10)
+        while manager.isTranslating && Date() < splitDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard abs(panes[0].frame.height - 300) < 2 else {
+            fputs("FAIL: Retranslating reset the divider position\n", stderr)
+            return false
+        }
+        for position in [CGFloat(0), split.bounds.height] {
+            split.setPosition(position, ofDividerAt: 0)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            guard panes[0].frame.height >= 88, panes[1].frame.height >= 96 else {
+                fputs("FAIL: Translation split panes collapsed below minimum height\n", stderr)
+                return false
+            }
+        }
         panel.setContentSize(NSSize(width: 400, height: 350))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        guard panes[0].frame.height >= 88, panes[1].frame.height >= 96,
+              panes[1].frame.maxY <= split.bounds.height + 1 else {
+            fputs("FAIL: Translation split panes escaped the compact window\n", stderr)
+            return false
+        }
+        print("[translation] PASS: 原文/译文分隔线可调整、重译保留位置、最小高度和紧凑窗口")
         let resizedFrame = panel.frame
         manager.text = "A new selection"
         guard manager.translatedText.isEmpty, manager.translationRequest == nil else {

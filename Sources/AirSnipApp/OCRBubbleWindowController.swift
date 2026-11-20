@@ -567,44 +567,19 @@ private struct OCRBubbleCardView: View {
             // Main Unified Card (Source + Optional Divided Translation)
             MagpieCard(cornerRadius: 10) {
                 if manager.isTranslationVisible {
-                    HStack(spacing: 8) {
-                        Text(L10n.tr("原文", "Source", in: lang))
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(p.inkSecondary)
-                        Spacer()
-                        if manager.sourceImage != nil {
-                            MagpieSegmentedPicker(
-                                options: [
-                                    (false, L10n.tr("逐行", "Lines", in: lang)),
-                                    (true, L10n.tr("合并换行", "Merge", in: lang))
-                                ],
-                                selection: $manager.mergeLineBreaks,
-                                compact: true
-                            )
+                    VSplitView {
+                        VStack(spacing: 0) {
+                            sourceHeader(palette: p, lang: lang)
+                            sourceEditorArea(palette: p, lang: lang)
+                                .frame(minHeight: 52, maxHeight: .infinity)
                         }
-                        MagpieTextAction(
-                            manager.copiedFeedback
-                                ? L10n.tr("已复制", "Copied", in: lang)
-                                : L10n.tr("复制原文", "Copy Source", in: lang)
-                        ) {
-                            manager.copyCurrentText()
-                        }
-                        .disabled(manager.text.isEmpty || manager.isRecognizing)
+                        .frame(minHeight: 88, idealHeight: 148, maxHeight: .infinity)
+                        translationSection(palette: p, lang: lang)
+                            .frame(minHeight: 96, maxHeight: .infinity)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-                }
-
-                sourceEditorArea(palette: p, lang: lang)
-                    .frame(
-                        minHeight: manager.isTranslationVisible ? 52 : 84,
-                        maxHeight: manager.isTranslationVisible ? 114 : .infinity
-                    )
-
-                if manager.isTranslationVisible {
-                    MagpieRowDivider()
-                    translationSection(palette: p, lang: lang)
+                } else {
+                    sourceEditorArea(palette: p, lang: lang)
+                        .frame(minHeight: 84, maxHeight: .infinity)
                 }
             }
             .overlay(
@@ -680,6 +655,36 @@ private struct OCRBubbleCardView: View {
         .onChange(of: manager.isTranslationVisible) { _, visible in
             if visible { editorFocused = false }
         }
+    }
+
+    private func sourceHeader(palette p: MagpiePalette, lang: AppLanguage) -> some View {
+        HStack(spacing: 8) {
+            Text(L10n.tr("原文", "Source", in: lang))
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(p.inkSecondary)
+            Spacer()
+            if manager.sourceImage != nil {
+                MagpieSegmentedPicker(
+                    options: [
+                        (false, L10n.tr("逐行", "Lines", in: lang)),
+                        (true, L10n.tr("合并换行", "Merge", in: lang))
+                    ],
+                    selection: $manager.mergeLineBreaks,
+                    compact: true
+                )
+            }
+            MagpieTextAction(
+                manager.copiedFeedback
+                    ? L10n.tr("已复制", "Copied", in: lang)
+                    : L10n.tr("复制原文", "Copy Source", in: lang)
+            ) {
+                manager.copyCurrentText()
+            }
+            .disabled(manager.text.isEmpty || manager.isRecognizing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
     @ViewBuilder
