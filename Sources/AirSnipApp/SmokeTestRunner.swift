@@ -1061,7 +1061,8 @@ public enum SmokeTestRunner {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         guard var now = calendar.date(from: DateComponents(year: 2024, month: 12, day: 30, hour: 12)),
-              let beforeMidnight = calendar.date(from: DateComponents(year: 2024, month: 12, day: 31, hour: 23, minute: 59, second: 59))
+              let batchTime = calendar.date(from: DateComponents(year: 2024, month: 12, day: 31, hour: 23, minute: 59, second: 59)),
+              let quitTime = calendar.date(from: DateComponents(year: 2025, month: 1, day: 2, hour: 23, minute: 59, second: 59))
         else { return false }
 
         let pasteboard = NSPasteboard.withUniqueName()
@@ -1072,7 +1073,10 @@ public enum SmokeTestRunner {
         }
         let directory = configURL.deletingLastPathComponent()
         let root = directory.appendingPathComponent("iSnip Pin History", isDirectory: true)
-        app.updateConfig { $0.lastSaveDirectory = directory.path }
+        app.updateConfig {
+            $0.lastSaveDirectory = directory.path
+            $0.pinHistoryLimit = 5
+        }
         defer {
             app.updateConfig { $0.pinHistoryLimit = 0 }
             app.pinManager.closeAll()
@@ -1081,38 +1085,57 @@ public enum SmokeTestRunner {
             pasteboard.releaseGlobally()
         }
 
-        func openPin(width: Int) -> Bool {
-            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)) else { return false }
-            return app.pinManager.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        func openPin(width: Int, originalText: String? = nil) -> PinWindowController? {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
+                  app.pinManager.createPin(
+                      cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil,
+                      config: app.config, originalText: originalText
+                  ) else { return nil }
+            return app.pinManager.windows.last
         }
 
-        guard openPin(width: 40) else { return false }
-        app.pinManager.windows.last?.closeSelf()
+        guard let oldest = openPin(width: 35), let immediatelyRestored = openPin(width: 40) else { return false }
+        oldest.closeSelf()
+        immediatelyRestored.closeSelf()
         app.triggerPinOrRestore()
         guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == 40 else {
             fputs("FAIL: F3 should restore a pin even when closing and restoring immediately\n", stderr)
             return false
         }
 
-        now = beforeMidnight
-        guard openPin(width: 50) else { return false }
+        now = batchTime
+        guard openPin(width: 50) != nil else { return false }
         app.pinManager.closeAll()
-        guard openPin(width: 60) else { return false }
-        app.pinManager.windows.last?.closeSelf()
-        AirSnipAppDelegate(controller: app).applicationWillTerminate(
-            Notification(name: NSApplication.willTerminateNotification, object: NSApp)
-        )
+        let originalText = "  Quit with this text\n\tstill open  "
+        guard let manuallyClosed = openPin(width: 60), openPin(width: 70) != nil,
+              let newest = openPin(width: 80, originalText: originalText) else { return false }
+        newest.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: 24, y: 16))
+        newest.adjustOpacity(delta: -1)
+        newest.window.setFrameOrigin(NSPoint(x: newest.window.frame.minX + 24, y: newest.window.frame.minY + 16))
+        let expectedFrame = newest.window.frame
+        let expectedZoom = newest.zoomScale
+        let expectedOpacity = newest.window.alphaValue
+        let expectedImage = PixelBufferRGBA(cgImage: newest.cgImage)
+        manuallyClosed.closeSelf()
+        now = quitTime
+        let willTerminate = Notification(name: NSApplication.willTerminateNotification, object: NSApp)
+        AirSnipAppDelegate(controller: app).applicationWillTerminate(willTerminate)
 
+        guard pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-02")) == 2,
+              pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-03")) == 0 else {
+            fputs("FAIL: Normal quit should save all open pins on the day the quit started\n", stderr)
+            return false
+        }
         guard pinHistoryPNGCount(at: root.appendingPathComponent("2024-12-30")) == 0,
               pinHistoryPNGCount(at: root.appendingPathComponent("2024-12-31")) == 2,
               pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-01")) == 1 else {
-            fputs("FAIL: Normal quit should finish queued writes in their close day and clean the consumed in-flight file\n", stderr)
+            fputs("FAIL: Normal quit should finish queued writes on their close day and apply the global history limit\n", stderr)
             return false
         }
 
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
-        for (index, width) in [60, 50, 40].enumerated() {
+        for (index, width) in [80, 70, 60, 50, 40].enumerated() {
             app.triggerPinOrRestore()
             guard app.pinManager.count == index + 1, app.pinManager.windows.last?.cgImage.width == width else {
                 fputs("FAIL: Reopening after normal quit should recover pins newest first across dates\n", stderr)
@@ -1120,11 +1143,30 @@ public enum SmokeTestRunner {
             }
         }
         app.triggerPinOrRestore()
-        guard app.pinManager.count == 3, pinHistoryPNGCount(at: root) == 0 else {
+        guard app.pinManager.count == 5, pinHistoryPNGCount(at: root) == 0 else {
             fputs("FAIL: Restored pins should disappear from history on disk\n", stderr)
             return false
         }
-        print("[pins] PASS: 跨午夜批量关闭使用同一天，立即退出等写盘，重开后按关闭顺序恢复")
+        guard let restored = app.pinManager.windows.first, restored.window.isVisible,
+              PixelBufferRGBA(cgImage: restored.cgImage) == expectedImage,
+              restored.window.frame == expectedFrame, restored.zoomScale == expectedZoom,
+              restored.window.alphaValue == expectedOpacity else {
+            fputs("FAIL: Reopening should restore the open pin with its image and display state at quit\n", stderr)
+            return false
+        }
+        restored.copyOriginalText()
+        guard pasteboard.string(forType: .string) == originalText else {
+            fputs("FAIL: Reopening should preserve the original text of a pin that was open at quit\n", stderr)
+            return false
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 0 }
+        AirSnipAppDelegate(controller: app).applicationWillTerminate(willTerminate)
+        guard pinHistoryPNGCount(at: root) == 0 else {
+            fputs("FAIL: Quitting should leave pin history empty when its limit is zero\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 退出保存未关闭贴图，重开按顺序恢复图像、状态和原文，并遵守全局上限")
         return true
     }
 

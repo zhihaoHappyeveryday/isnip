@@ -752,7 +752,9 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
-        controller?.pinManager.finishHistoryWrites()
+        guard let pins = controller?.pinManager else { return }
+        pins.closeAll()
+        pins.finishHistoryWrites()
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
