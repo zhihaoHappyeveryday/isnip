@@ -1,5 +1,12 @@
 # Changelog
 
+## macOS v1.0.0
+
+本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
+
+- **贴图与恢复**　恢复 0.4.0 的 `F3` 顺序。复制了想贴的图片或文字后，可以先关掉一张贴图腾位置，再按 `F3` 贴出这次复制的内容。剪贴板没有新内容时，按最近关闭的顺序逐张恢复贴图。
+- **下载**　Apple 芯片 Mac 请选择 arm64，Intel Mac 请选择 amd64。两种架构均提供 DMG、ZIP 和 SHA-256 校验文件。
+
 ## macOS v0.4.1
 
 本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
