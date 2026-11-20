@@ -536,7 +536,7 @@ final class OverlayCanvasView: NSView {
     private var windowDepthIndex: Int = 0
     private var hoveredWindowCandidate: WindowSnapCandidate?
     private var isolatedWindowCapture: IsolatedWindowCapture?
-    private var isCapturingIsolatedWindow: Bool = false
+    private(set) var isCapturingIsolatedWindow: Bool = false
     private var cursorPoint: ASPoint = ASPoint(200, 200)
 
     private let document = AnnotationDocument()
@@ -3363,6 +3363,13 @@ final class OverlayCanvasView: NSView {
                     }
                 } else if let cand = hoveredWindowCandidate ?? resolveHoveredWindowCandidate(at: pt),
                           coordinator?.config.windowSnap == true {
+                    if coordinator?.canToggleWindowPickerWithSpace == true {
+                        let defaultShadow = coordinator?.config.windowCaptureShadow ?? true
+                        let includeShadow = event.modifierFlags.contains(.option) ? !defaultShadow : defaultShadow
+                        dragOp = .none
+                        captureAndPresentIsolatedWindow(candidate: cand, includeShadow: includeShadow)
+                        return
+                    }
                     selection = cand.rect
                 }
             } else if let sel = selection, (sel.width < 4 || sel.height < 4) {
@@ -4033,18 +4040,13 @@ final class OverlayCanvasView: NSView {
             guard let self else { return }
             defer { self.isCapturingIsolatedWindow = false }
 
-            let capturedCG: CGImage
-            if let singleCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) {
-                capturedCG = singleCG
-            } else {
-                let pxRect = CGRect(
-                    x: (candidate.rect.minX * fallbackScale).rounded(.down),
-                    y: (candidate.rect.minY * fallbackScale).rounded(.down),
-                    width: max(1, (candidate.rect.width * fallbackScale).rounded()),
-                    height: max(1, (candidate.rect.height * fallbackScale).rounded())
+            guard let capturedCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) else {
+                ToastHUD.show(
+                    L10n.tr("窗口捕获失败，请重新点选；或拖动框选屏幕区域", "Window capture failed. Click again to retry, or drag to capture a screen region."),
+                    symbol: "exclamationmark.triangle.fill",
+                    tint: .systemOrange
                 )
-                guard let fallbackCG = self.snapshot.cgImage.cropping(to: pxRect) else { return }
-                capturedCG = fallbackCG
+                return
             }
             guard let rawBuf = PixelBufferRGBA(cgImage: capturedCG) else { return }
 

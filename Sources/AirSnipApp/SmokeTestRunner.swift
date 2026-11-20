@@ -8,6 +8,119 @@ import AirSnipCore
 
 public enum SmokeTestRunner {
     @MainActor
+    public static func runWindowCaptureChecks() -> Bool {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        guard CGPreflightScreenCaptureAccess(), let screen = NSScreen.main else {
+            fputs("FAIL: Window capture self-test requires screen recording permission\n", stderr)
+            return false
+        }
+        let sourceWindow = NSWindow(
+            contentRect: NSRect(x: screen.visibleFrame.minX + 100, y: screen.visibleFrame.minY + 100, width: 260, height: 180),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        sourceWindow.isReleasedWhenClosed = false
+        sourceWindow.title = "iSnip window capture test"
+        sourceWindow.backgroundColor = .systemBlue
+        sourceWindow.orderFrontRegardless()
+        defer { sourceWindow.close() }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        let canvasWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.borderless], backing: .buffered, defer: false)
+        canvasWindow.isReleasedWhenClosed = false
+        defer { canvasWindow.close() }
+        let background = PixelBufferRGBA(width: 640, height: 480, rgba: [UInt8](repeating: 255, count: 640 * 480 * 4))
+        guard let backgroundImage = background.makeCGImage() else { return false }
+        let candidateRect = ASRect(x: 80, y: 80, width: sourceWindow.frame.width, height: sourceWindow.frame.height)
+
+        func capture(mode: CaptureSessionCoordinator.SessionMode, windowID: UInt32, shadow: Bool = false,
+                     option: Bool = false, drag: Bool = false, snapEnabled: Bool = true) -> (image: CGImage?, completed: Bool) {
+            var config = AirSnipConfig()
+            config.windowCaptureShadow = shadow
+            config.windowSnap = snapEnabled
+            let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
+            coordinator.persistConfigChanges = false
+            var output: CGImage?
+            coordinator.onCompleteCopy = { image, _ in output = image }
+            coordinator.onStartOCR = { image, _ in output = image }
+            coordinator.onStartLongshot = { _, _, buffer, _ in output = buffer.makeCGImage() }
+            let snapshot = CapturedScreenSnapshot(
+                screen: screen, frameInGlobalAppKit: canvasWindow.frame,
+                frameTopDown: ASRect(x: 0, y: 0, width: 640, height: 480),
+                cgImage: backgroundImage, rawBuffer: background, backingScale: 1,
+                windowsLocalTopDown: [WindowSnapCandidate(windowID: windowID, rect: candidateRect, isMaximizedLike: false)]
+            )
+            let canvas = OverlayCanvasView(frame: NSRect(x: 0, y: 0, width: 640, height: 480), snapshot: snapshot, coordinator: coordinator, lockedInitialSelection: nil)
+            canvasWindow.contentView = canvas
+            let startPoint = NSPoint(x: candidateRect.midX, y: candidateRect.midY)
+            func mouseEvent(_ type: NSEvent.EventType, point: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil), modifierFlags: option ? [.option] : [], timestamp: 0,
+                                   windowNumber: canvasWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            canvas.mouseDown(with: mouseEvent(.leftMouseDown, point: startPoint))
+            let endPoint = drag ? NSPoint(x: startPoint.x + 60, y: startPoint.y + 40) : startPoint
+            if drag { canvas.mouseDragged(with: mouseEvent(.leftMouseDragged, point: endPoint)) }
+            canvas.mouseUp(with: mouseEvent(.leftMouseUp, point: endPoint))
+            let deadline = Date().addingTimeInterval(15)
+            while canvas.isCapturingIsolatedWindow && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            canvas.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: canvasWindow.windowNumber, context: nil, characters: "\r",
+                                                 charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!)
+            return (output, !canvas.isCapturingIsolatedWindow)
+        }
+        func hasTransparentCorners(_ image: CGImage) -> Bool {
+            guard let buffer = PixelBufferRGBA(cgImage: image) else { return false }
+            return [(0, 0), (image.width - 1, 0), (0, image.height - 1), (image.width - 1, image.height - 1)].allSatisfy {
+                buffer.pixel(x: $0.0, y: $0.1).a == 0
+            } && buffer.pixel(x: image.width / 2, y: image.height / 2).a == 255
+        }
+        let windowID = UInt32(sourceWindow.windowNumber)
+        for mode: CaptureSessionCoordinator.SessionMode in [.normalCapture, .directWindowCapture] {
+            let result = capture(mode: mode, windowID: windowID)
+            guard result.completed, let image = result.image, hasTransparentCorners(image),
+                  let png = try? ImageEncoder.encode(image, format: .png, smartPngCompression: true),
+                  let source = CGImageSourceCreateWithData(png as CFData, nil),
+                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil), hasTransparentCorners(decoded) else {
+                fputs("FAIL: Window click or compressed PNG lost native transparent corners\n", stderr)
+                return false
+            }
+            let shadowed = capture(mode: mode, windowID: windowID, shadow: true)
+            let toggled = capture(mode: mode, windowID: windowID, shadow: true, option: true)
+            guard let shadowImage = shadowed.image, hasTransparentCorners(shadowImage), shadowImage.width > image.width,
+                  let toggledImage = toggled.image, hasTransparentCorners(toggledImage), toggledImage.width == image.width else {
+                fputs("FAIL: Window shadow setting or Option override changed\n", stderr)
+                return false
+            }
+            let failed = capture(mode: mode, windowID: 0)
+            guard failed.completed, failed.image == nil else {
+                fputs("FAIL: Failed window capture silently exported the desktop crop\n", stderr)
+                return false
+            }
+            let dragged = capture(mode: mode, windowID: 0, drag: true)
+            guard let region = dragged.image, region.width == 60, region.height == 40,
+                  PixelBufferRGBA(cgImage: region)?.pixel(x: 0, y: 0).a == 255 else {
+                fputs("FAIL: Manual region capture changed\n", stderr)
+                return false
+            }
+        }
+        for mode: CaptureSessionCoordinator.SessionMode in [.directOCRCapture, .directLongshotCapture] {
+            guard let image = capture(mode: mode, windowID: 0).image,
+                  image.width == Int(candidateRect.width), PixelBufferRGBA(cgImage: image)?.pixel(x: 0, y: 0).a == 255 else {
+                fputs("FAIL: Direct OCR or longshot no longer uses its original screen region\n", stderr)
+                return false
+            }
+        }
+        guard capture(mode: .normalCapture, windowID: windowID, snapEnabled: false).image == nil else {
+            fputs("FAIL: Disabled window snap still captured a window\n", stderr)
+            return false
+        }
+        print("[window-capture] PASS: 原生透明四角、PNG 压缩、窗口吸附、独立捕获、阴影切换、失败不回退及手动框选/OCR/长截图边界")
+        return true
+    }
+
+    @MainActor
     public static func runTranslationChecks() -> Bool {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)

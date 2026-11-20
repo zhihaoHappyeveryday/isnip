@@ -721,6 +721,10 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
 @main
 public enum AirSnipMain {
     public static func main() {
+        if CommandLine.arguments.contains("--window-capture-self-test") {
+            let ok = MainActor.assumeIsolated { SmokeTestRunner.runWindowCaptureChecks() }
+            exit(ok ? 0 : 1)
+        }
         if CommandLine.arguments.contains("--translation-self-test") {
             let ok = MainActor.assumeIsolated { SmokeTestRunner.runTranslationChecks() }
             exit(ok ? 0 : 1)
