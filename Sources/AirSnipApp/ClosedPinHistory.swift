@@ -28,12 +28,36 @@ final class ClosedPinHistory {
         var reportedWriteFailure = false
     }
 
+    private struct HistoryRootIdentity: Codable, Hashable {
+        let fileNumber: UInt64
+        let volumeUUID: String?
+
+        init?(at url: URL) {
+            let directory = url.resolvingSymlinksInPath()
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: directory.path),
+                  attributes[.type] as? FileAttributeType == .typeDirectory,
+                  let number = attributes[.systemFileNumber] as? NSNumber,
+                  directory.withUnsafeFileSystemRepresentation({ path in
+                      guard let path else { return false }
+                      return access(path, X_OK) == 0
+                  }) else { return nil }
+            fileNumber = number.uint64Value
+            volumeUUID = (try? directory.resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString
+        }
+    }
+
     private struct PinFiles: Codable, Hashable {
         let dayDirectory: URL
         let id: UUID
         let hasOriginalText: Bool
+        let rootIdentity: HistoryRootIdentity?
 
-        var historyRoot: URL { dayDirectory.deletingLastPathComponent() }
+        var isHistoryRootAvailable: Bool {
+            let root = dayDirectory.deletingLastPathComponent()
+            guard let identity = HistoryRootIdentity(at: root) else { return false }
+            // Manifests from earlier builds recorded the directory path alone.
+            return rootIdentity == nil || rootIdentity == identity
+        }
 
         private var baseURL: URL {
             dayDirectory.appendingPathComponent("pin-\(id.uuidString)")
@@ -122,14 +146,17 @@ final class ClosedPinHistory {
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd"
         let dayDirectory = historyRoot.appendingPathComponent(formatter.string(from: closedAt), isDirectory: true)
-        guard (try? Self.ensureHistoryRootExists(historyRoot)) != nil else {
+        guard (try? Self.ensureHistoryRootExists(historyRoot)) != nil,
+              let rootIdentity = HistoryRootIdentity(at: historyRoot) else {
             onWriteFailure?()
             return
         }
         legacySessions.cleanUp(in: historyRoot)
         let batch = CloseBatch()
         let closed = snapshots.suffix(limit).map { snapshot in
-            let files = PinFiles(dayDirectory: dayDirectory, id: UUID(), hasOriginalText: snapshot.originalText != nil)
+            let files = PinFiles(
+                dayDirectory: dayDirectory, id: UUID(), hasOriginalText: snapshot.originalText != nil, rootIdentity: rootIdentity
+            )
             return Entry(
                 record: Record(files: files, displayState: snapshot.displayState),
                 content: .pending(image: snapshot.image, originalText: snapshot.originalText, batch: batch)
@@ -144,12 +171,10 @@ final class ClosedPinHistory {
         writeNext()
     }
 
-    func trim(to limit: Int) {
+    func trim(to limit: Int) -> Bool {
         let excess = entries.count - limit
-        guard excess > 0 else { return }
-        if !discard(entries.prefix(excess), keeping: Array(entries.dropFirst(excess))) {
-            onWriteFailure?()
-        }
+        guard excess > 0 else { return true }
+        return discard(entries.prefix(excess), keeping: Array(entries.dropFirst(excess)))
     }
 
     func restoreLast() -> (snapshot: PinSnapshot?, skippedUnreadable: Bool) {
@@ -161,8 +186,9 @@ final class ClosedPinHistory {
             case .pending(let image, let originalText, _):
                 snapshot = PinSnapshot(image: image, originalText: originalText, displayState: entry.record.displayState)
             case .stored:
+                guard entry.record.files.isHistoryRootAvailable else { continue }
                 snapshot = Self.readSnapshot(entry.record)
-                if snapshot == nil, !Self.historyRootIsAvailable(entry.record.files.historyRoot) { continue }
+                if snapshot == nil, !entry.record.files.isHistoryRootAvailable { continue }
             }
 
             var next = entries
@@ -272,7 +298,8 @@ final class ClosedPinHistory {
     }
 
     private nonisolated static func writeSnapshot(_ image: CGImage, originalText: String?, to files: PinFiles) -> Bool {
-        autoreleasepool {
+        guard files.isHistoryRootAvailable else { return false }
+        return autoreleasepool {
             do {
                 try ensureHistoryRootExists(files.dayDirectory, attributes: [.posixPermissions: 0o700])
                 guard let destination = CGImageDestinationCreateWithURL(files.imageURL as CFURL, UTType.png.identifier as CFString, 1, nil) else {
@@ -303,28 +330,18 @@ final class ClosedPinHistory {
     }
 
     private nonisolated static func removeFiles(_ files: PinFiles) -> Bool {
-        let root = files.historyRoot
-        let imageRemoved = removeFile(at: files.imageURL, historyRoot: root)
-        let textRemoved = files.textURL.map { removeFile(at: $0, historyRoot: root) } ?? true
+        let imageRemoved = removeFile(at: files.imageURL, from: files)
+        let textRemoved = files.textURL.map { removeFile(at: $0, from: files) } ?? true
         return imageRemoved && textRemoved
     }
 
-    private nonisolated static func removeFile(at url: URL, historyRoot: URL) -> Bool {
-        url.withUnsafeFileSystemRepresentation { path in
+    private nonisolated static func removeFile(at url: URL, from files: PinFiles) -> Bool {
+        guard files.isHistoryRootAvailable else { return false }
+        return url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return false }
             if unlink(path) == 0 { return true }
             guard errno == ENOENT || errno == ENOTDIR else { return false }
-            return historyRootIsAvailable(historyRoot)
-        }
-    }
-
-    private nonisolated static func historyRootIsAvailable(_ root: URL) -> Bool {
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else { return false }
-        return root.withUnsafeFileSystemRepresentation { path in
-            guard let path else { return false }
-            return access(path, X_OK) == 0
+            return files.isHistoryRootAvailable
         }
     }
 }

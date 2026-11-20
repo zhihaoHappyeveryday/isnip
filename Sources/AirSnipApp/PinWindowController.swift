@@ -100,8 +100,12 @@ public final class PinManager: ObservableObject {
         )
     }
 
-    func trimClosedHistory(to limit: Int) {
-        history.trim(to: limit)
+    func trimClosedHistory(to limit: Int) -> Bool {
+        guard history.trim(to: limit) else {
+            showHistoryWarning("无法更新可恢复贴图数，请重试", "Could not update the recoverable pin limit. Please try again.")
+            return false
+        }
+        return true
     }
 
     func finishHistoryWrites() {

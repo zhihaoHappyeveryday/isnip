@@ -412,6 +412,13 @@ public enum OutputService {
         fileprivate let changeCount: Int
     }
 
+    private struct ClipboardRewrite: Codable {
+        let bootSessionID: UUID
+        let pasteboardName: String
+        let changeCount: Int
+        let originalChangeCount: Int
+    }
+
     // Scope pasteboard change counts to the system boot that issued them.
     private static let clipboardBootSessionID: UUID = {
         var value = [CChar](repeating: 0, count: 37)
@@ -431,12 +438,13 @@ public enum OutputService {
         // Omitting uncompressed TIFF avoids 10-20 MB of extra clipboard data.
         item.setData(pngData, forType: .png)
         if let originalChangeCount {
-            item.setPropertyList([
-                "bootSessionID": clipboardBootSessionID.uuidString,
-                "pasteboardName": pasteboard.name.rawValue,
-                "changeCount": changeCount,
-                "originalChangeCount": originalChangeCount,
-            ], forType: clipboardRewriteType)
+            let rewrite = ClipboardRewrite(
+                bootSessionID: clipboardBootSessionID, pasteboardName: pasteboard.name.rawValue,
+                changeCount: changeCount, originalChangeCount: originalChangeCount
+            )
+            if let data = try? PropertyListEncoder().encode(rewrite) {
+                item.setData(data, forType: clipboardRewriteType)
+            }
         }
         guard pasteboard.writeObjects([item]) else { return nil }
         return changeCount
@@ -531,12 +539,11 @@ public enum OutputService {
         let name = pasteboard.name.rawValue
         var copyChangeCount = changeCount
         // A recopy may carry the metadata, but it has a different change count.
-        if let rewrite = pasteboard.propertyList(forType: clipboardRewriteType) as? [String: Any],
-           rewrite["bootSessionID"] as? String == clipboardBootSessionID.uuidString,
-           rewrite["pasteboardName"] as? String == name,
-           rewrite["changeCount"] as? Int == changeCount,
-           let originalChangeCount = rewrite["originalChangeCount"] as? Int {
-            copyChangeCount = originalChangeCount
+        if let data = pasteboard.data(forType: clipboardRewriteType),
+           let rewrite = try? PropertyListDecoder().decode(ClipboardRewrite.self, from: data),
+           rewrite.bootSessionID == clipboardBootSessionID, rewrite.pasteboardName == name,
+           rewrite.changeCount == changeCount {
+            copyChangeCount = rewrite.originalChangeCount
         }
         let copyID = ClipboardCopyID(
             bootSessionID: clipboardBootSessionID, pasteboardName: name, changeCount: copyChangeCount

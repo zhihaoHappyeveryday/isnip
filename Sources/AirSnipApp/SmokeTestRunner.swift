@@ -989,6 +989,7 @@ public enum SmokeTestRunner {
         try Data().write(to: previousDay.appendingPathComponent("reference.png"))
         app.updateConfig { $0.pinHistoryDirectory = current.path }
         try files.moveItem(at: previous, to: disconnected)
+        try files.createDirectory(at: previous, withIntermediateDirectories: false)
 
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard) { closeTime }
@@ -1000,6 +1001,7 @@ public enum SmokeTestRunner {
         app.triggerPinOrRestore()
         guard app.pinManager.count == 1 else { return false }
         app.updateConfig { $0.pinHistoryLimit = 1 }
+        try files.removeItem(at: previous)
         try files.moveItem(at: disconnected, to: previous)
 
         app.triggerPinOrRestore()
@@ -1020,14 +1022,23 @@ public enum SmokeTestRunner {
         app.updateConfig { $0.pinHistoryDirectory = current.path }
         app.pinManager.closeAll()
         app.pinManager.finishHistoryWrites()
-        guard pinHistoryPNGCount(at: previousDay) == 2, pinHistoryPNGCount(at: currentDay) == 1 else { return false }
+        guard pinHistoryPNGCount(at: previousDay) == 2, pinHistoryPNGCount(at: currentDay) == 1,
+              let currentImage = try files.contentsOfDirectory(at: currentDay, includingPropertiesForKeys: nil)
+                  .first(where: { $0.pathExtension == "png" }) else { return false }
         try "Keep these notes".write(to: currentDay.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
         try files.moveItem(at: previous, to: disconnected)
         try files.moveItem(at: current, to: disconnectedCurrent)
+        try files.createDirectory(at: currentDay, withIntermediateDirectories: true)
+        let replacementData = Data("Keep this file on the replacement directory".utf8)
+        try replacementData.write(to: currentImage)
         app.updateConfig { $0.pinHistoryLimit = 0 }
 
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        guard (try? Data(contentsOf: currentImage)) == replacementData else {
+            fputs("FAIL: Deferred cleanup should leave files in a replacement history directory intact\n", stderr)
+            return false
+        }
         try files.moveItem(at: disconnected, to: previous)
         app.triggerPinOrRestore()
         guard app.pinManager.count == 0,
@@ -1035,6 +1046,7 @@ public enum SmokeTestRunner {
             fputs("FAIL: Pending deletion should survive a restart and finish when a cleared history directory returns\n", stderr)
             return false
         }
+        try files.removeItem(at: current)
         try files.moveItem(at: disconnectedCurrent, to: current)
         let workspace = NSWorkspace.shared
         workspace.notificationCenter.post(name: NSWorkspace.didMountNotification, object: workspace)
@@ -1332,11 +1344,12 @@ public enum SmokeTestRunner {
         let files = FileManager.default
         let history = ClosedPinHistory(configURL: nil)
         defer {
-            history.trim(to: 0)
+            _ = history.trim(to: 0)
             history.finishPendingWrites()
         }
         let workingRoot = directory.appendingPathComponent("write-history", isDirectory: true)
         let failingRoot = directory.appendingPathComponent("unavailable-history", isDirectory: true)
+        let closedAt = Date()
         let displayState = PinDisplayState(
             frame: CGRect(x: 0, y: 0, width: 32, height: 32), baseSize: CGSize(width: 32, height: 32),
             backingScale: 1, zoomScale: 1, preferredOpacity: 1, effectiveWindowOpacity: 1,
@@ -1346,31 +1359,32 @@ public enum SmokeTestRunner {
             PinSnapshot(image: image, originalText: text, displayState: displayState)
         }
 
-        // Make a valid session directory first, then replace it with a file so the actual write fails.
+        // Replace the expected day directory with a file so the actual write fails.
         weak var seedImage: CGImage?
         let seeded = autoreleasepool {
             guard let sample = image.cropping(to: displayState.frame) else { return false }
             seedImage = sample
-            history.remember([snapshot(sample, text: "seed")], limit: 2, historyRoot: failingRoot)
+            history.remember([snapshot(sample, text: "seed")], limit: 2, historyRoot: failingRoot, closedAt: closedAt)
             return true
         }
         guard seeded, waitForPinHistoryWork({ seedImage == nil }),
               history.restoreLast().snapshot?.originalText == "seed",
-              let sessionDirectory = try files.contentsOfDirectory(
+              let dayDirectory = try files.contentsOfDirectory(
                   at: failingRoot, includingPropertiesForKeys: nil
               ).first else {
-            fputs("FAIL: Could not prepare a writable pin history session for the failure fixture\n", stderr)
+            fputs("FAIL: Could not prepare a writable day directory for the pin history failure fixture\n", stderr)
             return false
         }
-        try files.removeItem(at: sessionDirectory)
-        try Data().write(to: URL(fileURLWithPath: sessionDirectory.path, isDirectory: false))
+        try files.removeItem(at: dayDirectory)
+        try Data().write(to: URL(fileURLWithPath: dayDirectory.path, isDirectory: false))
 
         var failures = 0
         history.onWriteFailure = { failures += 1 }
         history.remember(
-            [snapshot(image, text: "oldest"), snapshot(image, text: "newest")], limit: 2, historyRoot: workingRoot
+            [snapshot(image, text: "oldest"), snapshot(image, text: "newest")],
+            limit: 2, historyRoot: workingRoot, closedAt: closedAt
         )
-        history.remember([snapshot(image, text: "failed")], limit: 2, historyRoot: failingRoot)
+        history.remember([snapshot(image, text: "failed")], limit: 2, historyRoot: failingRoot, closedAt: closedAt)
         guard waitForPinHistoryWork({ failures > 0 }), failures == 1,
               history.restoreLast().snapshot?.originalText == "newest", history.isEmpty,
               pinHistoryPNGCount(at: workingRoot) == 0 else {
@@ -1421,9 +1435,29 @@ public enum SmokeTestRunner {
 
         pins.closeAll()
         pins.finishHistoryWrites()
+        do {
+            let files = FileManager.default
+            let manifest = app.configURL.deletingPathExtension().appendingPathExtension("pin-history.json")
+            let backup = manifest.appendingPathExtension("fixture-backup")
+            try files.moveItem(at: manifest, to: backup)
+            try files.createDirectory(at: manifest, withIntermediateDirectories: false)
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            try files.removeItem(at: manifest)
+            try files.moveItem(at: backup, to: manifest)
+        } catch {
+            fputs("FAIL: Could not simulate a manifest write failure while disabling pin history: \(error)\n", stderr)
+            return false
+        }
+        guard app.config.pinHistoryLimit == 10, AirSnipConfig.load(from: app.configURL).pinHistoryLimit == 10,
+              pinHistoryPNGCount(at: directory) == 5 else {
+            fputs("FAIL: A failed history clear should preserve the previously applied limit and saved pins\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 清空写入失败时保留原上限和历史，可再次停用")
+
         app.updateConfig { $0.pinHistoryLimit = 0 }
         app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 0, pinHistoryPNGCount(at: directory) == 0 else {
+        guard app.config.pinHistoryLimit == 0, pins.count == 0, pinHistoryPNGCount(at: directory) == 0 else {
             fputs("FAIL: Disabling pin history should immediately clear it\n", stderr)
             return false
         }

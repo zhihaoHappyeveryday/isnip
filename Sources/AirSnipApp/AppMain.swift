@@ -53,7 +53,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         pinManager.getConfig = { [weak self] in
             self?.config ?? AirSnipConfig()
         }
-        pinManager.trimClosedHistory(to: loadedConfig.pinHistoryLimit)
+        _ = pinManager.trimClosedHistory(to: loadedConfig.pinHistoryLimit)
         pinManager.updateConfig = { [weak self] block in
             self?.updateConfig(block)
         }
@@ -170,10 +170,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         let oldLang = config.language
         let oldSelectionButton = config.translation.showSelectionButton
         let oldPinHistoryLimit = config.pinHistoryLimit
-        mutate(&config)
-        if config.pinHistoryLimit != oldPinHistoryLimit {
-            pinManager.trimClosedHistory(to: config.pinHistoryLimit)
+        var next = config
+        mutate(&next)
+        // Retry a failed trim at launch before raising the saved limit.
+        if next.pinHistoryLimit != oldPinHistoryLimit,
+           !pinManager.trimClosedHistory(to: min(oldPinHistoryLimit, next.pinHistoryLimit)) {
+            next.pinHistoryLimit = oldPinHistoryLimit
         }
+        config = next
         L10n.current = config.language
         try? config.save(to: configURL)
         if config.language != oldLang {
