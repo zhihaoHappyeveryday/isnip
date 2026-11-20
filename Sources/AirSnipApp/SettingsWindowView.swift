@@ -3,8 +3,6 @@ import Carbon
 import SwiftUI
 import AirSnipCore
 
-private let dingDingServiceURL = URL(string: "https://dingding.yinso.com")!
-
 @MainActor
 public final class SettingsWindowController {
     private var window: NSWindow?
@@ -173,18 +171,15 @@ public struct SettingsRootView: View {
     @State private var selectedTab: SettingsTab
     @State private var searchQuery: String
     @State private var recordingSlot: String?
-    @State private var showDingDingQR: Bool
 
     public init(
         app: AirSnipAppController,
         initialTab: SettingsTab = .general,
-        initialSearchQuery: String = "",
-        initialShowDingDingQR: Bool = false
+        initialSearchQuery: String = ""
     ) {
         self.app = app
         self._selectedTab = State(initialValue: initialTab)
         self._searchQuery = State(initialValue: initialSearchQuery)
-        self._showDingDingQR = State(initialValue: initialShowDingDingQR)
     }
 
     private var lang: AppLanguage { app.config.language }
@@ -193,133 +188,111 @@ public struct SettingsRootView: View {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func presentDingDingQR() {
-        withAnimation(.easeOut(duration: 0.15)) {
-            showDingDingQR = true
-        }
-    }
-
     public var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
 
-        ZStack {
-            VStack(spacing: 0) {
-                // Row 1: Clean Unified Brand Header Bar (Traffic Lights + Brand + Refresh & Settings)
-                HStack(spacing: 0) {
-                    HStack(spacing: 7) {
-                        MagpieBrandMark(size: 17)
-                        Text("iSnip")
-                            .font(.system(size: 14.5, weight: .bold))
-                            .foregroundStyle(p.inkPrimary)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .padding(.leading, 78)
-
-                    Spacer(minLength: 12)
-
-                    HStack(spacing: 6) {
-                        HeaderIconButton(
-                            symbol: "arrow.clockwise",
-                            isActive: false,
-                            spinning: updateState.isChecking,
-                            helpText: L10n.tr("检查更新", "Check for Updates", in: lang)
-                        ) {
-                            updateState.checkNow(lang: lang, showToast: selectedTab != .about)
-                        }
-
-                        HeaderIconButton(
-                            symbol: "gearshape",
-                            isActive: true,
-                            helpText: L10n.tr("设置", "Settings", in: lang)
-                        ) {
-                            if !searchQuery.isEmpty {
-                                withAnimation(.easeOut(duration: 0.14)) {
-                                    searchQuery = ""
-                                }
-                            }
-                        }
-                    }
-                    .padding(.trailing, 18)
+        VStack(spacing: 0) {
+            // Row 1: Clean Unified Brand Header Bar (Traffic Lights + Brand + Refresh & Settings)
+            HStack(spacing: 0) {
+                HStack(spacing: 7) {
+                    MagpieBrandMark(size: 17)
+                    Text("iSnip")
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundStyle(p.inkPrimary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
-                .frame(height: 52)
+                .padding(.leading, 78)
 
-                // Row 2: Secondary Category Pill Tabs + Search Input
-                HStack(spacing: 12) {
-                    HStack(spacing: 4) {
-                        ForEach(SettingsTab.allCases) { tab in
-                            SubTabPillButton(
-                                title: tab.title(in: lang),
-                                isSelected: trimmedSearch.isEmpty && selectedTab == tab
-                            ) {
-                                withAnimation(.easeOut(duration: 0.14)) {
-                                    searchQuery = ""
-                                    selectedTab = tab
-                                }
+                Spacer(minLength: 12)
+
+                HStack(spacing: 6) {
+                    HeaderIconButton(
+                        symbol: "arrow.clockwise",
+                        isActive: false,
+                        spinning: updateState.isChecking,
+                        helpText: L10n.tr("检查更新", "Check for Updates", in: lang)
+                    ) {
+                        updateState.checkNow(lang: lang, showToast: selectedTab != .about)
+                    }
+
+                    HeaderIconButton(
+                        symbol: "gearshape",
+                        isActive: true,
+                        helpText: L10n.tr("设置", "Settings", in: lang)
+                    ) {
+                        if !searchQuery.isEmpty {
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                searchQuery = ""
                             }
                         }
                     }
+                }
+                .padding(.trailing, 18)
+            }
+            .frame(height: 52)
 
-                    Spacer(minLength: 12)
+            // Row 2: Secondary Category Pill Tabs + Search Input
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    ForEach(SettingsTab.allCases) { tab in
+                        SubTabPillButton(
+                            title: tab.title(in: lang),
+                            isSelected: trimmedSearch.isEmpty && selectedTab == tab
+                        ) {
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                searchQuery = ""
+                                selectedTab = tab
+                            }
+                        }
+                    }
+                }
 
-                    SettingsSearchField(text: $searchQuery, lang: lang)
-                        .frame(width: 216)
+                Spacer(minLength: 12)
+
+                SettingsSearchField(text: $searchQuery, lang: lang)
+                    .frame(width: 216)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 38)
+
+            // Row 3: Continuous White Card Content Area
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !trimmedSearch.isEmpty {
+                        SettingsSearchResultsPane(
+                            app: app,
+                            query: trimmedSearch,
+                            updateState: updateState,
+                            recordingSlot: $recordingSlot,
+                            onSelectTab: { tab in
+                                searchQuery = ""
+                                selectedTab = tab
+                            }
+                        )
+                    } else {
+                        switch selectedTab {
+                        case .general:
+                            GeneralSettingsPane(app: app)
+                        case .captureAndPin:
+                            CaptureAndPinPane(app: app)
+                        case .toolbar:
+                            ToolbarSettingsPane(app: app)
+                        case .hotkeys:
+                            HotkeysSettingsPane(app: app, recordingSlot: $recordingSlot)
+                        case .editor:
+                            EditorDefaultsPane(app: app)
+                        case .ocr:
+                            OCRSettingsPane(app: app)
+                        case .about:
+                            AboutSettingsPane(app: app, updateState: updateState)
+                        }
+                    }
                 }
                 .padding(.horizontal, 20)
-                .frame(height: 38)
-
-                // Row 3: Continuous White Card Content Area
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if !trimmedSearch.isEmpty {
-                            SettingsSearchResultsPane(
-                                app: app,
-                                query: trimmedSearch,
-                                updateState: updateState,
-                                recordingSlot: $recordingSlot,
-                                onSelectTab: { tab in
-                                    searchQuery = ""
-                                    selectedTab = tab
-                                },
-                                onShowDingDingQR: presentDingDingQR
-                            )
-                        } else {
-                            switch selectedTab {
-                            case .general:
-                                GeneralSettingsPane(app: app)
-                            case .captureAndPin:
-                                CaptureAndPinPane(app: app)
-                            case .toolbar:
-                                ToolbarSettingsPane(app: app)
-                            case .hotkeys:
-                                HotkeysSettingsPane(app: app, recordingSlot: $recordingSlot)
-                            case .editor:
-                                EditorDefaultsPane(app: app)
-                            case .ocr:
-                                OCRSettingsPane(app: app)
-                            case .about:
-                                AboutSettingsPane(
-                                    app: app,
-                                    updateState: updateState,
-                                    onShowDingDingQR: presentDingDingQR
-                                )
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
-                    .padding(.bottom, 20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-
-            if showDingDingQR {
-                DingDingQRModalOverlay(lang: lang) {
-                    withAnimation(.easeOut(duration: 0.14)) {
-                        showDingDingQR = false
-                    }
-                }
-                .transition(.opacity)
+                .padding(.top, 8)
+                .padding(.bottom, 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .environment(\.appLanguage, lang)
@@ -329,217 +302,20 @@ public struct SettingsRootView: View {
     }
 }
 
-private struct DingDingServiceSupportRow: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let lang: AppLanguage
-    let onShowQR: () -> Void
-    @State private var isLinkHovered = false
+private struct ProjectInfoRow: View {
+    @Environment(\.appLanguage) private var lang
 
     var body: some View {
-        let p = MagpiePalette(colorScheme: colorScheme)
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(L10n.tr("服务支持", "Service Provider", in: lang))
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(p.inkPrimary)
-
-                Button(action: onShowQR) {
-                    HStack(spacing: 3.5) {
-                        if lang.isEnglish {
-                            HStack(spacing: 0) {
-                                Text("Powered by ")
-                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
-                                Text("【叮叮提醒】")
-                                    .fontWeight(.medium)
-                                    .foregroundStyle(p.inkPrimary)
-                                Text(" WeChat Mini Program")
-                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
-                            }
-                            .font(.system(size: 12))
-                        } else {
-                            HStack(spacing: 0) {
-                                Text("本程序由")
-                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
-                                Text("【叮叮提醒】")
-                                    .fontWeight(.medium)
-                                    .foregroundStyle(p.inkPrimary)
-                                Text("微信小程序提供服务")
-                                    .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkSecondary)
-                            }
-                            .font(.system(size: 12))
-                        }
-                        Image(systemName: "qrcode")
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(isLinkHovered ? p.inkPrimary : p.inkTertiary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { isLinkHovered = $0 }
-                .help(L10n.tr("点击查看【叮叮提醒】微信小程序码", "Click to view 【叮叮提醒】 WeChat Mini Program QR code", in: lang))
-            }
-
-            Spacer(minLength: 14)
-
-            MagpieTextAction(L10n.tr("小程序码", "Show QR Code", in: lang), prominent: true) {
-                onShowQR()
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12.5)
-    }
-}
-
-private enum DingDingMiniProgramQRLoader {
-    static func bundledImage() -> NSImage? {
-        if let url = Bundle.main.url(forResource: "dingding-mp-qr", withExtension: "jpg"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        let devURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("Assets/dingding-mp-qr.jpg")
-        if let img = NSImage(contentsOf: devURL) {
-            return img
-        }
-        return nil
-    }
-
-    static func fetchRemoteImage() async -> NSImage? {
-        struct Envelope: Decodable {
-            struct Payload: Decodable { let qrcode: String }
-            let code: Int
-            let data: Payload?
-        }
-        for endpoint in [
-            "https://dingding.yinso.com/mp/api/desktop/mp_qrcode",
-            "https://dingding.llkan.com/mp/api/desktop/mp_qrcode"
-        ] {
-            guard let url = URL(string: endpoint) else { continue }
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.timeoutInterval = 8
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = Data("{}".utf8)
-            guard let (data, resp) = try? await URLSession.shared.data(for: req),
-                  (resp as? HTTPURLResponse)?.statusCode == 200,
-                  let env = try? JSONDecoder().decode(Envelope.self, from: data),
-                  env.code == 0,
-                  let dataURI = env.data?.qrcode,
-                  let comma = dataURI.firstIndex(of: ","),
-                  let raw = Data(base64Encoded: String(dataURI[dataURI.index(after: comma)...])),
-                  let img = NSImage(data: raw) else {
-                continue
-            }
-            return img
-        }
-        return nil
-    }
-}
-
-private struct DingDingQRModalOverlay: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let lang: AppLanguage
-    let onClose: () -> Void
-    @State private var qrImage: NSImage? = DingDingMiniProgramQRLoader.bundledImage()
-    @State private var loadFailed = false
-    @State private var closeHovered = false
-
-    var body: some View {
-        let p = MagpiePalette(colorScheme: colorScheme)
-        ZStack {
-            Color.black.opacity(colorScheme == .dark ? 0.52 : 0.24)
-                .ignoresSafeArea()
-                .onTapGesture(perform: onClose)
-
-            VStack(spacing: 14) {
-                HStack(alignment: .center) {
-                    Text("叮叮提醒")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(p.inkPrimary)
-                    Spacer()
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(closeHovered ? p.inkPrimary : p.inkSecondary)
-                            .frame(width: 24, height: 24)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(closeHovered ? p.segmentedTrack : Color.clear)
-                            )
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { closeHovered = $0 }
-                    .keyboardShortcut(.cancelAction)
-                }
-
-                Text(L10n.tr(
-                    "微信扫一扫，打开【叮叮提醒】小程序",
-                    "Scan with WeChat to open 【叮叮提醒】 Mini Program",
-                    in: lang
-                ))
-                .font(.system(size: 12))
-                .foregroundStyle(p.inkSecondary)
-                .multilineTextAlignment(.center)
-
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.black.opacity(0.08), lineWidth: 1)
-                        )
-
-                    if let qrImage {
-                        Image(nsImage: qrImage)
-                            .resizable()
-                            .interpolation(.high)
-                            .antialiased(true)
-                            .frame(width: 184, height: 184)
-                    } else if loadFailed {
-                        Text(L10n.tr("二维码加载失败，请稍后重试", "Failed to load QR code", in: lang))
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.gray)
-                            .padding(16)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                .frame(width: 204, height: 204)
-
-                HStack(spacing: 8) {
-                    Text(L10n.tr("微信搜索：叮叮提醒", "WeChat Search: 叮叮提醒", in: lang))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(p.inkTertiary)
-                    Text("·")
-                        .foregroundStyle(p.inkTertiary)
-                    MagpieTextAction(L10n.tr("访问官网 ↗", "Website ↗", in: lang)) {
-                        NSWorkspace.shared.open(dingDingServiceURL)
-                    }
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 14)
-            .frame(width: 288)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(p.cardBg)
-                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.14), radius: 22, x: 0, y: 8)
+        MagpieSettingRow(
+            title: L10n.tr("项目说明", "Project Info", in: lang),
+            subtitle: L10n.tr(
+                "本项目基于 zzusec/isnip 二次开发而成，后续暂不持续维护。",
+                "This project is based on zzusec/isnip. Ongoing maintenance is currently not planned.",
+                in: lang
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(p.cardBorder, lineWidth: 1)
-            )
-            .task {
-                if qrImage == nil {
-                    if let remote = await DingDingMiniProgramQRLoader.fetchRemoteImage() {
-                        qrImage = remote
-                    } else {
-                        loadFailed = true
-                    }
-                }
+        ) {
+            MagpieTextAction(L10n.tr("原项目", "Original Project", in: lang)) {
+                NSWorkspace.shared.open(URL(string: "https://github.com/zzusec/isnip")!)
             }
         }
     }
@@ -1989,7 +1765,6 @@ private struct AboutSettingsPane: View {
     @Environment(\.appLanguage) private var lang
     @ObservedObject var app: AirSnipAppController
     @ObservedObject var updateState: SettingsUpdateState
-    let onShowDingDingQR: () -> Void
 
     var body: some View {
         let p = MagpiePalette(colorScheme: colorScheme)
@@ -2133,7 +1908,7 @@ private struct AboutSettingsPane: View {
 
             MagpieRowDivider()
 
-            DingDingServiceSupportRow(lang: lang, onShowQR: onShowDingDingQR)
+            ProjectInfoRow()
         }
     }
 }
@@ -2148,7 +1923,6 @@ private struct SettingsSearchResultsPane: View {
     @ObservedObject var updateState: SettingsUpdateState
     @Binding var recordingSlot: String?
     let onSelectTab: (SettingsTab) -> Void
-    let onShowDingDingQR: () -> Void
 
     private struct SearchEntry: Identifiable {
         let id: String
@@ -2402,8 +2176,8 @@ private struct SettingsSearchResultsPane: View {
             SearchEntry(id: "ab.pin-history", keywords: "关于 贴图历史目录 存储路径 恢复缓存 about pin history directory storage cache") {
                 AnyView(PinHistoryDirectoryRow(app: app, subtitle: SettingsTab.about.title(in: lang)))
             },
-            SearchEntry(id: "ab.dingding", keywords: "关于 about 服务支持 叮叮提醒 微信小程序 提供服务 二维码 小程序码 dingding wechat mini program service provider qrcode yinso") {
-                AnyView(DingDingServiceSupportRow(lang: lang, onShowQR: onShowDingDingQR))
+            SearchEntry(id: "ab.project", keywords: "关于 项目说明 原项目 二次开发 维护 about project info original project maintenance zzusec/isnip") {
+                AnyView(ProjectInfoRow())
             }
         ]
 

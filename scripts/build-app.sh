@@ -41,9 +41,6 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Helpers"
 
 cp "$bin_dir/iSnip" "$app/Contents/MacOS/iSnip"
 cp "$root/Assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
-if [ -f "$root/Assets/dingding-mp-qr.jpg" ]; then
-  cp "$root/Assets/dingding-mp-qr.jpg" "$app/Contents/Resources/dingding-mp-qr.jpg"
-fi
 cp "$root/Info.plist" "$app/Contents/Info.plist"
 
 if [ -d "$helpers_dir" ]; then

@@ -1791,16 +1791,16 @@ public enum SmokeTestRunner {
                         appearance: .darkAqua,
                         to: dirURL.appendingPathComponent("07_about_en_dark.png")
                     )
+                    renderSettingsWindowSnapshot(
+                        rootView: SettingsRootView(app: dummyApp, initialSearchQuery: "Project Info"),
+                        appearance: .aqua,
+                        to: dirURL.appendingPathComponent("13_project_info_search_en.png")
+                    )
                     dummyApp.updateConfig { $0.language = .zhHans }
                     renderSettingsWindowSnapshot(
-                        rootView: SettingsRootView(app: dummyApp, initialTab: .about, initialShowDingDingQR: true),
+                        rootView: SettingsRootView(app: dummyApp, initialSearchQuery: "项目说明"),
                         appearance: .aqua,
-                        to: dirURL.appendingPathComponent("13_dingding_qr_modal.png")
-                    )
-                    renderSettingsWindowSnapshot(
-                        rootView: SettingsRootView(app: dummyApp, initialTab: .general, initialShowDingDingQR: true),
-                        appearance: .darkAqua,
-                        to: dirURL.appendingPathComponent("13_dingding_qr_modal_dark.png")
+                        to: dirURL.appendingPathComponent("13_project_info_search.png")
                     )
 
                     let lsCtrl = LongshotSessionController(

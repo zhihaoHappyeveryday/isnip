@@ -12,6 +12,7 @@ app=$(sh "$root/scripts/build-app.sh" | tail -n 1)
 [ -x "$app/Contents/Helpers/pngquant" ] || { echo "缺少内置压缩引擎：$app/Contents/Helpers/pngquant" >&2; exit 1; }
 [ -x "$app/Contents/Helpers/oxipng" ] || { echo "缺少内置压缩引擎：$app/Contents/Helpers/oxipng" >&2; exit 1; }
 [ -s "$app/Contents/Resources/AppIcon.icns" ] || { echo "缺少图标资源：AppIcon.icns" >&2; exit 1; }
+[ ! -e "$app/Contents/Resources/dingding-mp-qr.jpg" ] || { echo "应用仍包含旧服务小程序码" >&2; exit 1; }
 
 echo "== 校验代码签名与 Info.plist =="
 codesign --verify --deep --strict "$app"
