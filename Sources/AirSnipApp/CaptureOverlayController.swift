@@ -98,7 +98,6 @@ fileprivate struct AnnotationImage {
     let pixelsPerPoint: CGSize
     let outputScale: Double
     let window: (ownerName: String, includeShadow: Bool)?
-    var isScreenCrop: Bool = false
 }
 
 fileprivate enum OverlayCanvasSource {
@@ -665,7 +664,7 @@ final class OverlayCanvasView: NSView {
     private var windowPickerMode: Bool
     private var windowDepthIndex: Int = 0
     private var hoveredWindowCandidate: WindowSnapCandidate?
-    private var isCapturingIsolatedWindow: Bool = false
+    private(set) var isCapturingIsolatedWindow: Bool = false
     private var cursorPoint: ASPoint = ASPoint(200, 200)
 
     private let document = AnnotationDocument()
@@ -3528,6 +3527,13 @@ final class OverlayCanvasView: NSView {
                     }
                 } else if let cand = hoveredWindowCandidate ?? resolveHoveredWindowCandidate(at: pt),
                           coordinator?.config.windowSnap == true {
+                    if coordinator?.canToggleWindowPickerWithSpace == true {
+                        let defaultShadow = coordinator?.config.windowCaptureShadow ?? true
+                        let includeShadow = event.modifierFlags.contains(.option) ? !defaultShadow : defaultShadow
+                        dragOp = .none
+                        captureAndPresentIsolatedWindow(candidate: cand, includeShadow: includeShadow)
+                        return
+                    }
                     selection = cand.rect
                 }
             } else if let sel = selection, (sel.width < 4 || sel.height < 4) {
@@ -4199,21 +4205,13 @@ final class OverlayCanvasView: NSView {
             guard let self else { return }
             defer { self.isCapturingIsolatedWindow = false }
 
-            let capturedCG: CGImage
-            let isScreenCrop: Bool
-            if let singleCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) {
-                capturedCG = singleCG
-                isScreenCrop = false
-            } else {
-                let pxRect = CGRect(
-                    x: (candidate.rect.minX * fallbackScale).rounded(.down),
-                    y: (candidate.rect.minY * fallbackScale).rounded(.down),
-                    width: max(1, (candidate.rect.width * fallbackScale).rounded()),
-                    height: max(1, (candidate.rect.height * fallbackScale).rounded())
+            guard let capturedCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) else {
+                ToastHUD.show(
+                    L10n.tr("窗口捕获失败，请重新点选；或拖动框选屏幕区域", "Window capture failed. Click again to retry, or drag to capture a screen region."),
+                    symbol: "exclamationmark.triangle.fill",
+                    tint: .systemOrange
                 )
-                guard let fallbackCG = self.screenSnapshot?.cgImage.cropping(to: pxRect) else { return }
-                capturedCG = fallbackCG
-                isScreenCrop = true
+                return
             }
             guard let rawBuf = PixelBufferRGBA(cgImage: capturedCG) else { return }
 
@@ -4253,8 +4251,7 @@ final class OverlayCanvasView: NSView {
                 rawBuffer: rawBuf,
                 pixelsPerPoint: CGSize(width: effectiveScale, height: effectiveScale),
                 outputScale: effectiveScale,
-                window: (ownerName: candidate.ownerName, includeShadow: includeShadow),
-                isScreenCrop: isScreenCrop
+                window: (ownerName: candidate.ownerName, includeShadow: includeShadow)
             )
             self.selection = displayRect
             self.selectionLocked = true
@@ -4307,9 +4304,6 @@ final class OverlayCanvasView: NSView {
                     selectionOrigin: ASPoint(sel.minX, sel.minY),
                     pixelsPerPoint: image.pixelsPerPoint
                 ) ?? baseCG
-            }
-            if forPin && image.isScreenCrop && baked === baseCG {
-                return independentPinCrop(baked)
             }
             if !forPin, image.window?.includeShadow == true {
                 return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: image.outputScale) ?? baked

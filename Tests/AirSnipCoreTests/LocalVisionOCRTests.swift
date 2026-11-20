@@ -2,9 +2,96 @@ import XCTest
 import CoreGraphics
 import CoreText
 import CoreImage
+import Vision
 @testable import AirSnipCore
 
 final class LocalVisionOCRTests: XCTestCase {
+    func testAccurateFailureRetriesCPUWithChineseSupport() throws {
+        let context = try makeContext(width: 800, height: 200)
+        draw("截图识字 Hello 123", at: CGPoint(x: 20, y: 70), in: context)
+        let handler = VNImageRequestHandler(cgImage: try XCTUnwrap(context.makeImage()), options: [:])
+        var attempts = 0
+        let observations = try LocalVisionOCR.performTextRecognition(languagePreference: "zh-Hans") { request in
+            attempts += 1
+            XCTAssertEqual(request.recognitionLevel, .accurate)
+            XCTAssertEqual(request.recognitionLanguages, ["zh-Hans", "en-US"])
+            if attempts == 1 { throw NSError(domain: "OCRTest", code: 1) }
+            try handler.perform([request])
+        }
+        XCTAssertEqual(attempts, 2)
+        let text = observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        XCTAssertTrue(text.contains("截图识字"), text)
+        XCTAssertTrue(text.contains("Hello 123"), text)
+    }
+
+    func testAccurateFailuresDoNotSilentlyDiscardUnsupportedLanguages() {
+        for language in ["auto", "", "zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "invalid-language"] {
+            var attempts = 0
+            let failure = NSError(domain: "OCRTest", code: 42)
+            XCTAssertThrowsError(try LocalVisionOCR.performTextRecognition(languagePreference: language) { request in
+                attempts += 1
+                XCTAssertEqual(request.recognitionLevel, .accurate, language)
+                throw failure
+            }) { error in
+                let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+                XCTAssertEqual(underlying?.domain, failure.domain)
+                XCTAssertEqual(underlying?.code, failure.code)
+            }
+            XCTAssertEqual(attempts, 2, language)
+        }
+    }
+
+    func testFastFallbackStillRecognizesExplicitEnglish() throws {
+        let context = try makeContext(width: 800, height: 200)
+        draw("Hello 123", at: CGPoint(x: 20, y: 70), in: context)
+        let handler = VNImageRequestHandler(cgImage: try XCTUnwrap(context.makeImage()), options: [:])
+        var attempts = 0
+        let observations = try LocalVisionOCR.performTextRecognition(languagePreference: "en-US") { request in
+            attempts += 1
+            XCTAssertTrue(request.recognitionLanguages.allSatisfy { $0 == "en-US" })
+            if attempts < 3 { throw NSError(domain: "OCRTest", code: attempts) }
+            XCTAssertEqual(request.recognitionLevel, .fast)
+            try handler.perform([request])
+        }
+        XCTAssertEqual(attempts, 3)
+        XCTAssertTrue(observations.contains { $0.topCandidates(1).first?.string == "Hello 123" })
+    }
+
+    func testFastFallbackPropagatesRecognitionFailure() {
+        var attempts = 0
+        XCTAssertThrowsError(try LocalVisionOCR.performTextRecognition(languagePreference: "en-US") { _ in
+            attempts += 1
+            throw NSError(domain: "OCRTest", code: attempts)
+        }) { error in
+            XCTAssertEqual((error as NSError).domain, "OCRTest")
+            XCTAssertEqual((error as NSError).code, 3)
+        }
+        XCTAssertEqual(attempts, 3)
+    }
+
+    func testDarkTerminalScreenshotRecognizesChineseAndCommands() throws {
+        let context = try makeContext(width: 1100, height: 220)
+        context.setFillColor(CGColor(srgbRed: 0.13, green: 0.15, blue: 0.19, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: context.width, height: context.height))
+        let lines = [
+            "可以选择服务器作为中转，这是开放的端口：22,80,443",
+            "已确认 HTTP 验证被外部连接超时阻断",
+            "python3 -m venv /tmp/example/certbot-env"
+        ]
+        for (index, text) in lines.enumerated() {
+            draw(text, at: CGPoint(x: 20, y: 20 + index * 60), in: context,
+                 fontSize: 28, color: CGColor(gray: 0.9, alpha: 1))
+        }
+        for language in ["auto", "zh-Hans"] {
+            let result = try LocalVisionOCR.recognizeDetailed(
+                cgImage: XCTUnwrap(context.makeImage()), languagePreference: language, detectBarcodes: false
+            )
+            XCTAssertTrue(result.rawText.contains("可以选择服务器作为中转"), result.rawText)
+            XCTAssertTrue(result.rawText.contains("验证被外部连接超时阻断"), result.rawText)
+            XCTAssertTrue(result.rawText.contains(lines[2]), result.rawText)
+        }
+    }
+
     func testRecognitionTilesBoundWorkAndCoverImageWithOverlap() {
         for (width, height) in [(800, 200), (4096, 4096), (680, 20_000), (100_000, 40), (8200, 8200)] {
             let tiles = LocalVisionOCR.recognitionTiles(width: width, height: height)
@@ -130,12 +217,13 @@ final class LocalVisionOCRTests: XCTestCase {
         return context
     }
 
-    private func draw(_ text: String, at point: CGPoint, in context: CGContext, fontSize: CGFloat = 36) {
+    private func draw(_ text: String, at point: CGPoint, in context: CGContext, fontSize: CGFloat = 36,
+                      color: CGColor = CGColor(gray: 0, alpha: 1)) {
         let line = CTLineCreateWithAttributedString(NSAttributedString(
             string: text,
             attributes: [
                 .font: CTFontCreateWithName("PingFangSC-Regular" as CFString, fontSize, nil),
-                .foregroundColor: CGColor(gray: 0, alpha: 1)
+                .foregroundColor: color
             ]
         ))
         context.textPosition = CGPoint(x: point.x, y: CGFloat(context.height) - point.y - fontSize)

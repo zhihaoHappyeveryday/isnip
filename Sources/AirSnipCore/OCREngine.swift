@@ -292,14 +292,14 @@ public enum LocalVisionOCR {
         }
     }
 
-    private static func performTextRecognition(
-        handler: VNImageRequestHandler,
-        languagePreference: String
+    static func performTextRecognition(
+        languagePreference: String,
+        perform: (VNRecognizeTextRequest) throws -> Void
     ) throws -> [VNRecognizedTextObservation] {
         // Tier 1: Default hardware-accelerated .accurate (GPU/ANE on Apple Silicon & supported Intel/AMD GPUs)
         let primary = VNRecognizeTextRequest()
         configure(primary, languagePreference: languagePreference)
-        if (try? handler.perform([primary])) != nil {
+        if (try? perform(primary)) != nil {
             return primary.results ?? []
         }
 
@@ -307,21 +307,28 @@ public enum LocalVisionOCR {
         let cpuAccurate = VNRecognizeTextRequest()
         configure(cpuAccurate, languagePreference: languagePreference)
         pinToCPU(cpuAccurate)
-        if (try? handler.perform([cpuAccurate])) != nil {
+        do {
+            try perform(cpuAccurate)
             return cpuAccurate.results ?? []
+        } catch {
+            let fastFallback = VNRecognizeTextRequest()
+            fastFallback.recognitionLevel = .fast
+            fastFallback.usesLanguageCorrection = true
+            guard let supported = try? fastFallback.supportedRecognitionLanguages(),
+                  primary.recognitionLanguages.allSatisfy({ supported.contains($0) }) else {
+                throw NSError(domain: "iSnip.OCR", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: L10n.tr(
+                        "高精度文字识别暂时不可用，备用识别引擎不支持当前语言。请重试；如仍失败，请重新启动 iSnip。",
+                        "Accurate text recognition is unavailable, and the fallback engine does not support the selected languages. Please retry, or restart iSnip if the problem persists."
+                    ),
+                    NSUnderlyingErrorKey: error
+                ])
+            }
+            fastFallback.recognitionLanguages = primary.recognitionLanguages
+            pinToCPU(fastFallback)
+            try perform(fastFallback)
+            return fastFallback.results ?? []
         }
-
-        // Tier 3: Fresh .fast pinned to MLCPUComputeDevice (handles Rosetta 2 x86_64 environments lacking .accurate Espresso slices)
-        let fastFallback = VNRecognizeTextRequest()
-        fastFallback.recognitionLevel = .fast
-        fastFallback.usesLanguageCorrection = true
-        if let supported = try? fastFallback.supportedRecognitionLanguages(), !supported.isEmpty {
-            let preferred = primary.recognitionLanguages.filter { supported.contains($0) }
-            fastFallback.recognitionLanguages = preferred.isEmpty ? [supported[0]] : preferred
-        }
-        pinToCPU(fastFallback)
-        try handler.perform([fastFallback])
-        return fastFallback.results ?? []
     }
 
     /// Vision loads / compiles its recognition models on the first request after boot or cache eviction,
@@ -331,7 +338,7 @@ public enum LocalVisionOCR {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let image = makeWarmupImage() else { return }
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
-            _ = try? performTextRecognition(handler: handler, languagePreference: languagePreference)
+            _ = try? performTextRecognition(languagePreference: languagePreference) { try handler.perform([$0]) }
         }
     }
 
@@ -396,7 +403,7 @@ public enum LocalVisionOCR {
                 }
 
                 let handler = VNImageRequestHandler(cgImage: image, options: [:])
-                let observations = try performTextRecognition(handler: handler, languagePreference: languagePreference)
+                let observations = try performTextRecognition(languagePreference: languagePreference) { try handler.perform([$0]) }
 
                 for observation in observations {
                     guard let candidate = observation.topCandidates(1).first else { continue }

@@ -8,14 +8,117 @@ import Translation
 import AirSnipCore
 
 public enum SmokeTestRunner {
-    private static var isRunningUnderRosetta: Bool {
-        var ret: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        if sysctlbyname("sysctl.proc_translated", &ret, &size, nil, 0) == 0 {
-            return ret == 1
+    @MainActor
+    public static func runWindowCaptureChecks() -> Bool {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        guard CGPreflightScreenCaptureAccess(), let screen = NSScreen.main else {
+            fputs("FAIL: Window capture self-test requires screen recording permission\n", stderr)
+            return false
         }
-        return false
+        let sourceWindow = NSWindow(
+            contentRect: NSRect(x: screen.visibleFrame.minX + 100, y: screen.visibleFrame.minY + 100, width: 260, height: 180),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        sourceWindow.isReleasedWhenClosed = false
+        sourceWindow.title = "iSnip window capture test"
+        sourceWindow.backgroundColor = .systemBlue
+        sourceWindow.orderFrontRegardless()
+        defer { sourceWindow.close() }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        let canvasFrame = NSRect(x: 0, y: 0, width: 640, height: 480)
+        let background = PixelBufferRGBA(width: 640, height: 480, rgba: [UInt8](repeating: 255, count: 640 * 480 * 4))
+        guard let backgroundImage = background.makeCGImage() else { return false }
+        let candidateRect = ASRect(x: 80, y: 80, width: sourceWindow.frame.width, height: sourceWindow.frame.height)
+
+        func capture(mode: CaptureSessionCoordinator.SessionMode, windowID: UInt32, shadow: Bool = false,
+                     option: Bool = false, drag: Bool = false, snapEnabled: Bool = true) -> (image: CGImage?, completed: Bool) {
+            var config = AirSnipConfig()
+            config.windowCaptureShadow = shadow
+            config.windowSnap = snapEnabled
+            let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
+            var output: CGImage?
+            coordinator.onCompleteCopy = { image, _ in output = image }
+            coordinator.onStartOCR = { image, _ in output = image }
+            coordinator.onStartLongshot = { _, _, buffer, _ in output = buffer.makeCGImage() }
+            let snapshot = CapturedScreenSnapshot(
+                screen: screen, frameInGlobalAppKit: canvasFrame,
+                frameTopDown: ASRect(x: 0, y: 0, width: 640, height: 480),
+                cgImage: backgroundImage, rawBuffer: background, backingScale: 1,
+                windowsLocalTopDown: [WindowSnapCandidate(windowID: windowID, rect: candidateRect, isMaximizedLike: false)]
+            )
+            let overlay = OverlayScreenController(snapshot: snapshot, coordinator: coordinator)
+            let canvas = overlay.canvasView
+            defer { overlay.panel.close() }
+            let startPoint = NSPoint(x: candidateRect.midX, y: candidateRect.midY)
+            func mouseEvent(_ type: NSEvent.EventType, point: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil), modifierFlags: option ? [.option] : [], timestamp: 0,
+                                   windowNumber: overlay.panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            canvas.mouseDown(with: mouseEvent(.leftMouseDown, point: startPoint))
+            let endPoint = drag ? NSPoint(x: startPoint.x + 60, y: startPoint.y + 40) : startPoint
+            if drag { canvas.mouseDragged(with: mouseEvent(.leftMouseDragged, point: endPoint)) }
+            canvas.mouseUp(with: mouseEvent(.leftMouseUp, point: endPoint))
+            let deadline = Date().addingTimeInterval(15)
+            while canvas.isCapturingIsolatedWindow && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            canvas.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: overlay.panel.windowNumber, context: nil, characters: "\r",
+                                                 charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!)
+            return (output, !canvas.isCapturingIsolatedWindow)
+        }
+        func hasTransparentCorners(_ image: CGImage) -> Bool {
+            guard let buffer = PixelBufferRGBA(cgImage: image) else { return false }
+            return [(0, 0), (image.width - 1, 0), (0, image.height - 1), (image.width - 1, image.height - 1)].allSatisfy {
+                buffer.pixel(x: $0.0, y: $0.1).a == 0
+            } && buffer.pixel(x: image.width / 2, y: image.height / 2).a == 255
+        }
+        let windowID = UInt32(sourceWindow.windowNumber)
+        for mode: CaptureSessionCoordinator.SessionMode in [.normalCapture, .directWindowCapture] {
+            let result = capture(mode: mode, windowID: windowID)
+            guard result.completed, let image = result.image, hasTransparentCorners(image),
+                  let png = try? ImageEncoder.encode(image, format: .png, smartPngCompression: true),
+                  let source = CGImageSourceCreateWithData(png as CFData, nil),
+                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil), hasTransparentCorners(decoded) else {
+                fputs("FAIL: Window click or compressed PNG lost native transparent corners\n", stderr)
+                return false
+            }
+            let shadowed = capture(mode: mode, windowID: windowID, shadow: true)
+            let toggled = capture(mode: mode, windowID: windowID, shadow: true, option: true)
+            guard let shadowImage = shadowed.image, hasTransparentCorners(shadowImage), shadowImage.width > image.width,
+                  let toggledImage = toggled.image, hasTransparentCorners(toggledImage), toggledImage.width == image.width else {
+                fputs("FAIL: Window shadow setting or Option override changed\n", stderr)
+                return false
+            }
+            let failed = capture(mode: mode, windowID: 0)
+            guard failed.completed, failed.image == nil else {
+                fputs("FAIL: Failed window capture silently exported the desktop crop\n", stderr)
+                return false
+            }
+            let dragged = capture(mode: mode, windowID: 0, drag: true)
+            guard let region = dragged.image, region.width == 60, region.height == 40,
+                  PixelBufferRGBA(cgImage: region)?.pixel(x: 0, y: 0).a == 255 else {
+                fputs("FAIL: Manual region capture changed\n", stderr)
+                return false
+            }
+        }
+        for mode: CaptureSessionCoordinator.SessionMode in [.directOCRCapture, .directLongshotCapture] {
+            guard let image = capture(mode: mode, windowID: 0).image,
+                  image.width == Int(candidateRect.width), PixelBufferRGBA(cgImage: image)?.pixel(x: 0, y: 0).a == 255 else {
+                fputs("FAIL: Direct OCR or longshot no longer uses its original screen region\n", stderr)
+                return false
+            }
+        }
+        guard capture(mode: .normalCapture, windowID: windowID, snapEnabled: false).image == nil else {
+            fputs("FAIL: Disabled window snap still captured a window\n", stderr)
+            return false
+        }
+        print("[window-capture] PASS: 原生透明四角、PNG 压缩、窗口吸附、独立捕获、阴影切换、失败不回退及手动框选/OCR/长截图边界")
+        return true
     }
+
     @MainActor
     public static func runTranslationChecks() -> Bool {
         let app = NSApplication.shared
@@ -24,6 +127,33 @@ public enum SmokeTestRunner {
             print("[translation] SKIP: 系统翻译需要 macOS 15+")
             return true
         }
+        let mixedText = """
+        M2、M5 均已安装并启动 OCR 修复版，旧版已保留；两机签名、SHA-256 和安装后 --smoke-test 均通过。
+        GitHub 已同步至 main：提交 3c9244f (https://github.com/zzusec/isnip/commit/3c9244fc73b5dbf409ad56a315c4ee53c1c57640)，远端已核实，工作区干净；34 项测试通过。本次未发布新 Release。
+        记录已写入：交付记录 (.config/records/isnip-delivery.md:1)，并更新了 M2 设备信息 (.config/projects/-Users-example-iSnip/records/m2-deployment-target.md:1) 和安装同步约定 (.config/projects/-Users-example-iSnip/records/install-and-push-workflow.md:1)。
+        """
+        for (input, expectedLanguage) in [
+            (mixedText, "zh-Hans"),
+            ("已完成https://example.com/download，安装验证通过，请重新启动应用。", "zh-Hans"),
+            ("已安装到 C:\\Applications\\Example\\app.exe，请重新启动应用。", "zh-Hans"),
+            ("Hello world", "en"),
+            ("The installation is complete. See https://example.com/release for details.", "en"),
+            ("", "auto"),
+            ("https://example.com/project/release", "auto"),
+            ("/Users/example/project/README.md", "auto"),
+        ] {
+            let request = TextTranslationRequest(text: input, sourceLanguage: "auto", targetLanguage: "en")
+            guard request.sourceLanguage == expectedLanguage, request.text == input else {
+                fputs("FAIL: Translation language detection: expected=\(expectedLanguage), actual=\(request.sourceLanguage)\n", stderr)
+                return false
+            }
+        }
+        let manualRequest = TextTranslationRequest(text: mixedText, sourceLanguage: "ja", targetLanguage: "en")
+        guard manualRequest.sourceLanguage == "ja", manualRequest.text == mixedText else {
+            fputs("FAIL: Translation must preserve explicit source language and original text\n", stderr)
+            return false
+        }
+        print("[translation] PASS: 中英混排、网址、路径、空文本和手选源语言")
         let clipboardCount = NSPasteboard.general.changeCount
         let previousWindows = Set(app.windows.map(\.windowNumber))
         let manager = OCRBubbleManager()
@@ -63,7 +193,54 @@ public enum SmokeTestRunner {
                 }
             }
         }
+        func findSplitView(in view: NSView) -> NSSplitView? {
+            if let split = view as? NSSplitView {
+                if !split.isVertical, split.arrangedSubviews.count == 2 { return split }
+            }
+            return view.subviews.lazy.compactMap { findSplitView(in: $0) }.first
+        }
+        panel.setContentSize(NSSize(width: 800, height: 650))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        guard let contentView = panel.contentView, let split = findSplitView(in: contentView),
+              !split.isVertical, split.arrangedSubviews.count == 2 else {
+            fputs("FAIL: Translation requires a native horizontal split view\n", stderr)
+            return false
+        }
+        let panes = split.arrangedSubviews
+        let sourceHeight = panes[0].frame.height
+        split.setPosition(300, ofDividerAt: 0)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        guard abs(panes[0].frame.height - 300) < 2,
+              abs(panes[0].frame.height - sourceHeight) > 10 else {
+            fputs("FAIL: Translation divider did not resize source pane\n", stderr)
+            return false
+        }
+        manager.requestTranslation()
+        let splitDeadline = Date().addingTimeInterval(10)
+        while manager.isTranslating && Date() < splitDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard abs(panes[0].frame.height - 300) < 2 else {
+            fputs("FAIL: Retranslating reset the divider position\n", stderr)
+            return false
+        }
+        for position in [CGFloat(0), split.bounds.height] {
+            split.setPosition(position, ofDividerAt: 0)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            guard panes[0].frame.height >= 88, panes[1].frame.height >= 96 else {
+                fputs("FAIL: Translation split panes collapsed below minimum height\n", stderr)
+                return false
+            }
+        }
         panel.setContentSize(NSSize(width: 400, height: 350))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        guard panes[0].frame.height >= 88, panes[1].frame.height >= 96,
+              panes[1].frame.maxY <= split.bounds.height + 1 else {
+            fputs("FAIL: Translation split panes escaped the compact window\n", stderr)
+            return false
+        }
+        print("[translation] PASS: 原文/译文分隔线可调整、重译保留位置、最小高度和紧凑窗口")
         let resizedFrame = panel.frame
         manager.text = "A new selection"
         guard manager.translatedText.isEmpty, manager.translationRequest == nil else {
@@ -150,6 +327,24 @@ public enum SmokeTestRunner {
                 return false
             }
             print("[translation] PASS: 系统英译中：\(manager.translatedText)")
+            config.translation.targetLanguage = "en"
+            manager.presentSelectedText(mixedText, anchorScreenPoint: nil, config: config)
+            let mixedDeadline = Date().addingTimeInterval(60)
+            while manager.isTranslating && Date() < mixedDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            guard !manager.isTranslating, manager.translationError == nil,
+                  manager.translationRequest?.sourceLanguage == "zh-Hans",
+                  manager.text == mixedText, !manager.translatedText.isEmpty,
+                  manager.translatedText != mixedText,
+                  !manager.translatedText.contains("均已安装并启动"),
+                  manager.translatedText.localizedCaseInsensitiveContains("installed"),
+                  manager.translatedText.contains("https://github.com/zzusec/isnip/commit/3c9244fc73b5dbf409ad56a315c4ee53c1c57640"),
+                  NSPasteboard.general.changeCount == clipboardCount else {
+                fputs("FAIL: Mixed Chinese translation: \(manager.translationError ?? manager.translatedText)\n", stderr)
+                return false
+            }
+            print("[translation] PASS: 含网址和文件路径的中文实际译为英文，原文和剪贴板保持不变")
         } else {
             config.translation.targetLanguage = "en"
             manager.presentSelectedText("Hello world", anchorScreenPoint: nil, config: config)
@@ -2145,16 +2340,13 @@ public enum SmokeTestRunner {
                 fputs("FAIL: Failed to create OCR fixture\n", stderr)
                 return false
             }
-            let underRosetta = isRunningUnderRosetta
             for language in ["auto", "zh-Hans"] {
                 let detailed = try LocalVisionOCR.recognizeDetailed(
                     cgImage: ocrImg,
                     languagePreference: language,
                     detectBarcodes: true
                 )
-                let textMatched = underRosetta
-                    ? detailed.rawText.localizedCaseInsensitiveContains("isnip")
-                    : (detailed.rawText.contains("极速截图") && detailed.rawText.contains("iSnip"))
+                let textMatched = detailed.rawText.contains("极速截图") && detailed.rawText.contains("iSnip")
                 guard textMatched else {
                     fputs("FAIL: LocalVisionOCR output missing expected text: \(detailed.rawText)\n", stderr)
                     return false
@@ -2206,18 +2398,20 @@ public enum SmokeTestRunner {
                 // Exercise the same asynchronous recognition and result panel used by F2 / clipboard OCR,
                 // not just the synchronous Vision engine. This test uses only the synthetic fixture above.
                 let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+                let clipboardCount = NSPasteboard.general.changeCount
                 let ocrManager = OCRBubbleManager()
+                ocrManager.text = "previous result must be replaced"
                 ocrManager.recognizeAndPresent(rawSelectionImage: ocrImg, anchorScreenPoint: nil, config: defaultCfg)
                 let ocrDeadline = Date().addingTimeInterval(60)
                 while ocrManager.isRecognizing && Date() < ocrDeadline {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.02))
                 }
-                let panelTextOK = underRosetta
-                    ? ocrManager.text.localizedCaseInsensitiveContains("isnip")
-                    : (ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip"))
+                let panelTextOK = ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip")
+                    && !ocrManager.text.contains("previous result")
                 let ocrPanelOK = !ocrManager.isRecognizing && ocrManager.errorMessage == nil
                     && panelTextOK
                     && ocrManager.barcodes.contains("https://github.com/zzusec/isnip")
+                    && NSPasteboard.general.changeCount == clipboardCount
                 defer { ocrManager.dismiss() }
                 if let previewPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_OCR_PREVIEW_PNG"] {
                     guard let view = NSApp.windows.first(where: { !existingWindows.contains($0.windowNumber) })?.contentView else {
