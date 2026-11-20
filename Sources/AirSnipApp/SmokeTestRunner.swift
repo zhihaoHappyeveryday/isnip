@@ -15,6 +15,33 @@ public enum SmokeTestRunner {
             print("[translation] SKIP: 系统翻译需要 macOS 15+")
             return true
         }
+        let mixedText = """
+        M2、M5 均已安装并启动 OCR 修复版，旧版已保留；两机签名、SHA-256 和安装后 --smoke-test 均通过。
+        GitHub 已同步至 main：提交 3c9244f (https://github.com/zzusec/isnip/commit/3c9244fc73b5dbf409ad56a315c4ee53c1c57640)，远端已核实，工作区干净；34 项测试通过。本次未发布新 Release。
+        记录已写入：交付记录 (.config/records/isnip-delivery.md:1)，并更新了 M2 设备信息 (.config/projects/-Users-example-iSnip/records/m2-deployment-target.md:1) 和安装同步约定 (.config/projects/-Users-example-iSnip/records/install-and-push-workflow.md:1)。
+        """
+        for (input, expectedLanguage) in [
+            (mixedText, "zh-Hans"),
+            ("已完成https://example.com/download，安装验证通过，请重新启动应用。", "zh-Hans"),
+            ("已安装到 C:\\Applications\\Example\\app.exe，请重新启动应用。", "zh-Hans"),
+            ("Hello world", "en"),
+            ("The installation is complete. See https://example.com/release for details.", "en"),
+            ("", "auto"),
+            ("https://example.com/project/release", "auto"),
+            ("/Users/example/project/README.md", "auto"),
+        ] {
+            let request = TextTranslationRequest(text: input, sourceLanguage: "auto", targetLanguage: "en")
+            guard request.sourceLanguage == expectedLanguage, request.text == input else {
+                fputs("FAIL: Translation language detection: expected=\(expectedLanguage), actual=\(request.sourceLanguage)\n", stderr)
+                return false
+            }
+        }
+        let manualRequest = TextTranslationRequest(text: mixedText, sourceLanguage: "ja", targetLanguage: "en")
+        guard manualRequest.sourceLanguage == "ja", manualRequest.text == mixedText else {
+            fputs("FAIL: Translation must preserve explicit source language and original text\n", stderr)
+            return false
+        }
+        print("[translation] PASS: 中英混排、网址、路径、空文本和手选源语言")
         let clipboardCount = NSPasteboard.general.changeCount
         let previousWindows = Set(app.windows.map(\.windowNumber))
         let manager = OCRBubbleManager()
@@ -141,6 +168,24 @@ public enum SmokeTestRunner {
                 return false
             }
             print("[translation] PASS: 系统英译中：\(manager.translatedText)")
+            config.translation.targetLanguage = "en"
+            manager.presentSelectedText(mixedText, anchorScreenPoint: nil, config: config)
+            let mixedDeadline = Date().addingTimeInterval(60)
+            while manager.isTranslating && Date() < mixedDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            guard !manager.isTranslating, manager.translationError == nil,
+                  manager.translationRequest?.sourceLanguage == "zh-Hans",
+                  manager.text == mixedText, !manager.translatedText.isEmpty,
+                  manager.translatedText != mixedText,
+                  !manager.translatedText.contains("均已安装并启动"),
+                  manager.translatedText.localizedCaseInsensitiveContains("installed"),
+                  manager.translatedText.contains("https://github.com/zzusec/isnip/commit/3c9244fc73b5dbf409ad56a315c4ee53c1c57640"),
+                  NSPasteboard.general.changeCount == clipboardCount else {
+                fputs("FAIL: Mixed Chinese translation: \(manager.translationError ?? manager.translatedText)\n", stderr)
+                return false
+            }
+            print("[translation] PASS: 含网址和文件路径的中文实际译为英文，原文和剪贴板保持不变")
         } else {
             config.translation.targetLanguage = "en"
             manager.presentSelectedText("Hello world", anchorScreenPoint: nil, config: config)

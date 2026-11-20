@@ -9,6 +9,20 @@ struct TextTranslationRequest: Equatable {
     let text: String
     let sourceLanguage: String
     let targetLanguage: String
+
+    init(text: String, sourceLanguage: String, targetLanguage: String) {
+        self.text = text
+        self.targetLanguage = targetLanguage
+        if sourceLanguage == "auto" {
+            let prose = text.replacingOccurrences(
+                of: #"https?://[^\s<>()\[\]，。；！？、]+|(?:[A-Za-z0-9_.~:+-]*[/\\])+[A-Za-z0-9_.~:@%+?=&#!-]*"#,
+                with: " ", options: .regularExpression
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            self.sourceLanguage = NLLanguageRecognizer.dominantLanguage(for: prose)?.rawValue ?? "auto"
+        } else {
+            self.sourceLanguage = sourceLanguage
+        }
+    }
 }
 
 private final class KeyableBubblePanel: NSPanel {
@@ -267,10 +281,8 @@ public final class OCRBubbleManager: ObservableObject {
     func translate(_ request: TextTranslationRequest, using session: TranslationSession) async {
         guard !Task.isCancelled, translationRequest?.id == request.id else { return }
         do {
-            let source = request.sourceLanguage == "auto"
-                ? NLLanguageRecognizer.dominantLanguage(for: request.text)?.rawValue
-                : request.sourceLanguage
-            if let source, Locale.Language(identifier: source).languageCode == Locale.Language(identifier: request.targetLanguage).languageCode {
+            if request.sourceLanguage != "auto",
+               Locale.Language(identifier: request.sourceLanguage).languageCode == Locale.Language(identifier: request.targetLanguage).languageCode {
                 translatedText = request.text
                 isTranslating = false
                 return
