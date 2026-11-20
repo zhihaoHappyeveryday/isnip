@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import CoreGraphics
+import CoreText
 import AirSnipCore
 
 private final class OverlayPanel: NSPanel {
@@ -1563,11 +1564,11 @@ final class OverlayCanvasView: NSView {
         let monoFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
         let coordFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
         let keycapFont = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .semibold)
-        let primaryAttrs: [NSAttributedString.Key: Any] = [.font: monoFont, .foregroundColor: NSColor.white]
-        let coordAttrs: [NSAttributedString.Key: Any] = [.font: coordFont, .foregroundColor: NSColor(calibratedWhite: 0.74, alpha: 1)]
-        let keycapAttrs: [NSAttributedString.Key: Any] = [.font: keycapFont, .foregroundColor: NSColor(calibratedWhite: 0.88, alpha: 1)]
 
-        (centerColor.hexString as NSString).draw(at: NSPoint(x: gx0 + 17.5, y: infoY), withAttributes: primaryAttrs)
+        drawMagnifierLabel(
+            centerColor.hexString, at: CGPoint(x: gx0 + 17.5, y: infoY),
+            font: monoFont, color: CGColor(gray: 1, alpha: 1), in: ctx
+        )
 
         // Mini [C] keycap pill on the right of HEX
         let capRect = CGRect(x: cardRect.maxX - pad - 18, y: infoY + 0.5, width: 18, height: 14)
@@ -1579,7 +1580,10 @@ final class OverlayCanvasView: NSView {
         ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.22))
         ctx.setLineWidth(0.6)
         ctx.strokePath()
-        ("C" as NSString).draw(at: NSPoint(x: capRect.minX + 5.5, y: capRect.minY + 1.5), withAttributes: keycapAttrs)
+        drawMagnifierLabel(
+            "C", at: CGPoint(x: capRect.minX + 5.5, y: capRect.minY + 1.5),
+            font: keycapFont, color: CGColor(gray: 0.88, alpha: 1), in: ctx
+        )
 
         let secondLine: String
         if let sel = selection, sel.width >= 2 && sel.height >= 2 {
@@ -1589,8 +1593,47 @@ final class OverlayCanvasView: NSView {
         } else {
             secondLine = "(\(pxX), \(pxY))"
         }
-        (secondLine as NSString).draw(at: NSPoint(x: gx0, y: infoY + 19.5), withAttributes: coordAttrs)
+        drawMagnifierLabel(
+            secondLine, at: CGPoint(x: gx0, y: infoY + 19.5),
+            font: coordFont, color: CGColor(gray: 0.74, alpha: 1), in: ctx
+        )
         ctx.restoreGState()
+    }
+
+    /// The magnifier only shows fixed-format labels, so it can draw glyphs without a typesetter.
+    private func drawMagnifierLabel(
+        _ text: String, at point: CGPoint, font: NSFont, color: CGColor, in ctx: CGContext
+    ) {
+        let font = font as CTFont
+        let characters = Array(text.utf16)
+        guard !characters.isEmpty else { return }
+        var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+        guard CTFontGetGlyphsForCharacters(font, characters, &glyphs, characters.count) else { return }
+
+        var advances = [CGSize](repeating: .zero, count: glyphs.count)
+        CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advances, glyphs.count)
+        var x: CGFloat = 0
+        let positions = advances.map { advance in
+            let position = CGPoint(x: x, y: 0)
+            x += advance.width
+            return position
+        }
+
+        let previousTextMatrix = ctx.textMatrix
+        let previousTextPosition = ctx.textPosition
+        ctx.saveGState()
+        defer {
+            ctx.restoreGState()
+            ctx.textMatrix = previousTextMatrix
+            ctx.textPosition = previousTextPosition
+        }
+        ctx.translateBy(x: point.x, y: point.y + CTFontGetAscent(font))
+        ctx.scaleBy(x: 1, y: -1) // The overlay view is flipped.
+        ctx.textMatrix = .identity
+        ctx.textPosition = .zero
+        ctx.setTextDrawingMode(.fill)
+        ctx.setFillColor(color)
+        CTFontDrawGlyphs(font, glyphs, positions, glyphs.count, ctx)
     }
 
     // MARK: - Floating Toolbar & HSV Color Picker

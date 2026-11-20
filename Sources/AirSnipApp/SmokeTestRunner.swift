@@ -1971,6 +1971,84 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func verifyMagnifierLabels(on screen: NSScreen, scale: Int) -> Bool {
+        let frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+        let pixelWidth = Int(frame.width) * scale
+        let pixelHeight = Int(frame.height) * scale
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let bitmap = CGContext(
+            data: nil, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        bitmap.setFillColor(CGColor(srgbRed: 0.12, green: 0.20, blue: 0.31, alpha: 1))
+        bitmap.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        guard let image = bitmap.makeImage(), let pixels = PixelBufferRGBA(cgImage: image) else { return false }
+
+        let snapshot = CapturedScreenSnapshot(
+            screen: screen, frameInGlobalAppKit: frame,
+            frameTopDown: ASRect(x: 0, y: 0, width: frame.width, height: frame.height),
+            cgImage: image, rawBuffer: pixels, backingScale: Double(scale), windowsLocalTopDown: []
+        )
+        let coordinator = CaptureSessionCoordinator(config: AirSnipConfig())
+        let overlay = OverlayScreenController(snapshot: snapshot, coordinator: coordinator)
+        let canvas = overlay.canvasView
+        defer { overlay.panel.close() }
+
+        bitmap.translateBy(x: 0, y: CGFloat(pixelHeight))
+        bitmap.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
+        func mouseEvent(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil), modifierFlags: [], timestamp: 0,
+                               windowNumber: overlay.panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+
+        func verifyLabels(at cursor: NSPoint, during action: String) -> Bool {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmap, flipped: true)
+            canvas.draw(canvas.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+            guard let rendered = bitmap.makeImage(), let result = PixelBufferRGBA(cgImage: rendered) else { return false }
+
+            // These cursor positions leave room for the card at (+22, +22).
+            // Sample label interiors so the swatch and keycap border cannot satisfy the check.
+            let regions = [
+                ("HEX", CGRect(x: 26, y: 132, width: 46, height: 12)),
+                ("C", CGRect(x: 111, y: 134, width: 7, height: 10)),
+                ("coordinate or size", CGRect(x: 8, y: 152, width: 96, height: 12)),
+            ]
+            for (label, region) in regions {
+                let x = Int(cursor.x + 22 + region.minX) * scale
+                let y = Int(cursor.y + 22 + region.minY) * scale
+                let hasInk = (y..<(y + Int(region.height) * scale)).contains { row in
+                    (x..<(x + Int(region.width) * scale)).contains { column in
+                        let color = result.pixel(x: column, y: row)
+                        return color.r > 120 && color.g > 120 && color.b > 120
+                    }
+                }
+                guard hasInk else {
+                    fputs("FAIL: Magnifier \(label) missing during \(action) at \(scale)×\n", stderr)
+                    return false
+                }
+            }
+            return true
+        }
+
+        func drag(from start: NSPoint, to end: NSPoint, action: String) -> Bool {
+            canvas.mouseDown(with: mouseEvent(.leftMouseDown, at: start))
+            canvas.mouseDragged(with: mouseEvent(.leftMouseDragged, at: end))
+            let rendered = verifyLabels(at: end, during: action)
+            canvas.mouseUp(with: mouseEvent(.leftMouseUp, at: end))
+            return rendered
+        }
+
+        let origin = NSPoint(x: 75, y: 65)
+        canvas.mouseMoved(with: mouseEvent(.mouseMoved, at: origin))
+        return verifyLabels(at: origin, during: "hover")
+            && drag(from: origin, to: NSPoint(x: 198, y: 142), action: "selection")
+            && drag(from: NSPoint(x: 198, y: 84), to: NSPoint(x: 218, y: 84), action: "edge resize")
+            && drag(from: NSPoint(x: 218, y: 142), to: NSPoint(x: 246, y: 177), action: "corner resize")
+    }
+
+    @MainActor
     private static func verifyPinAnnotation(on screen: NSScreen) -> Bool {
         var config = AirSnipConfig()
         config.pinAnnotationCoversDesktop = false
@@ -2397,6 +2475,10 @@ public enum SmokeTestRunner {
                       let rawBuf = PixelBufferRGBA(cgImage: baseCG) else {
                     return false
                 }
+                for scale in [1, 2] {
+                    guard verifyMagnifierLabels(on: screen, scale: scale) else { return false }
+                }
+                print("[smoke] PASS: 放大镜标签在 1×、2× 下的悬停、框选、拖边和拖角绘制")
                 guard verifyPinAnnotation(on: screen) else {
                     fputs("FAIL: Windowed pin annotation, click-through, or image update mismatch\n", stderr)
                     return false
