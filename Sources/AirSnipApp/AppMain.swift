@@ -17,8 +17,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private let statusMenu = NSMenu(title: "iSnip")
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
-    private let lastPinnedClipboardCopyURL: URL
-    private var lastPinnedClipboardCopy: OutputService.ClipboardCopyID?
+    private let handledClipboardCopyURL: URL
+    private var lastHandledClipboardCopy: OutputService.ClipboardCopyID?
     private var isCapturingSnapshots = false
     private let selectionTranslation = SelectionTranslationController()
     private var selectionSourceApplication: NSRunningApplication?
@@ -32,9 +32,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     init(configURL: URL, pinPasteboard: NSPasteboard, pinHistoryCloseTime: @escaping () -> Date) {
         self.configURL = configURL
-        lastPinnedClipboardCopyURL = configURL.deletingPathExtension().appendingPathExtension("pinned-clipboard-copy.json")
-        if let data = try? Data(contentsOf: lastPinnedClipboardCopyURL) {
-            lastPinnedClipboardCopy = try? JSONDecoder().decode(OutputService.ClipboardCopyID.self, from: data)
+        handledClipboardCopyURL = configURL.deletingPathExtension().appendingPathExtension("pinned-clipboard-copy.json")
+        if let data = try? Data(contentsOf: handledClipboardCopyURL) {
+            lastHandledClipboardCopy = try? JSONDecoder().decode(OutputService.ClipboardCopyID.self, from: data)
         }
         self.pinManager = PinManager(
             pasteboard: pinPasteboard,
@@ -54,6 +54,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             self?.config ?? AirSnipConfig()
         }
         _ = pinManager.trimClosedHistory(to: loadedConfig.pinHistoryLimit)
+        pinManager.onDidRememberClosedPins = { [weak self] copyID in
+            self?.rememberHandledClipboardCopy(copyID)
+        }
         pinManager.updateConfig = { [weak self] block in
             self?.updateConfig(block)
         }
@@ -586,7 +589,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil else { return }
         guard let clip = OutputService.readPinFromClipboard(
-            from: pasteboard ?? pinManager.pasteboard, excluding: lastPinnedClipboardCopy
+            from: pasteboard ?? pinManager.pasteboard, excluding: lastHandledClipboardCopy
         ) else {
             pinManager.restoreLastClosedPin(config: config)
             return
@@ -601,7 +604,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             config: pinCfg,
             originalText: clip.originalText
         ) {
-            rememberPinnedClipboardCopy(clip.copyID)
+            rememberHandledClipboardCopy(clip.copyID)
             if clip.isTextPreviewClipped {
                 ToastHUD.show(
                     L10n.tr("仅显示部分文字，可复制原文", "Showing part of the text. Use Copy Original Text.", in: config.language),
@@ -611,12 +614,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         }
     }
 
-    private func rememberPinnedClipboardCopy(_ copyID: OutputService.ClipboardCopyID) {
-        lastPinnedClipboardCopy = copyID
+    private func rememberHandledClipboardCopy(_ copyID: OutputService.ClipboardCopyID) {
+        lastHandledClipboardCopy = copyID
         try? FileManager.default.createDirectory(
-            at: lastPinnedClipboardCopyURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            at: handledClipboardCopyURL.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        try? JSONEncoder().encode(copyID).write(to: lastPinnedClipboardCopyURL, options: .atomic)
+        try? JSONEncoder().encode(copyID).write(to: handledClipboardCopyURL, options: .atomic)
     }
 
     private func startPinInlineEditSession(pin: PinWindowController) {
