@@ -665,13 +665,11 @@ public enum OutputService {
     }
 
     static func pinHistoryRootURL(for config: AirSnipConfig) -> URL {
-        let parentDirectory: URL
-        if let path = config.pinHistoryParentDirectory, !path.isEmpty {
-            parentDirectory = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
-        } else {
-            parentDirectory = defaultSaveDirectoryURL(for: config)
+        if let path = config.pinHistoryDirectory, !path.isEmpty {
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
         }
-        return parentDirectory.appendingPathComponent(ClosedPinHistory.directoryName, isDirectory: true)
+        return defaultSaveDirectoryURL(for: config)
+            .appendingPathComponent(AirSnipConfig.defaultPinHistoryDirectoryName, isDirectory: true)
     }
 
     public static func chooseSaveDirectory(initial: URL) -> URL? {

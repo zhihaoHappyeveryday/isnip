@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Combine
 import AirSnipCore
 
 @MainActor
@@ -9,6 +10,7 @@ public final class PinManager: ObservableObject {
     private let history: ClosedPinHistory
     private let historyCloseTime: () -> Date
     private let historyRootURL: (AirSnipConfig) -> URL
+    private var historyMountObserver: AnyCancellable?
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
@@ -32,6 +34,11 @@ public final class PinManager: ObservableObject {
         history.onWriteFailure = { [weak self] in
             self?.showHistoryWarning("贴图历史写入失败，这些贴图无法恢复", "Some closed pins could not be saved for recovery")
         }
+        historyMountObserver = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak history] _ in
+                history?.cleanUnusedFiles()
+            }
     }
 
     public var count: Int { windows.count }
@@ -102,6 +109,7 @@ public final class PinManager: ObservableObject {
     }
 
     public func restoreLastClosedPin(config: AirSnipConfig) {
+        history.cleanUnusedFiles()
         guard config.pinHistoryLimit > 0, !history.isEmpty, canOpenPin(config: config) else { return }
         let result = history.restoreLast()
         if result.skippedUnreadable {

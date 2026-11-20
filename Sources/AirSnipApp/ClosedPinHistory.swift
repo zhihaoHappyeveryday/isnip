@@ -1,3 +1,4 @@
+import AirSnipCore
 import CoreGraphics
 import Darwin
 import Foundation
@@ -23,8 +24,6 @@ struct PinSnapshot {
 
 @MainActor
 final class ClosedPinHistory {
-    nonisolated static let directoryName = "iSnip Pin History"
-
     private final class CloseBatch {
         var reportedWriteFailure = false
     }
@@ -33,6 +32,8 @@ final class ClosedPinHistory {
         let dayDirectory: URL
         let id: UUID
         let hasOriginalText: Bool
+
+        var historyRoot: URL { dayDirectory.deletingLastPathComponent() }
 
         private var baseURL: URL {
             dayDirectory.appendingPathComponent("pin-\(id.uuidString)")
@@ -153,21 +154,25 @@ final class ClosedPinHistory {
 
     func restoreLast() -> (snapshot: PinSnapshot?, skippedUnreadable: Bool) {
         var skippedUnreadable = false
-        while let entry = entries.last {
+        for index in entries.indices.reversed() {
+            let entry = entries[index]
+            let snapshot: PinSnapshot?
             switch entry.content {
             case .pending(let image, let originalText, _):
-                entries.removeLast()
-                let snapshot = PinSnapshot(image: image, originalText: originalText, displayState: entry.record.displayState)
-                return (snapshot, skippedUnreadable)
+                snapshot = PinSnapshot(image: image, originalText: originalText, displayState: entry.record.displayState)
             case .stored:
-                let snapshot = Self.readSnapshot(entry.record)
-                guard discard(entries.suffix(1), keeping: Array(entries.dropLast())) else {
-                    onWriteFailure?()
-                    return (nil, skippedUnreadable)
-                }
-                if let snapshot { return (snapshot, skippedUnreadable) }
-                skippedUnreadable = true
+                snapshot = Self.readSnapshot(entry.record)
+                if snapshot == nil, !Self.historyRootIsAvailable(entry.record.files.historyRoot) { continue }
             }
+
+            var next = entries
+            next.remove(at: index)
+            guard discard(entries[index...index], keeping: next) else {
+                onWriteFailure?()
+                return (nil, skippedUnreadable)
+            }
+            if let snapshot { return (snapshot, skippedUnreadable) }
+            skippedUnreadable = true
         }
         return (nil, skippedUnreadable)
     }
@@ -244,7 +249,7 @@ final class ClosedPinHistory {
         return true
     }
 
-    private func cleanUnusedFiles() {
+    func cleanUnusedFiles() {
         let removed = filesToRemove.filter { $0 != inFlightWrite?.files && Self.removeFiles($0) }
         if !removed.isEmpty {
             _ = commit(entries, removing: filesToRemove.subtracting(removed))
@@ -298,18 +303,28 @@ final class ClosedPinHistory {
     }
 
     private nonisolated static func removeFiles(_ files: PinFiles) -> Bool {
-        let imageRemoved = removeFile(at: files.imageURL)
-        let textRemoved = files.textURL.map(removeFile(at:)) ?? true
+        let root = files.historyRoot
+        let imageRemoved = removeFile(at: files.imageURL, historyRoot: root)
+        let textRemoved = files.textURL.map { removeFile(at: $0, historyRoot: root) } ?? true
         return imageRemoved && textRemoved
     }
 
-    private nonisolated static func removeFile(at url: URL) -> Bool {
+    private nonisolated static func removeFile(at url: URL, historyRoot: URL) -> Bool {
         url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return false }
             if unlink(path) == 0 { return true }
             guard errno == ENOENT || errno == ENOTDIR else { return false }
-            let root = url.deletingLastPathComponent().deletingLastPathComponent()
-            return FileManager.default.fileExists(atPath: root.path)
+            return historyRootIsAvailable(historyRoot)
+        }
+    }
+
+    private nonisolated static func historyRootIsAvailable(_ root: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return false }
+        return root.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            return access(path, X_OK) == 0
         }
     }
 }
@@ -324,7 +339,7 @@ private final class LegacyPinHistorySessions {
            let paths = try? JSONDecoder().decode(Set<URL>.self, from: data) {
             registeredSessionDirectories = paths.filter { url in
                 url.isFileURL && UUID(uuidString: url.lastPathComponent) != nil
-                    && url.deletingLastPathComponent().lastPathComponent == ClosedPinHistory.directoryName
+                    && url.deletingLastPathComponent().lastPathComponent == AirSnipConfig.defaultPinHistoryDirectoryName
             }
             removeSessionDirectories(registeredSessionDirectories)
         }
