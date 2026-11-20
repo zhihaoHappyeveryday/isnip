@@ -1162,7 +1162,6 @@ public struct UpdateReleaseInfo: Sendable {
     public let version: String
     public let htmlURL: URL
     public let downloadURL: URL?
-    public let body: String
 }
 
 public enum UpdateChecker {
@@ -1217,7 +1216,6 @@ public enum UpdateChecker {
             guard isVersionNewer(remoteVer, than: installedVersion) else {
                 return .success(.upToDate)
             }
-            let notes = (json["body"] as? String) ?? ""
             var dmgURL: URL?
             if let assets = json["assets"] as? [[String: Any]] {
                 let parsed: [(name: String, url: String)] = assets.compactMap { asset in
@@ -1230,7 +1228,7 @@ public enum UpdateChecker {
                 }
                 dmgURL = ReleaseAssetSelector.selectDownloadURL(assets: parsed)
             }
-            return .success(.available(UpdateReleaseInfo(version: remoteVer, htmlURL: htmlURL, downloadURL: dmgURL, body: notes)))
+            return .success(.available(UpdateReleaseInfo(version: remoteVer, htmlURL: htmlURL, downloadURL: dmgURL)))
         } catch {
             return .failure(error)
         }
