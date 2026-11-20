@@ -3,7 +3,7 @@
   <h1>iSnip</h1>
   <p><strong>Fast, lightweight native macOS screenshot, annotation, smart lossless compression, offline OCR &amp; translation utility</strong></p>
   <p>
-    <a href="https://github.com/zzusec/isnip/releases/latest"><img src="https://img.shields.io/github/v/release/zzusec/isnip?label=Release&color=0A84FF" alt="Latest Release" /></a>
+    <a href="https://github.com/zhihaoHappyeveryday/isnip/releases/latest"><img src="https://img.shields.io/github/v/release/zhihaoHappyeveryday/isnip?label=Release&color=0A84FF" alt="Latest Release" /></a>
     <img src="https://img.shields.io/badge/macOS-14.0%2B-111827" alt="macOS 14.0+" />
     <img src="https://img.shields.io/badge/Arch-arm64%20%7C%20amd64-0F766E" alt="arm64 | amd64" />
     <img src="https://img.shields.io/badge/Swift-5.10-F05138" alt="Swift 5.10" />
@@ -52,7 +52,7 @@
 
 ### Option 1: Download Prebuilt DMG (Recommended)
 
-1. Download the matching DMG from **[GitHub Releases](https://github.com/zzusec/isnip/releases/latest)**:
+1. Download the matching DMG from **[GitHub Releases](https://github.com/zhihaoHappyeveryday/isnip/releases/latest)**:
    - **Apple Silicon (`M1` / `M2` / `M3` / `M4` / `M5`)**: `isnip-macos-arm64-v*.dmg`
    - **Intel / AMD (`x86_64`) Mac**: `isnip-macos-amd64-v*.dmg`
 2. Open the DMG and drag **iSnip.app** into `/Applications`.
@@ -67,7 +67,7 @@
 Requirements: **macOS 14.0+** (`arm64` or `x86_64`) and **Xcode Command Line Tools (Swift 5.10+)**.
 
 ```sh
-git clone https://github.com/zzusec/isnip.git
+git clone https://github.com/zhihaoHappyeveryday/isnip.git
 cd isnip
 sh scripts/install-local.sh --no-pull
 ```

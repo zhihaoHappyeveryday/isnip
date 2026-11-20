@@ -132,6 +132,7 @@ final class SettingsUpdateState: ObservableObject {
         guard !isChecking else { return }
         isChecking = true
         statusKind = .checking
+        latestRelease = nil
         Task { @MainActor in
             let res = await UpdateChecker.checkLatest()
             isChecking = false
@@ -146,7 +147,6 @@ final class SettingsUpdateState: ObservableObject {
                     )
                 }
             case .success(.upToDate):
-                latestRelease = nil
                 statusKind = .upToDate
                 if showToast {
                     ToastHUD.show(
@@ -155,7 +155,6 @@ final class SettingsUpdateState: ObservableObject {
                     )
                 }
             case .success(.noPublishedRelease):
-                latestRelease = nil
                 statusKind = .noPublishedRelease
                 if showToast {
                     ToastHUD.show(statusText(in: lang), symbol: "info.circle")
