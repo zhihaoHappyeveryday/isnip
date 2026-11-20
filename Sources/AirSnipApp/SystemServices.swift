@@ -409,14 +409,25 @@ public enum OutputService {
     public struct ClipboardCopyID: Codable, Equatable {
         fileprivate let bootSessionID: UUID
         fileprivate let pasteboardName: String
-        fileprivate let changeCount: Int
+        fileprivate let originalCopyRevision: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case bootSessionID, pasteboardName
+            case originalCopyRevision = "changeCount"
+        }
     }
 
     private struct ClipboardRewrite: Codable {
         let bootSessionID: UUID
         let pasteboardName: String
-        let changeCount: Int
-        let originalChangeCount: Int
+        let writtenPasteboardRevision: Int
+        let originalCopyRevision: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case bootSessionID, pasteboardName
+            case writtenPasteboardRevision = "changeCount"
+            case originalCopyRevision = "originalChangeCount"
+        }
     }
 
     // Scope pasteboard change counts to the system boot that issued them.
@@ -431,23 +442,23 @@ public enum OutputService {
     private static let clipboardRewriteType = NSPasteboard.PasteboardType("io.zzusec.airsnip.clipboard-rewrite")
 
     private static func writePngDataToPasteboard(
-        _ pngData: Data, to pasteboard: NSPasteboard, originalChangeCount: Int? = nil
+        _ pngData: Data, to pasteboard: NSPasteboard, originalCopyRevision: Int? = nil
     ) -> Int? {
-        let changeCount = pasteboard.clearContents()
+        let writtenPasteboardRevision = pasteboard.clearContents()
         let item = NSPasteboardItem()
         // Omitting uncompressed TIFF avoids 10-20 MB of extra clipboard data.
         item.setData(pngData, forType: .png)
-        if let originalChangeCount {
+        if let originalCopyRevision {
             let rewrite = ClipboardRewrite(
                 bootSessionID: clipboardBootSessionID, pasteboardName: pasteboard.name.rawValue,
-                changeCount: changeCount, originalChangeCount: originalChangeCount
+                writtenPasteboardRevision: writtenPasteboardRevision, originalCopyRevision: originalCopyRevision
             )
             if let data = try? PropertyListEncoder().encode(rewrite) {
                 item.setData(data, forType: clipboardRewriteType)
             }
         }
         guard pasteboard.writeObjects([item]) else { return nil }
-        return changeCount
+        return writtenPasteboardRevision
     }
 
     public static func copyImageToClipboard(
@@ -470,7 +481,7 @@ public enum OutputService {
             return
         }
 
-        guard let initialChangeCount = writePngDataToPasteboard(rawPngData, to: pasteboard) else { return }
+        guard let originalCopyRevision = writePngDataToPasteboard(rawPngData, to: pasteboard) else { return }
         let shouldCompress = (config?.smartPngCompression ?? true) && (config?.compressClipboardPng ?? true)
         let qualityPreset = config?.pngCompressionQuality ?? .visuallyLossless
 
@@ -493,15 +504,15 @@ public enum OutputService {
                 quality: qualityPreset,
                 mode: .fastQuantizeOnly
             )
-            let afterStage1Count: Int? = await MainActor.run {
-                guard pasteboard.changeCount == initialChangeCount else { return nil }
-                let nextCount = stage1.compressedBytes < rawPngData.count
-                    ? writePngDataToPasteboard(stage1.data, to: pasteboard, originalChangeCount: initialChangeCount)
-                    : initialChangeCount
+            let stage1Revision: Int? = await MainActor.run {
+                guard pasteboard.changeCount == originalCopyRevision else { return nil }
+                let revision = stage1.compressedBytes < rawPngData.count
+                    ? writePngDataToPasteboard(stage1.data, to: pasteboard, originalCopyRevision: originalCopyRevision)
+                    : originalCopyRevision
                 onCompressed?(stage1)
-                return nextCount
+                return revision
             }
-            guard let expectedCount = afterStage1Count else { return }
+            guard let expectedRevision = stage1Revision else { return }
 
             // Stage 2: lossless `oxipng -o max` bit-stream squeeze in background
             let stage2 = PngSmartCompressor.optimizeWithOxipng(
@@ -512,8 +523,8 @@ public enum OutputService {
             )
             guard stage2.compressedBytes < stage1.compressedBytes else { return }
             await MainActor.run {
-                guard pasteboard.changeCount == expectedCount else { return }
-                _ = writePngDataToPasteboard(stage2.data, to: pasteboard, originalChangeCount: initialChangeCount)
+                guard pasteboard.changeCount == expectedRevision else { return }
+                _ = writePngDataToPasteboard(stage2.data, to: pasteboard, originalCopyRevision: originalCopyRevision)
             }
         }
     }
@@ -535,27 +546,31 @@ public enum OutputService {
         from pasteboard: NSPasteboard,
         excluding previousCopy: ClipboardCopyID?
     ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?, isTextPreviewClipped: Bool)? {
-        let changeCount = pasteboard.changeCount
-        let name = pasteboard.name.rawValue
-        var copyChangeCount = changeCount
-        // A recopy may carry the metadata, but it has a different change count.
-        if let data = pasteboard.data(forType: clipboardRewriteType),
-           let rewrite = try? PropertyListDecoder().decode(ClipboardRewrite.self, from: data),
-           rewrite.bootSessionID == clipboardBootSessionID, rewrite.pasteboardName == name,
-           rewrite.changeCount == changeCount {
-            copyChangeCount = rewrite.originalChangeCount
-        }
-        let copyID = ClipboardCopyID(
-            bootSessionID: clipboardBootSessionID, pasteboardName: name, changeCount: copyChangeCount
-        )
+        let currentRevision = pasteboard.changeCount
+        let copyID = clipboardCopyID(for: pasteboard, currentRevision: currentRevision)
         guard copyID != previousCopy else { return nil }
         if let image = readPasteboardImage(pasteboard) {
-            guard pasteboard.changeCount == changeCount else { return nil }
+            guard pasteboard.changeCount == currentRevision else { return nil }
             return (image.cgImage, image.pointSize, copyID, nil, false)
         }
         guard let text = pasteboard.string(forType: .string), !text.isEmpty,
-              let image = renderPinText(text), pasteboard.changeCount == changeCount else { return nil }
+              let image = renderPinText(text), pasteboard.changeCount == currentRevision else { return nil }
         return (image.cgImage, image.pointSize, copyID, text, image.isClipped)
+    }
+
+    private static func clipboardCopyID(for pasteboard: NSPasteboard, currentRevision: Int) -> ClipboardCopyID {
+        let name = pasteboard.name.rawValue
+        var originalCopyRevision = currentRevision
+        // A recopy may carry the marker into a new pasteboard revision.
+        if let data = pasteboard.data(forType: clipboardRewriteType),
+           let rewrite = try? PropertyListDecoder().decode(ClipboardRewrite.self, from: data),
+           rewrite.bootSessionID == clipboardBootSessionID, rewrite.pasteboardName == name,
+           rewrite.writtenPasteboardRevision == currentRevision {
+            originalCopyRevision = rewrite.originalCopyRevision
+        }
+        return ClipboardCopyID(
+            bootSessionID: clipboardBootSessionID, pasteboardName: name, originalCopyRevision: originalCopyRevision
+        )
     }
 
     private static func readPasteboardImage(_ pasteboard: NSPasteboard) -> (cgImage: CGImage, pointSize: NSSize)? {
