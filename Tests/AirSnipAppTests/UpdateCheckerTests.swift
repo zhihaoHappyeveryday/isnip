@@ -50,6 +50,25 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(info.htmlURL.absoluteString, "https://github.com/zhihaoHappyeveryday/isnip/releases/tag/v99.0.0")
     }
 
+    func testReleasePageMustBelongToTheFork() async {
+        var body = release(version: "99.0.0")
+        body["html_url"] = "https://github.com/zzusec/isnip/releases/tag/v99.0.0"
+        guard case .failure = await checkLatest(status: 200, body: body) else {
+            return XCTFail("The fork updater should reject a release page in the upstream repository")
+        }
+    }
+
+    func testUpstreamDMGIsIgnored() async throws {
+        let base = "https://github.com/zzusec/isnip/releases/download/v99.0.0/"
+        let assets = ["isnip-macos-arm64-v99.0.0.dmg", "isnip-macos-amd64-v99.0.0.dmg"].map {
+            ["name": $0, "browser_download_url": base + $0]
+        }
+        let result = try await checkLatest(status: 200, body: release(version: "99.0.0", assets: assets)).get()
+        guard case .available(let info) = result else { return XCTFail("Expected the fork release page to remain available") }
+        XCTAssertNil(info.downloadURL)
+        XCTAssertEqual(info.htmlURL.absoluteString, "https://github.com/zhihaoHappyeveryday/isnip/releases/tag/v99.0.0")
+    }
+
     func testMalformedReleaseReportsFailure() async {
         for body in [[:], release(version: "invalid")] {
             guard case .failure = await checkLatest(status: 200, body: body) else {
@@ -65,6 +84,33 @@ final class UpdateCheckerTests: XCTestCase {
         }
         guard case .failure(let error as URLError) = result else { return XCTFail("Expected a network error") }
         XCTAssertEqual(error.code, .notConnectedToInternet)
+    }
+
+    @MainActor
+    func testAutomaticUpdateUsesTheCurrentSwitchAndSkippedVersion() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = AirSnipAppController(configURL: directory.appendingPathComponent("config.json"))
+        let mockCheck = { await self.checkLatest(status: 200, body: self.release(version: "99.0.0")) }
+
+        app.updateConfig { $0.autoCheckUpdate = false }
+        let disabled = await app.automaticUpdate {
+            XCTFail("Automatic update must not contact the server when disabled")
+            return await mockCheck()
+        }
+        XCTAssertNil(disabled)
+
+        app.updateConfig {
+            $0.autoCheckUpdate = true
+            $0.skippedVersion = "99.0.0"
+        }
+        let skipped = await app.automaticUpdate(checkLatest: mockCheck)
+        XCTAssertNil(skipped)
+
+        app.updateConfig { $0.skippedVersion = nil }
+        let available = await app.automaticUpdate(checkLatest: mockCheck)
+        XCTAssertEqual(available?.version, "99.0.0")
     }
 
     private func checkLatest(status: Int, body: [String: Any] = [:]) async -> Result<UpdateChecker.Status, Error> {

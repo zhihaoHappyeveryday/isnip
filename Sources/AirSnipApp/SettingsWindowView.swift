@@ -221,7 +221,7 @@ public struct SettingsRootView: View {
                         spinning: updateState.isChecking,
                         helpText: L10n.tr("检查更新", "Check for Updates", in: lang)
                     ) {
-                        updateState.checkNow(lang: lang, showToast: selectedTab != .about)
+                        updateState.checkNow(lang: lang, showToast: selectedTab != .about || !trimmedSearch.isEmpty)
                     }
 
                     HeaderIconButton(

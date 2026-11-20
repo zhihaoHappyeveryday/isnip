@@ -124,18 +124,26 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if config.autoCheckUpdate {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard let self, self.config.autoCheckUpdate else { return }
-                if case .success(.available(let rel)) = await UpdateChecker.checkLatest(),
-                   self.config.autoCheckUpdate,
-                   self.config.skippedVersion != rel.version {
-                    ToastHUD.show(
-                        L10n.tr("发现新版本 v\(rel.version)", "New version v\(rel.version) available", in: self.config.language),
-                        symbol: "arrow.down.circle",
-                        duration: 3.0
-                    )
-                }
+                guard let self, let release = await self.automaticUpdate() else { return }
+                ToastHUD.show(
+                    L10n.tr("发现新版本 v\(release.version)", "New version v\(release.version) available", in: self.config.language),
+                    symbol: "arrow.down.circle",
+                    duration: 3.0
+                )
             }
         }
+    }
+
+    func automaticUpdate(
+        checkLatest: () async -> Result<UpdateChecker.Status, Error> = { await UpdateChecker.checkLatest() }
+    ) async -> UpdateReleaseInfo? {
+        guard config.autoCheckUpdate,
+              case .success(.available(let release)) = await checkLatest(),
+              config.autoCheckUpdate,
+              config.skippedVersion != release.version else {
+            return nil
+        }
+        return release
     }
 
     @objc private func onExternalShowSettings(_ note: Notification) {

@@ -1207,7 +1207,7 @@ public enum UpdateChecker {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String,
                   let htmlStr = json["html_url"] as? String,
-                  let htmlURL = URL(string: htmlStr), htmlURL.host == "github.com", htmlURL.scheme == "https" else {
+                  let htmlURL = releaseURL(htmlStr, under: "tag") else {
                 throw URLError(.cannotParseResponse)
             }
             let remoteVer = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
@@ -1222,10 +1222,11 @@ public enum UpdateChecker {
             if let assets = json["assets"] as? [[String: Any]] {
                 let parsed: [(name: String, url: String)] = assets.compactMap { asset in
                     guard let name = asset["name"] as? String,
-                          let dl = asset["browser_download_url"] as? String else {
+                          let dl = asset["browser_download_url"] as? String,
+                          let downloadURL = releaseURL(dl, under: "download") else {
                         return nil
                     }
-                    return (name: name, url: dl)
+                    return (name: name, url: downloadURL.absoluteString)
                 }
                 dmgURL = ReleaseAssetSelector.selectDownloadURL(assets: parsed)
             }
@@ -1233,6 +1234,15 @@ public enum UpdateChecker {
         } catch {
             return .failure(error)
         }
+    }
+
+    private static func releaseURL(_ value: String, under section: String) -> URL? {
+        guard let url = URL(string: value),
+              url.scheme == "https", url.host == "github.com",
+              url.standardized.path.lowercased().hasPrefix("/\(releaseRepo.lowercased())/releases/\(section)/") else {
+            return nil
+        }
+        return url
     }
 
     public static func isVersionNewer(_ candidate: String, than current: String) -> Bool {
