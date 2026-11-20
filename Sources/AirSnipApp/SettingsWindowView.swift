@@ -1732,8 +1732,8 @@ private struct PinHistoryDirectoryRow: View {
             title: L10n.tr("贴图历史目录", "Pin History Directory", in: lang),
             subtitle: subtitle,
             infoTip: L10n.tr(
-                "存放本次运行的已关闭贴图。默认跟随截图保存目录。",
-                "Stores closed pins for the current session. By default, follows the screenshot save location.", in: lang
+                "按关闭日期存放贴图。默认跟随截图保存目录。",
+                "Stores closed pins by date. By default, follows the screenshot save location.", in: lang
             )
         ) {
             HStack(spacing: 6) {
@@ -1755,12 +1755,12 @@ private struct PinHistoryDirectoryRow: View {
                 }
                 MagpieTextAction(L10n.tr("更改…", "Change…", in: lang)) {
                     if let chosen = OutputService.chooseSaveDirectory(initial: historyRoot.deletingLastPathComponent()) {
-                        app.updateConfig { $0.pinHistoryParentDirectory = chosen.path }
+                        app.updateConfig { $0.pinHistoryDirectory = chosen.path }
                     }
                 }
-                if app.config.pinHistoryParentDirectory != nil {
+                if app.config.pinHistoryDirectory != nil {
                     MagpieTextAction(L10n.tr("恢复默认", "Restore Default", in: lang)) {
-                        app.updateConfig { $0.pinHistoryParentDirectory = nil }
+                        app.updateConfig { $0.pinHistoryDirectory = nil }
                     }
                 }
             }

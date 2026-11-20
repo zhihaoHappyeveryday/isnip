@@ -17,6 +17,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private let statusMenu = NSMenu(title: "iSnip")
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
+    private let lastPinnedClipboardCopyURL: URL
     private var lastPinnedClipboardCopy: OutputService.ClipboardCopyID?
     private var isCapturingSnapshots = false
     private let selectionTranslation = SelectionTranslationController()
@@ -25,11 +26,20 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
-    public init(configURL: URL = AirSnipConfig.defaultConfigFileURL(), pinPasteboard: NSPasteboard = .general) {
+    public convenience init(configURL: URL = AirSnipConfig.defaultConfigFileURL(), pinPasteboard: NSPasteboard = .general) {
+        self.init(configURL: configURL, pinPasteboard: pinPasteboard, pinHistoryCloseTime: Date.init)
+    }
+
+    init(configURL: URL, pinPasteboard: NSPasteboard, pinHistoryCloseTime: @escaping () -> Date) {
         self.configURL = configURL
+        lastPinnedClipboardCopyURL = configURL.deletingPathExtension().appendingPathExtension("pinned-clipboard-copy.json")
+        if let data = try? Data(contentsOf: lastPinnedClipboardCopyURL) {
+            lastPinnedClipboardCopy = try? JSONDecoder().decode(OutputService.ClipboardCopyID.self, from: data)
+        }
         self.pinManager = PinManager(
             pasteboard: pinPasteboard,
-            historyRegistryURL: configURL.deletingPathExtension().appendingPathExtension("pin-history-sessions.json"),
+            historyConfigURL: configURL,
+            historyCloseTime: pinHistoryCloseTime,
             historyRootURL: OutputService.pinHistoryRootURL(for:)
         )
         let loadedConfig = AirSnipConfig.load(from: configURL)
@@ -43,6 +53,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         pinManager.getConfig = { [weak self] in
             self?.config ?? AirSnipConfig()
         }
+        _ = pinManager.trimClosedHistory(to: loadedConfig.pinHistoryLimit)
         pinManager.updateConfig = { [weak self] block in
             self?.updateConfig(block)
         }
@@ -171,10 +182,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         let oldLang = config.language
         let oldSelectionButton = config.translation.showSelectionButton
         let oldPinHistoryLimit = config.pinHistoryLimit
-        mutate(&config)
-        if config.pinHistoryLimit != oldPinHistoryLimit {
-            pinManager.trimClosedHistory(to: config.pinHistoryLimit)
+        var next = config
+        mutate(&next)
+        // Retry a failed trim at launch before raising the saved limit.
+        if next.pinHistoryLimit != oldPinHistoryLimit,
+           !pinManager.trimClosedHistory(to: min(oldPinHistoryLimit, next.pinHistoryLimit)) {
+            next.pinHistoryLimit = oldPinHistoryLimit
         }
+        config = next
         activeCaptureSession?.refreshWindowedPinConfig(config)
         L10n.current = config.language
         try? config.save(to: configURL)
@@ -569,7 +584,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             config: pinCfg,
             originalText: clip.originalText
         ) {
-            lastPinnedClipboardCopy = clip.copyID
+            rememberPinnedClipboardCopy(clip.copyID)
             if clip.isTextPreviewClipped {
                 ToastHUD.show(
                     L10n.tr("仅显示部分文字，可复制原文", "Showing part of the text. Use Copy Original Text.", in: config.language),
@@ -577,6 +592,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 )
             }
         }
+    }
+
+    private func rememberPinnedClipboardCopy(_ copyID: OutputService.ClipboardCopyID) {
+        lastPinnedClipboardCopy = copyID
+        try? FileManager.default.createDirectory(
+            at: lastPinnedClipboardCopyURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try? JSONEncoder().encode(copyID).write(to: lastPinnedClipboardCopyURL, options: .atomic)
     }
 
     private func startPinAnnotation(pin: PinWindowController) {
@@ -730,6 +753,15 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     private var controller: AirSnipAppController?
 
+    public override init() {
+        super.init()
+    }
+
+    init(controller: AirSnipAppController) {
+        self.controller = controller
+        super.init()
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let ctrl = AirSnipAppController()
@@ -750,7 +782,9 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
-        controller?.pinManager.finishHistorySession()
+        guard let pins = controller?.pinManager else { return }
+        pins.closeAll()
+        pins.finishHistoryWrites()
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

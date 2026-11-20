@@ -3,6 +3,7 @@ import ApplicationServices
 import Carbon
 import CoreGraphics
 import CoreText
+import Darwin
 import ImageIO
 import QuartzCore
 import ScreenCaptureKit
@@ -405,24 +406,47 @@ public enum OutputService {
 
     typealias ChooseSaveDestination = @MainActor (AirSnipConfig) -> SavePanelSelection?
 
-    public struct ClipboardCopyID: Equatable {
-        fileprivate let pasteboardName: NSPasteboard.Name
+    public struct ClipboardCopyID: Codable, Equatable {
+        fileprivate let bootSessionID: UUID
+        fileprivate let pasteboardName: String
         fileprivate let changeCount: Int
     }
 
-    private static var lastClipboardRewrite: (changeCount: Int, originalChangeCount: Int)?
+    private struct ClipboardRewrite: Codable {
+        let bootSessionID: UUID
+        let pasteboardName: String
+        let changeCount: Int
+        let originalChangeCount: Int
+    }
+
+    // Scope pasteboard change counts to the system boot that issued them.
+    private static let clipboardBootSessionID: UUID = {
+        var value = [CChar](repeating: 0, count: 37)
+        var size = value.count
+        guard sysctlbyname("kern.bootsessionuuid", &value, &size, nil, 0) == 0,
+              let id = UUID(uuidString: String(cString: value)) else { return UUID() }
+        return id
+    }()
+
+    private static let clipboardRewriteType = NSPasteboard.PasteboardType("io.zzusec.airsnip.clipboard-rewrite")
 
     private static func writePngDataToPasteboard(
         _ pngData: Data, to pasteboard: NSPasteboard, originalChangeCount: Int? = nil
     ) -> Int? {
         let changeCount = pasteboard.clearContents()
         let item = NSPasteboardItem()
-        // Write PNG data ONLY (omitting uncompressed TIFF avoids 10-20 MB clipboard bloat!)
+        // Omitting uncompressed TIFF avoids 10-20 MB of extra clipboard data.
         item.setData(pngData, forType: .png)
-        guard pasteboard.writeObjects([item]) else { return nil }
-        if let originalChangeCount, pasteboard.name == .general {
-            lastClipboardRewrite = (changeCount, originalChangeCount)
+        if let originalChangeCount {
+            let rewrite = ClipboardRewrite(
+                bootSessionID: clipboardBootSessionID, pasteboardName: pasteboard.name.rawValue,
+                changeCount: changeCount, originalChangeCount: originalChangeCount
+            )
+            if let data = try? PropertyListEncoder().encode(rewrite) {
+                item.setData(data, forType: clipboardRewriteType)
+            }
         }
+        guard pasteboard.writeObjects([item]) else { return nil }
         return changeCount
     }
 
@@ -512,13 +536,18 @@ public enum OutputService {
         excluding previousCopy: ClipboardCopyID?
     ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?, isTextPreviewClipped: Bool)? {
         let changeCount = pasteboard.changeCount
-        let name = pasteboard.name
+        let name = pasteboard.name.rawValue
         var copyChangeCount = changeCount
-        // Both compression stages keep the identifier of the original clipboard copy.
-        if name == .general, let lastClipboardRewrite, lastClipboardRewrite.changeCount == changeCount {
-            copyChangeCount = lastClipboardRewrite.originalChangeCount
+        // A recopy may carry the metadata, but it has a different change count.
+        if let data = pasteboard.data(forType: clipboardRewriteType),
+           let rewrite = try? PropertyListDecoder().decode(ClipboardRewrite.self, from: data),
+           rewrite.bootSessionID == clipboardBootSessionID, rewrite.pasteboardName == name,
+           rewrite.changeCount == changeCount {
+            copyChangeCount = rewrite.originalChangeCount
         }
-        let copyID = ClipboardCopyID(pasteboardName: name, changeCount: copyChangeCount)
+        let copyID = ClipboardCopyID(
+            bootSessionID: clipboardBootSessionID, pasteboardName: name, changeCount: copyChangeCount
+        )
         guard copyID != previousCopy else { return nil }
         if let image = readPasteboardImage(pasteboard) {
             guard pasteboard.changeCount == changeCount else { return nil }
@@ -665,13 +694,11 @@ public enum OutputService {
     }
 
     static func pinHistoryRootURL(for config: AirSnipConfig) -> URL {
-        let parentDirectory: URL
-        if let path = config.pinHistoryParentDirectory, !path.isEmpty {
-            parentDirectory = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
-        } else {
-            parentDirectory = defaultSaveDirectoryURL(for: config)
+        if let path = config.pinHistoryDirectory, !path.isEmpty {
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
         }
-        return parentDirectory.appendingPathComponent(ClosedPinHistory.directoryName, isDirectory: true)
+        return defaultSaveDirectoryURL(for: config)
+            .appendingPathComponent(AirSnipConfig.defaultPinHistoryDirectoryName, isDirectory: true)
     }
 
     public static func chooseSaveDirectory(initial: URL) -> URL? {

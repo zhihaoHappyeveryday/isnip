@@ -38,8 +38,8 @@
 - **Pin to Screen (`F3` / `⌃F3`)**
   - Float any capture or clipboard image always-on-top for side-by-side reference; supports cursor-centered scroll zoom, `⌘`/`⌃` + scroll opacity control, subtle border toggle, click-through mode, and pressing `Space` to annotate in place.
   - Pin clipboard text with its original spacing and line breaks. From a text pin, use `⌘⇧C` or **Copy Original Text** to copy the text, and `⌘C` to copy the current image.
-  - Press `F3` without new clipboard content to restore the most recently closed pin from this session. **Settings → Capture → Recoverable Pins** defaults to 20 and adjusts from 0 to 50 in steps of 5. Setting it to 0 clears and disables pin history.
-  - **Settings → About → Pin History Directory** shows where closed pins are cached for this session. It follows the screenshot save location by default and can be changed independently.
+  - Press `F3` without new clipboard content to restore the most recently closed pin that can be read, including pins from previous launches. **Settings → Capture → Recoverable Pins** defaults to 20 and adjusts from 0 to 50 in steps of 5. Setting it to 0 clears and disables pin history.
+  - Use **Settings → About → Pin History Directory** to open the history folder or choose another one. iSnip saves closed pins in `YYYY-MM-DD` folders inside `iSnip Pin History` under the screenshot save location by default. If you choose a folder, iSnip puts the dated folders directly inside it.
 - **100% Offline On-Device Vision OCR & QR Code Detection (`⌃F` / `T`)**
   - Extract text directly from screen regions (`⌃F`), active captures (`T`), pinned images (`T`), tall scrolling captures, clipboard images, or local image files (`Recognize Image File…`).
   - Supports multi-language switching (`Auto` / `Simplified Chinese` / `Traditional Chinese` / `English` / `Japanese` / `Korean`), smart soft line-break merging, and one-click QR URL opening—**100% local inference, images never leave your Mac**.

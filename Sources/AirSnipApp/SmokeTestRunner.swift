@@ -280,7 +280,8 @@ public enum SmokeTestRunner {
         defer {
             app.updateConfig { $0.pinHistoryLimit = 0 }
             app.pinManager.closeAll()
-            app.pinManager.finishHistorySession()
+            app.pinManager.finishHistoryWrites()
+            app.settingsController = nil
             pasteboard.releaseGlobally()
         }
         return check(image, app, pasteboard)
@@ -383,6 +384,163 @@ public enum SmokeTestRunner {
             return false
         }
         print("[pins] PASS: 达到同屏上限后仍可重试贴出新图和恢复贴图")
+        return true
+    }
+
+    @MainActor
+    private static func runUsedClipboardImageAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        guard let copied = image.cropping(to: CGRect(x: 0, y: 0, width: 64, height: 48)),
+              let png = try? ImageEncoder.encode(copied, format: .png, scale: 1) else { return false }
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        let item = NSPasteboardItem()
+        guard item.setData(png, forType: .png), item.setString("Image caption", forType: .string),
+              pasteboard.writeObjects([item]) else { return false }
+        let copyRevision = pasteboard.changeCount
+        app.triggerPinOrRestore()
+        guard let opened = app.pinManager.windows.last, opened.cgImage.width == copied.width,
+              opened.originalText == nil, pasteboard.changeCount == copyRevision else {
+            fputs("FAIL: F3 should prefer the clipboard image over the caption and leave the clipboard unchanged\n", stderr)
+            return false
+        }
+        opened.closeSelf()
+        for width in [96, 128] {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 48)),
+                  app.pinManager.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+            else { return false }
+            app.pinManager.windows.last?.closeSelf()
+        }
+        app.pinManager.finishHistoryWrites()
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+
+        for (index, width) in [128, 96, copied.width].enumerated() {
+            app.triggerPinOrRestore()
+            guard app.pinManager.count == index + 1, let restored = app.pinManager.windows.last,
+                  restored.window.isVisible, restored.cgImage.width == width else {
+                fputs("FAIL: A used clipboard image should restore closed pins in order after relaunch (press \(index + 1))\n", stderr)
+                return false
+            }
+        }
+        print("[pins] PASS: 重开后同一次图片复制按顺序恢复已关闭贴图")
+        return true
+    }
+
+    @MainActor
+    private static func runUsedClipboardCompressionAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        guard let historyImage = image.cropping(to: CGRect(x: 0, y: 0, width: 96, height: 48)) else { return false }
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        OutputService.copyImageToClipboard(image, config: app.config, to: pasteboard)
+        let originalRevision = pasteboard.changeCount
+        guard let originalPNG = pasteboard.data(forType: .png) else { return false }
+        app.triggerPinOrRestore()
+        guard let opened = app.pinManager.windows.last, opened.cgImage.width == image.width else { return false }
+        opened.closeSelf()
+        guard app.pinManager.createPin(cgImage: historyImage, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        else { return false }
+        app.pinManager.windows.last?.closeSelf()
+        app.pinManager.finishHistoryWrites()
+
+        guard waitForPinHistoryWork({ pasteboard.changeCount != originalRevision }),
+              let compressedPNG = pasteboard.data(forType: .png), compressedPNG.count < originalPNG.count else {
+            fputs("FAIL: The clipboard compression fixture should rewrite the clipboard with a smaller PNG\n", stderr)
+            return false
+        }
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == historyImage.width else {
+            fputs("FAIL: After relaunch, compression of a used clipboard image should still let F3 restore history first\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 2, app.pinManager.windows.last?.cgImage.width == image.width,
+              let compressedItem = pasteboard.pasteboardItems?.first else { return false }
+
+        // Clipboard managers can recopy the image along with all its pasteboard types.
+        let recopied = NSPasteboardItem()
+        for type in compressedItem.types {
+            guard let data = compressedItem.data(forType: type), recopied.setData(data, forType: type) else { return false }
+        }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([recopied]) else { return false }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 3, app.pinManager.windows.last?.cgImage.width == image.width else {
+            fputs("FAIL: Recopied compressed clipboard data should allow a new pin\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 重开后后台压缩写回仍属同一次复制，主动复制相同内容可以再贴")
+        return true
+    }
+
+    @MainActor
+    private static func runUsedClipboardTextAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.updateConfig {
+            $0.lastSaveDirectory = configURL.deletingLastPathComponent().path
+            $0.pinMaxCount = 1
+        }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        let text = "  贴图原文\n\tkeep this text  "
+        OutputService.copyStringToClipboard(text, to: pasteboard)
+        let copyRevision = pasteboard.changeCount
+        app.triggerPinOrRestore()
+        guard let textPin = app.pinManager.windows.last, textPin.originalText == text,
+              pasteboard.changeCount == copyRevision else {
+            fputs("FAIL: F3 should pin the original text and leave the clipboard unchanged\n", stderr)
+            return false
+        }
+        textPin.closeSelf()
+        guard app.pinManager.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        else { return false }
+        app.pinManager.windows.last?.closeSelf()
+        app.pinManager.finishHistoryWrites()
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, let restored = app.pinManager.windows.last,
+              restored.originalText == nil, restored.cgImage.width == image.width else {
+            fputs("FAIL: After relaunch, a used text copy should let F3 restore history first\n", stderr)
+            return false
+        }
+
+        OutputService.copyStringToClipboard(text, to: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1 else {
+            fputs("FAIL: Recopied text should still respect the on-screen pin limit\n", stderr)
+            return false
+        }
+        restored.closeSelf()
+        app.pinManager.finishHistoryWrites()
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.originalText == text else {
+            fputs("FAIL: After relaunch, a recopy previously blocked by the pin limit should still take priority over history\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 重开后已贴过的文字进入历史恢复，重新复制遇到同屏上限后仍可重试")
         return true
     }
 
@@ -719,33 +877,62 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runClosedPinHistoryLimitCheck(image: CGImage) -> Bool {
-        var config = AirSnipConfig()
-        config.pinMaxCount = 25
-        let pins = PinManager()
-        defer { pins.closeAll() }
+    private static func runClosedPinHistoryLimitCheck(image: CGImage, configURL: URL) -> Bool {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        guard var now = calendar.date(from: DateComponents(year: 2024, month: 12, day: 20, hour: 12)),
+              let later = calendar.date(from: DateComponents(year: 2025, month: 1, day: 6, hour: 12))
+        else { return false }
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard) { now }
+        let directory = configURL.deletingLastPathComponent()
+        let root = directory.appendingPathComponent("iSnip Pin History", isDirectory: true)
+        app.updateConfig {
+            $0.lastSaveDirectory = directory.path
+            $0.pinMaxCount = 25
+        }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.pinManager.finishHistoryWrites()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
 
         for width in 32...54 {
             guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
-                  pins.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: config) else { return false }
+                  app.pinManager.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config) else {
+                return false
+            }
             if width < 36 {
-                pins.windows.last?.closeSelf()
+                app.pinManager.windows.last?.closeSelf()
             }
         }
-        pins.closeAll()
+        now = later
+        app.pinManager.closeAll()
+        app.pinManager.finishHistoryWrites()
+        guard pinHistoryPNGCount(at: root.appendingPathComponent("2024-12-20")) == 1,
+              pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-06")) == 19 else {
+            fputs("FAIL: The default history limit should keep the newest 20 pins across close dates\n", stderr)
+            return false
+        }
+
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        let pins = app.pinManager
         for width in (35...54).reversed() {
-            pins.restoreLastClosedPin(config: config)
+            app.triggerPinOrRestore()
             guard pins.windows.last?.cgImage.width == width else {
                 fputs("FAIL: Single and batch closes should share the most recent 20 history entries in order\n", stderr)
                 return false
             }
         }
-        pins.restoreLastClosedPin(config: config)
+        app.triggerPinOrRestore()
         guard pins.count == 20 else {
             fputs("FAIL: Pin history should discard the oldest pin after 20 closes\n", stderr)
             return false
         }
-        print("[pins] PASS: 单张关闭和关闭全部共用最近 20 张的历史")
+        print("[pins] PASS: 跨日期只保留最近 20 张，较早日期的保留记录仍可恢复")
         return true
     }
 
@@ -764,15 +951,176 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runDiskPinHistoryCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
+    private static func runUnavailablePinHistoryCheck(image: CGImage, configURL: URL) throws -> Bool {
         let files = FileManager.default
-        let pins = app.pinManager
-        let base = app.configURL.deletingLastPathComponent()
+        let base = configURL.deletingLastPathComponent()
+        let previous = base.appendingPathComponent("previous-history", isDirectory: true)
+        let current = base.appendingPathComponent("current-history", isDirectory: true)
+        let disconnected = base.appendingPathComponent("disconnected-history", isDirectory: true)
+        let disconnectedCurrent = base.appendingPathComponent("disconnected-current-history", isDirectory: true)
+        try files.createDirectory(at: previous, withIntermediateDirectories: true)
+        try files.createDirectory(at: current, withIntermediateDirectories: false)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        guard let closeTime = calendar.date(from: DateComponents(year: 2025, month: 1, day: 2, hour: 12)) else { return false }
+        let previousDay = previous.appendingPathComponent("2025-01-02", isDirectory: true)
+        let currentDay = current.appendingPathComponent("2025-01-02", isDirectory: true)
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard) { closeTime }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.pinManager.finishHistoryWrites()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+
+        func closePins(_ widths: [Int], in directory: URL) -> Bool {
+            app.updateConfig { $0.pinHistoryDirectory = directory.path }
+            for width in widths {
+                guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
+                      app.pinManager.createPin(cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil,
+                                               config: app.config, originalText: "Pin \(width)") else { return false }
+            }
+            app.pinManager.closeAll()
+            app.pinManager.finishHistoryWrites()
+            return true
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 3 }
+        guard closePins([32], in: previous), closePins([40], in: current), closePins([48, 56], in: previous),
+              pinHistoryPNGCount(at: previousDay) == 2, pinHistoryPNGCount(at: current) == 1 else {
+            fputs("FAIL: History directories should share one limit and remove the oldest pin first\n", stderr)
+            return false
+        }
+        try "Keep these notes".write(to: previousDay.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        try Data().write(to: previousDay.appendingPathComponent("reference.png"))
+        app.updateConfig { $0.pinHistoryDirectory = current.path }
+        try files.moveItem(at: previous, to: disconnected)
+        try files.createDirectory(at: previous, withIntermediateDirectories: false)
+
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard) { closeTime }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == 40 else {
+            fputs("FAIL: After reopening, F3 should skip newer pins on an unavailable path and restore a readable pin\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1 else { return false }
+        app.updateConfig { $0.pinHistoryLimit = 1 }
+        try files.removeItem(at: previous)
+        try files.moveItem(at: disconnected, to: previous)
+
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 2, app.pinManager.windows.last?.cgImage.width == 56,
+              try Set(files.contentsOfDirectory(atPath: previousDay.path)) == ["notes.txt", "reference.png"] else {
+            fputs("FAIL: After reconnecting, F3 should restore the newest retained pin and clean only consumed or evicted files\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 2 else { return false }
+        print("[pins] PASS: 多目录共用上限，F3 跳过离线目录，接回后继续恢复并只清理对应文件")
+
+        app.updateConfig {
+            $0.pinHistoryLimit = 2
+            $0.pinHistoryDirectory = previous.path
+        }
+        app.pinManager.windows.last?.closeSelf()
+        app.updateConfig { $0.pinHistoryDirectory = current.path }
+        app.pinManager.closeAll()
+        app.pinManager.finishHistoryWrites()
+        guard pinHistoryPNGCount(at: previousDay) == 2, pinHistoryPNGCount(at: currentDay) == 1,
+              let currentImage = try files.contentsOfDirectory(at: currentDay, includingPropertiesForKeys: nil)
+                  .first(where: { $0.pathExtension == "png" }) else { return false }
+        try "Keep these notes".write(to: currentDay.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        try files.moveItem(at: previous, to: disconnected)
+        try files.moveItem(at: current, to: disconnectedCurrent)
+        try files.createDirectory(at: currentDay, withIntermediateDirectories: true)
+        let replacementData = Data("Keep this file on the replacement directory".utf8)
+        try replacementData.write(to: currentImage)
+        app.updateConfig { $0.pinHistoryLimit = 0 }
+
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        guard (try? Data(contentsOf: currentImage)) == replacementData else {
+            fputs("FAIL: Deferred cleanup should leave files in a replacement history directory intact\n", stderr)
+            return false
+        }
+        try files.moveItem(at: disconnected, to: previous)
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 0,
+              try Set(files.contentsOfDirectory(atPath: previousDay.path)) == ["notes.txt", "reference.png"] else {
+            fputs("FAIL: Pending deletion should survive a restart and finish when a cleared history directory returns\n", stderr)
+            return false
+        }
+        try files.removeItem(at: current)
+        try files.moveItem(at: disconnectedCurrent, to: current)
+        let workspace = NSWorkspace.shared
+        workspace.notificationCenter.post(name: NSWorkspace.didMountNotification, object: workspace)
+        guard waitForPinHistoryWork({ (try? files.contentsOfDirectory(atPath: currentDay.path)) == ["notes.txt"] }) else {
+            fputs("FAIL: Mounting an old history volume should finish deferred cleanup even when history is disabled\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 离线清空历史后重开，F3 或磁盘重新挂载会清理待删除的文件")
+        return true
+    }
+
+    @MainActor
+    private static func runDiskPinHistoryCheck(image: CGImage, configURL: URL) -> Bool {
+        let files = FileManager.default
+        let base = configURL.deletingLastPathComponent()
         let defaultDirectory = base.appendingPathComponent("iSnip Pin History", isDirectory: true)
-        let customParent = base.appendingPathComponent("custom-history", isDirectory: true)
-        let customDirectory = customParent.appendingPathComponent("iSnip Pin History", isDirectory: true)
-        guard (try? files.createDirectory(at: customParent, withIntermediateDirectories: false)) != nil,
-              (try? files.createDirectory(at: defaultDirectory, withIntermediateDirectories: true)) != nil else { return false }
+        let legacyParent = base.appendingPathComponent("previously-selected", isDirectory: true)
+        let legacyRoot = legacyParent.appendingPathComponent("iSnip Pin History", isDirectory: true)
+        let oldSession = defaultDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let otherDirectory = defaultDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let legacyRegistry = configURL.deletingPathExtension().appendingPathExtension("pin-history-sessions.json")
+        do {
+            try files.createDirectory(at: oldSession, withIntermediateDirectories: true)
+            try files.createDirectory(at: otherDirectory, withIntermediateDirectories: false)
+            try files.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
+            try JSONEncoder().encode([oldSession]).write(to: legacyRegistry)
+            try JSONEncoder().encode([
+                "lastSaveDirectory": base.path,
+                "pinHistoryParentDirectory": legacyParent.path,
+            ]).write(to: configURL)
+        } catch {
+            fputs("FAIL: Could not prepare the legacy history fixture\n", stderr)
+            return false
+        }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        guard let closeTime = calendar.date(from: DateComponents(year: 2025, month: 1, day: 2, hour: 12)) else { return false }
+        let closeDay = defaultDirectory.appendingPathComponent("2025-01-02", isDirectory: true)
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard) { closeTime }
+        var pins = app.pinManager
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            pins.closeAll()
+            pins.finishHistoryWrites()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+        guard !files.fileExists(atPath: oldSession.path), files.fileExists(atPath: otherDirectory.path) else {
+            fputs("FAIL: Legacy cleanup should remove only the registered session directories\n", stderr)
+            return false
+        }
+        guard OutputService.pinHistoryRootURL(for: app.config).path == legacyRoot.path else {
+            fputs("FAIL: The old directory setting should keep the history location users used to open\n", stderr)
+            return false
+        }
+        app.updateConfig { $0.pinHistoryDirectory = nil }
+        guard OutputService.pinHistoryRootURL(for: app.config).path == defaultDirectory.path else {
+            fputs("FAIL: Restoring defaults should use iSnip Pin History under the screenshot save directory\n", stderr)
+            return false
+        }
+        let customDirectory = base.appendingPathComponent("custom-history", isDirectory: true)
+        let customDay = customDirectory.appendingPathComponent("2025-01-02", isDirectory: true)
+        guard (try? files.createDirectory(at: customDirectory, withIntermediateDirectories: false)) != nil else { return false }
 
         let text = "  原文 🚀\r\n\t第二行  "
         weak var firstImage: CGImage?
@@ -791,9 +1139,10 @@ public enum SmokeTestRunner {
             context.fill(CGRect(x: 4, y: 8, width: 56, height: 48))
             guard let sample = context.makeImage(),
                   let pixels = PixelBufferRGBA(cgImage: sample),
-                  pins.createPin(cgImage: sample, backingScale: 2, preferredScreenOriginAppKit: nil, config: app.config,
+                  pins.createPin(cgImage: image, backingScale: 2, preferredScreenOriginAppKit: nil, config: app.config,
                                  originalText: text),
                   let pin = pins.windows.last else { return false }
+            pin.updateImage(sample)
             pin.adjustZoom(delta: 1, anchorInWindow: .zero)
             pin.adjustOpacity(delta: -1)
             pin.setShowBorder(false)
@@ -813,8 +1162,23 @@ public enum SmokeTestRunner {
             fputs("FAIL: Closed pins should write under the screenshot save directory and release their windows and bitmaps\n", stderr)
             return false
         }
+        guard let saved = try? files.contentsOfDirectory(at: closeDay, includingPropertiesForKeys: nil),
+              let png = saved.first(where: { $0.pathExtension == "png" }),
+              let original = saved.first(where: { $0.pathExtension == "txt" }),
+              saved.count == 2,
+              original.lastPathComponent == png.deletingPathExtension().lastPathComponent + ".txt",
+              (try? String(contentsOf: original, encoding: .utf8)) == text else {
+            fputs("FAIL: A text pin should save paired PNG and TXT files directly inside its close day\n", stderr)
+            return false
+        }
+        let userFile = closeDay.appendingPathComponent("notes.txt")
+        guard (try? "Keep these notes".write(to: userFile, atomically: true, encoding: .utf8)) != nil else { return false }
 
-        app.updateConfig { $0.pinHistoryParentDirectory = customParent.path }
+        app.updateConfig { $0.pinHistoryDirectory = customDirectory.path }
+        guard OutputService.pinHistoryRootURL(for: app.config).path == customDirectory.path else {
+            fputs("FAIL: Pin history settings should open the exact directory selected by the user\n", stderr)
+            return false
+        }
         weak var secondImage: CGImage?
         let closedSecond = autoreleasepool {
             guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: 64, height: 48)),
@@ -824,22 +1188,31 @@ public enum SmokeTestRunner {
             pin.closeSelf()
             return pins.count == 0
         }
-        guard closedSecond, waitForPinHistoryWork({ secondImage == nil && pinHistoryPNGCount(at: customDirectory) == 1 }),
+        guard closedSecond, waitForPinHistoryWork({ secondImage == nil && pinHistoryPNGCount(at: customDay) == 1 }),
               pinHistoryPNGCount(at: defaultDirectory) == 1 else {
             fputs("FAIL: Changing the history directory should apply to the next close and retain existing history\n", stderr)
             return false
         }
 
-        let invalidParent = base.appendingPathComponent("invalid-history-parent")
-        guard (try? Data().write(to: invalidParent)) != nil else { return false }
-        app.updateConfig { $0.pinHistoryParentDirectory = invalidParent.path }
+        let invalidDirectory = base.appendingPathComponent("invalid-history")
+        guard (try? Data().write(to: invalidDirectory)) != nil else { return false }
+        app.updateConfig { $0.pinHistoryDirectory = invalidDirectory.path }
         guard pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config) else { return false }
         pins.windows.last?.closeSelf()
         guard pins.count == 0 else { return false }
+        app.updateConfig { $0.pinHistoryDirectory = customDirectory.path }
 
+        // Rebuild the app after saving without going through the normal quit callback.
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        pins = app.pinManager
+        guard OutputService.pinHistoryRootURL(for: app.config).path == customDirectory.path else {
+            fputs("FAIL: Reopening should preserve the exact selected pin history directory\n", stderr)
+            return false
+        }
         app.triggerPinOrRestore(from: pasteboard)
         guard pins.count == 1, pins.windows.last?.cgImage.width == 64, pinHistoryPNGCount(at: customDirectory) == 0 else {
-            fputs("FAIL: A failed close should leave the next recoverable pin and its existing file available\n", stderr)
+            fputs("FAIL: After reopening, F3 should recover the most recently saved pin and consume its file\n", stderr)
             return false
         }
         app.triggerPinOrRestore(from: pasteboard)
@@ -847,7 +1220,8 @@ public enum SmokeTestRunner {
               restored.cgImage.colorSpace?.isWideGamutRGB == true, PixelBufferRGBA(cgImage: restored.cgImage) == expectedImage,
               restored.window.frame == expectedFrame, restored.backingScale == 2, restored.zoomScale == expectedZoom,
               restored.opacity == expectedOpacity, restored.window.alphaValue == 0.82,
-              restored.window.ignoresMouseEvents, !restored.showBorder, pinHistoryPNGCount(at: defaultDirectory) == 0 else {
+              restored.window.ignoresMouseEvents, !restored.showBorder,
+              (try? files.contentsOfDirectory(atPath: closeDay.path)) == ["notes.txt"] else {
             fputs("FAIL: Disk restoration should preserve image color, alpha and display state and remove the consumed file\n", stderr)
             return false
         }
@@ -856,17 +1230,135 @@ public enum SmokeTestRunner {
             fputs("FAIL: Disk restoration should preserve the complete original text\n", stderr)
             return false
         }
-        print("[pins] PASS: 已关闭贴图释放窗口和位图，换目录即时生效，磁盘恢复保留图像、状态和原文")
+        print("[pins] PASS: 旧路径迁移、自选目录和恢复默认，重开后可跨目录恢复图像、状态和原文")
+        return true
+    }
+
+    @MainActor
+    private static func runPinHistoryQuitCheck(image: CGImage, configURL: URL) -> Bool {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        guard var now = calendar.date(from: DateComponents(year: 2024, month: 12, day: 30, hour: 12)),
+              let batchTime = calendar.date(from: DateComponents(year: 2024, month: 12, day: 31, hour: 23, minute: 59, second: 59)),
+              let quitTime = calendar.date(from: DateComponents(year: 2025, month: 1, day: 2, hour: 23, minute: 59, second: 59))
+        else { return false }
+
+        let pasteboard = NSPasteboard.withUniqueName()
+        var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard) {
+            let closeTime = now
+            now.addTimeInterval(2)
+            return closeTime
+        }
+        let directory = configURL.deletingLastPathComponent()
+        let root = directory.appendingPathComponent("iSnip Pin History", isDirectory: true)
+        app.updateConfig {
+            $0.lastSaveDirectory = directory.path
+            $0.pinHistoryLimit = 5
+        }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.pinManager.closeAll()
+            app.pinManager.finishHistoryWrites()
+            app.settingsController = nil
+            pasteboard.releaseGlobally()
+        }
+
+        func openPin(width: Int, originalText: String? = nil) -> PinWindowController? {
+            guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: 32)),
+                  app.pinManager.createPin(
+                      cgImage: sample, backingScale: 1, preferredScreenOriginAppKit: nil,
+                      config: app.config, originalText: originalText
+                  ) else { return nil }
+            return app.pinManager.windows.last
+        }
+
+        guard let oldest = openPin(width: 35), let immediatelyRestored = openPin(width: 40) else { return false }
+        oldest.closeSelf()
+        immediatelyRestored.closeSelf()
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == 40 else {
+            fputs("FAIL: F3 should restore a pin even when closing and restoring immediately\n", stderr)
+            return false
+        }
+
+        now = batchTime
+        guard openPin(width: 50) != nil else { return false }
+        app.pinManager.closeAll()
+        let originalText = "  Quit with this text\n\tstill open  "
+        guard let manuallyClosed = openPin(width: 60), openPin(width: 70) != nil,
+              let newest = openPin(width: 80, originalText: originalText) else { return false }
+        newest.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: 24, y: 16))
+        newest.adjustOpacity(delta: -1)
+        newest.window.setFrameOrigin(NSPoint(x: newest.window.frame.minX + 24, y: newest.window.frame.minY + 16))
+        let expectedFrame = newest.window.frame
+        let expectedZoom = newest.zoomScale
+        let expectedOpacity = newest.window.alphaValue
+        let expectedImage = PixelBufferRGBA(cgImage: newest.cgImage)
+        manuallyClosed.closeSelf()
+        now = quitTime
+        let willTerminate = Notification(name: NSApplication.willTerminateNotification, object: NSApp)
+        AirSnipAppDelegate(controller: app).applicationWillTerminate(willTerminate)
+
+        guard pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-02")) == 2,
+              pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-03")) == 0 else {
+            fputs("FAIL: Normal quit should save all open pins on the day the quit started\n", stderr)
+            return false
+        }
+        guard pinHistoryPNGCount(at: root.appendingPathComponent("2024-12-30")) == 0,
+              pinHistoryPNGCount(at: root.appendingPathComponent("2024-12-31")) == 2,
+              pinHistoryPNGCount(at: root.appendingPathComponent("2025-01-01")) == 1 else {
+            fputs("FAIL: Normal quit should finish queued writes on their close day and apply the global history limit\n", stderr)
+            return false
+        }
+
+        app.settingsController = nil
+        app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        for (index, width) in [80, 70, 60, 50, 40].enumerated() {
+            app.triggerPinOrRestore()
+            guard app.pinManager.count == index + 1, app.pinManager.windows.last?.cgImage.width == width else {
+                fputs("FAIL: Reopening after normal quit should recover pins newest first across dates\n", stderr)
+                return false
+            }
+        }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 5, pinHistoryPNGCount(at: root) == 0 else {
+            fputs("FAIL: Restored pins should disappear from history on disk\n", stderr)
+            return false
+        }
+        guard let restored = app.pinManager.windows.first, restored.window.isVisible,
+              PixelBufferRGBA(cgImage: restored.cgImage) == expectedImage,
+              restored.window.frame == expectedFrame, restored.zoomScale == expectedZoom,
+              restored.window.alphaValue == expectedOpacity else {
+            fputs("FAIL: Reopening should restore the open pin with its image and display state at quit\n", stderr)
+            return false
+        }
+        restored.copyOriginalText()
+        guard pasteboard.string(forType: .string) == originalText else {
+            fputs("FAIL: Reopening should preserve the original text of a pin that was open at quit\n", stderr)
+            return false
+        }
+
+        app.updateConfig { $0.pinHistoryLimit = 0 }
+        AirSnipAppDelegate(controller: app).applicationWillTerminate(willTerminate)
+        guard pinHistoryPNGCount(at: root) == 0 else {
+            fputs("FAIL: Quitting should leave pin history empty when its limit is zero\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 退出保存未关闭贴图，重开按顺序恢复图像、状态和原文，并遵守全局上限")
         return true
     }
 
     @MainActor
     private static func runFailedPinHistoryWriteCheck(image: CGImage, directory: URL) throws -> Bool {
         let files = FileManager.default
-        let history = ClosedPinHistory(registryURL: nil)
-        defer { history.finishSession() }
+        let history = ClosedPinHistory(configURL: nil)
+        defer {
+            _ = history.trim(to: 0)
+            history.finishPendingWrites()
+        }
         let workingRoot = directory.appendingPathComponent("write-history", isDirectory: true)
         let failingRoot = directory.appendingPathComponent("unavailable-history", isDirectory: true)
+        let closedAt = Date()
         let displayState = PinDisplayState(
             frame: CGRect(x: 0, y: 0, width: 32, height: 32), baseSize: CGSize(width: 32, height: 32),
             backingScale: 1, zoomScale: 1, preferredOpacity: 1, effectiveWindowOpacity: 1,
@@ -876,31 +1368,32 @@ public enum SmokeTestRunner {
             PinSnapshot(image: image, originalText: text, displayState: displayState)
         }
 
-        // Make a valid session directory first, then replace it with a file so the actual write fails.
+        // Replace the expected day directory with a file so the actual write fails.
         weak var seedImage: CGImage?
         let seeded = autoreleasepool {
             guard let sample = image.cropping(to: displayState.frame) else { return false }
             seedImage = sample
-            history.remember([snapshot(sample, text: "seed")], limit: 2, historyRoot: failingRoot)
+            history.remember([snapshot(sample, text: "seed")], limit: 2, historyRoot: failingRoot, closedAt: closedAt)
             return true
         }
         guard seeded, waitForPinHistoryWork({ seedImage == nil }),
               history.restoreLast().snapshot?.originalText == "seed",
-              let sessionDirectory = try files.contentsOfDirectory(
+              let dayDirectory = try files.contentsOfDirectory(
                   at: failingRoot, includingPropertiesForKeys: nil
               ).first else {
-            fputs("FAIL: Could not prepare a writable pin history session for the failure fixture\n", stderr)
+            fputs("FAIL: Could not prepare a writable day directory for the pin history failure fixture\n", stderr)
             return false
         }
-        try files.removeItem(at: sessionDirectory)
-        try Data().write(to: URL(fileURLWithPath: sessionDirectory.path, isDirectory: false))
+        try files.removeItem(at: dayDirectory)
+        try Data().write(to: URL(fileURLWithPath: dayDirectory.path, isDirectory: false))
 
         var failures = 0
         history.onWriteFailure = { failures += 1 }
         history.remember(
-            [snapshot(image, text: "oldest"), snapshot(image, text: "newest")], limit: 2, historyRoot: workingRoot
+            [snapshot(image, text: "oldest"), snapshot(image, text: "newest")],
+            limit: 2, historyRoot: workingRoot, closedAt: closedAt
         )
-        history.remember([snapshot(image, text: "failed")], limit: 2, historyRoot: failingRoot)
+        history.remember([snapshot(image, text: "failed")], limit: 2, historyRoot: failingRoot, closedAt: closedAt)
         guard waitForPinHistoryWork({ failures > 0 }), failures == 1,
               history.restoreLast().snapshot?.originalText == "newest", history.isEmpty,
               pinHistoryPNGCount(at: workingRoot) == 0 else {
@@ -914,6 +1407,7 @@ public enum SmokeTestRunner {
     @MainActor
     private static func runConfiguredPinHistoryCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         let pins = app.pinManager
+        let directory = app.configURL.deletingLastPathComponent().appendingPathComponent("iSnip Pin History", isDirectory: true)
 
         func openPins(widths: ClosedRange<Int>) -> Bool {
             for width in widths {
@@ -926,8 +1420,13 @@ public enum SmokeTestRunner {
         app.updateConfig { $0.pinHistoryLimit = 10 }
         guard openPins(widths: 32...41) else { return false }
         pins.closeAll()
+        pins.finishHistoryWrites()
         app.updateConfig { $0.pinHistoryLimit = 5 }
         app.updateConfig { $0.pinHistoryLimit = 10 }
+        guard pinHistoryPNGCount(at: directory) == 5 else {
+            fputs("FAIL: Shrinking history should remove the oldest saved files\n", stderr)
+            return false
+        }
 
         for width in [41, 40, 39, 38, 37] {
             app.triggerPinOrRestore(from: pasteboard)
@@ -944,9 +1443,30 @@ public enum SmokeTestRunner {
         print("[pins] PASS: 调小可恢复贴图数后立即只保留最近关闭的贴图")
 
         pins.closeAll()
+        pins.finishHistoryWrites()
+        do {
+            let files = FileManager.default
+            let manifest = app.configURL.deletingPathExtension().appendingPathExtension("pin-history.json")
+            let backup = manifest.appendingPathExtension("fixture-backup")
+            try files.moveItem(at: manifest, to: backup)
+            try files.createDirectory(at: manifest, withIntermediateDirectories: false)
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            try files.removeItem(at: manifest)
+            try files.moveItem(at: backup, to: manifest)
+        } catch {
+            fputs("FAIL: Could not simulate a manifest write failure while disabling pin history: \(error)\n", stderr)
+            return false
+        }
+        guard app.config.pinHistoryLimit == 10, AirSnipConfig.load(from: app.configURL).pinHistoryLimit == 10,
+              pinHistoryPNGCount(at: directory) == 5 else {
+            fputs("FAIL: A failed history clear should preserve the previously applied limit and saved pins\n", stderr)
+            return false
+        }
+        print("[pins] PASS: 清空写入失败时保留原上限和历史，可再次停用")
+
         app.updateConfig { $0.pinHistoryLimit = 0 }
         app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 0 else {
+        guard app.config.pinHistoryLimit == 0, pins.count == 0, pinHistoryPNGCount(at: directory) == 0 else {
             fputs("FAIL: Disabling pin history should immediately clear it\n", stderr)
             return false
         }
@@ -974,12 +1494,15 @@ public enum SmokeTestRunner {
             return false
         }
 
+        app.updateConfig { $0.pinHistoryLimit = 0 }
         pins.closeAll()
-        pins.finishHistorySession()
-        let restarted = AirSnipAppController(configURL: app.configURL)
+        app.updateConfig { $0.pinHistoryLimit = 10 }
+        pins.finishHistoryWrites()
+        let restarted = AirSnipAppController(configURL: app.configURL, pinPasteboard: pasteboard)
+        defer { restarted.settingsController = nil }
         restarted.triggerPinOrRestore(from: pasteboard)
         guard restarted.config.pinHistoryLimit == 10, restarted.pinManager.count == 0 else {
-            fputs("FAIL: A new controller should load the saved history limit and start with empty history\n", stderr)
+            fputs("FAIL: Clearing history should also persist across launches after re-enabling it\n", stderr)
             return false
         }
         print("[pins] PASS: 停用时清空历史，重新开启后可继续累积，设置保存到下次启动")
@@ -996,7 +1519,12 @@ public enum SmokeTestRunner {
             $0.showCompletionToast = false
         }
         let pins = app.pinManager
-        defer { pins.closeAll() }
+        defer {
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            pins.closeAll()
+            pins.finishHistoryWrites()
+            app.settingsController = nil
+        }
         guard pins.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config),
               let pin = pins.windows.last else { return false }
         let previousWindows = Set(NSApp.windows.map(\.windowNumber))
@@ -1015,13 +1543,13 @@ public enum SmokeTestRunner {
 
         app.updateConfig {
             $0.pinHistoryLimit = 5
-            $0.pinHistoryParentDirectory = directory.path
+            $0.pinHistoryDirectory = directory.path
             $0.pinBorder = false
         }
         pressKey(kVK_ANSI_2, "2")
         let savedConfig = AirSnipConfig.load(from: configURL)
         guard app.config.pinHistoryLimit == 5, app.config.lastTool == .arrow,
-              app.config.pinHistoryParentDirectory == directory.path, savedConfig.pinHistoryParentDirectory == directory.path,
+              app.config.pinHistoryDirectory == directory.path, savedConfig.pinHistoryDirectory == directory.path,
               savedConfig.pinHistoryLimit == 5, savedConfig.lastTool == .arrow,
               !app.config.pinBorder, !savedConfig.pinBorder else {
             fputs("FAIL: Tool changes from an older capture session should preserve current pin history and border settings\n", stderr)
@@ -1034,7 +1562,7 @@ public enum SmokeTestRunner {
         }
         app.updateConfig {
             $0.pinHistoryLimit = 10
-            $0.pinHistoryParentDirectory = nil
+            $0.pinHistoryDirectory = nil
             $0.lastSaveDirectory = quickSaveDirectory.path
         }
         pressKey(kVK_ANSI_S, "s", modifiers: .command)
@@ -1045,7 +1573,7 @@ public enum SmokeTestRunner {
         }
         let savedAfterQuickSave = AirSnipConfig.load(from: configURL)
         guard app.config.pinHistoryLimit == 10, savedAfterQuickSave.pinHistoryLimit == 10,
-              app.config.pinHistoryParentDirectory == nil, savedAfterQuickSave.pinHistoryParentDirectory == nil,
+              app.config.pinHistoryDirectory == nil, savedAfterQuickSave.pinHistoryDirectory == nil,
               !app.config.pinBorder, !savedAfterQuickSave.pinBorder else {
             fputs("FAIL: Quick save from an older session should preserve the current pin settings\n", stderr)
             return false
@@ -1055,7 +1583,7 @@ public enum SmokeTestRunner {
         let saveAs = app.makeSessionCoordinator(mode: .normalCapture, chooseSaveDestination: { _ in
             app.updateConfig {
                 $0.pinHistoryLimit = 15
-                $0.pinHistoryParentDirectory = quickSaveDirectory.path
+                $0.pinHistoryDirectory = quickSaveDirectory.path
             }
             return OutputService.SavePanelSelection(url: saveAsURL, format: .jpeg, smartPngCompression: false, quality: .compact)
         })
@@ -1064,7 +1592,7 @@ public enum SmokeTestRunner {
         guard FileManager.default.fileExists(atPath: saveAsURL.path),
               savedAfterSaveAs.lastSaveDirectory == directory.path, savedAfterSaveAs.lastSaveFormat == .jpeg,
               savedAfterSaveAs.pngCompressionQuality == .compact, savedAfterSaveAs.pinHistoryLimit == 15,
-              savedAfterSaveAs.pinHistoryParentDirectory == quickSaveDirectory.path else {
+              savedAfterSaveAs.pinHistoryDirectory == quickSaveDirectory.path else {
             fputs("FAIL: Save As should apply its selected preferences without replacing newer pin settings\n", stderr)
             return false
         }
@@ -1861,6 +2389,18 @@ public enum SmokeTestRunner {
                         configURL: tempDir.appendingPathComponent("pin-config.json"),
                         runPinRestoreChecks
                     )
+                    && runUsedClipboardImageAfterRelaunchCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("used-clipboard-image/config.json")
+                    )
+                    && runUsedClipboardCompressionAfterRelaunchCheck(
+                        image: baked,
+                        configURL: tempDir.appendingPathComponent("used-clipboard-compression/config.json")
+                    )
+                    && runUsedClipboardTextAfterRelaunchCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("used-clipboard-text/config.json")
+                    )
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("text-pin-config.json"),
@@ -1887,16 +2427,26 @@ public enum SmokeTestRunner {
                         runBatchPinRestoreCheck
                     )
                     && runBatchCloseDuringPinAnnotationCheck(image: baseCG)
-                    && runClosedPinHistoryLimitCheck(image: baseCG)
-                    && withPinRestoreFixture(
+                    && runClosedPinHistoryLimitCheck(
                         image: baseCG,
-                        configURL: tempDir.appendingPathComponent("pin-history-disk-config.json"),
-                        runDiskPinHistoryCheck
+                        configURL: tempDir.appendingPathComponent("pin-history-limit/config.json")
+                    )
+                    && runUnavailablePinHistoryCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-history-unavailable/config.json")
+                    )
+                    && runDiskPinHistoryCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-history-disk/config.json")
+                    )
+                    && runPinHistoryQuitCheck(
+                        image: baseCG,
+                        configURL: tempDir.appendingPathComponent("pin-history-quit/config.json")
                     )
                     && runFailedPinHistoryWriteCheck(image: baseCG, directory: tempDir)
                     && withPinRestoreFixture(
                         image: baseCG,
-                        configURL: tempDir.appendingPathComponent("pin-history-config.json"),
+                        configURL: tempDir.appendingPathComponent("pin-history-config/config.json"),
                         runConfiguredPinHistoryCheck
                     )
                     && runPinHistoryCaptureSaveCheck(image: baseCG, configURL: pinSaveConfigURL)

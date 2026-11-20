@@ -949,6 +949,7 @@ public struct TranslationConfig: Codable, Equatable, Sendable {
 public struct AirSnipConfig: Codable, Equatable, Sendable {
     public static let defaultPinHistoryLimit = 20
     public static let pinHistoryLimitRange = 0...50
+    public static let defaultPinHistoryDirectoryName = "iSnip Pin History"
 
     public var autoStart: Bool
     public var language: AppLanguage
@@ -962,7 +963,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var pinHistoryLimit: Int {
         didSet { pinHistoryLimit = Self.clampedPinHistoryLimit(pinHistoryLimit) }
     }
-    public var pinHistoryParentDirectory: String?
+    public var pinHistoryDirectory: String?
     public var pinAnnotationCoversDesktop: Bool
     public var uiScale: UiScaleSetting
     public var swatchColors: [RGBAColor]
@@ -1008,7 +1009,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         pinBorder: Bool = true,
         pinMaxCount: Int = 20,
         pinHistoryLimit: Int = AirSnipConfig.defaultPinHistoryLimit,
-        pinHistoryParentDirectory: String? = nil,
+        pinHistoryDirectory: String? = nil,
         pinAnnotationCoversDesktop: Bool = true,
         uiScale: UiScaleSetting = .auto,
         swatchColors: [RGBAColor] = ColorPalette.defaultSwatches,
@@ -1053,7 +1054,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinBorder = pinBorder
         self.pinMaxCount = pinMaxCount
         self.pinHistoryLimit = Self.clampedPinHistoryLimit(pinHistoryLimit)
-        self.pinHistoryParentDirectory = pinHistoryParentDirectory
+        self.pinHistoryDirectory = pinHistoryDirectory
         self.pinAnnotationCoversDesktop = pinAnnotationCoversDesktop
         self.uiScale = uiScale
         self.swatchColors = swatchColors.count == ColorPalette.swatchCount ? swatchColors : ColorPalette.defaultSwatches
@@ -1091,7 +1092,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case autoStart, language, theme, hotkeys, hotkeyDefaultsMigratedV2, toolKeys, uiScale
-        case pinPosition, pinBorder, pinMaxCount, pinHistoryLimit, pinHistoryParentDirectory, pinAnnotationCoversDesktop
+        case pinPosition, pinBorder, pinMaxCount, pinHistoryLimit, pinHistoryDirectory, pinAnnotationCoversDesktop
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
         case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
         case styleDefaultsMigratedV2
@@ -1100,6 +1101,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         case smartPngCompression, pngCompressionQuality, compressClipboardPng
         case longshotMaxHeight, longshotAutoScroll, longshotScrollSpeed
         case autoCheckUpdate, skippedVersion, ocr, translation
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case pinHistoryParentDirectory
     }
 
     public init(from decoder: Decoder) throws {
@@ -1154,7 +1159,17 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
         self.pinMaxCount = try c.decodeIfPresent(Int.self, forKey: .pinMaxCount) ?? d.pinMaxCount
         self.pinHistoryLimit = Self.clampedPinHistoryLimit(try c.decodeIfPresent(Int.self, forKey: .pinHistoryLimit) ?? d.pinHistoryLimit)
-        self.pinHistoryParentDirectory = try c.decodeIfPresent(String.self, forKey: .pinHistoryParentDirectory)
+        if c.contains(.pinHistoryDirectory) {
+            self.pinHistoryDirectory = try c.decodeIfPresent(String.self, forKey: .pinHistoryDirectory)
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            self.pinHistoryDirectory = try legacy.decodeIfPresent(String.self, forKey: .pinHistoryParentDirectory).flatMap { parent in
+                guard !parent.isEmpty else { return nil }
+                let path = (parent as NSString).expandingTildeInPath
+                return URL(fileURLWithPath: path, isDirectory: true)
+                    .appendingPathComponent(Self.defaultPinHistoryDirectoryName, isDirectory: true).path
+            }
+        }
         self.pinAnnotationCoversDesktop = try c.decodeIfPresent(Bool.self, forKey: .pinAnnotationCoversDesktop) ?? d.pinAnnotationCoversDesktop
         self.uiScale = try c.decodeIfPresent(UiScaleSetting.self, forKey: .uiScale) ?? d.uiScale
         let alreadyMigratedV2 = try c.decodeIfPresent(Bool.self, forKey: .styleDefaultsMigratedV2) ?? false
