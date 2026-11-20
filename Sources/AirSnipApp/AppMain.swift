@@ -30,7 +30,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         self.pinManager = PinManager(
             pasteboard: pinPasteboard,
             historyRegistryURL: configURL.deletingPathExtension().appendingPathExtension("pin-history-sessions.json"),
-            historyDirectory: OutputService.pinHistoryDirectoryURL(for:)
+            historyRootURL: OutputService.pinHistoryRootURL(for:)
         )
         let loadedConfig = AirSnipConfig.load(from: configURL)
         L10n.current = loadedConfig.language
@@ -607,7 +607,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.onSaveImage = { [weak self] image, scale, forceDialog, sessionConfig in
             self?.saveImage(
                 image, scale: scale, forceDialog: forceDialog, config: sessionConfig,
-                chooseDestination: chooseSaveDestination
+                chooseSaveDestination: chooseSaveDestination
             ) ?? false
         }
         coordinator.onCompletePin = { [weak self] cgImg, scale, origin in
@@ -647,17 +647,20 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         _ image: CGImage,
         scale: Double,
         forceDialog: Bool,
-        config: AirSnipConfig,
-        chooseDestination: OutputService.ChooseSaveDestination = OutputService.chooseSaveDestination
+        config sessionConfig: AirSnipConfig,
+        chooseSaveDestination: OutputService.ChooseSaveDestination = OutputService.chooseSaveDestination
     ) -> Bool {
+        var saveConfig = sessionConfig
+        // Even an older editor saves to the app's current default directory.
+        saveConfig.lastSaveDirectory = config.lastSaveDirectory
         guard let saved = OutputService.saveImage(
-            for: image, backingScale: scale, config: config, forceDialog: forceDialog,
-            chooseDestination: chooseDestination
+            for: image, backingScale: scale, config: saveConfig, forceDialog: forceDialog,
+            chooseDestination: chooseSaveDestination
         ) else { return false }
         if let updatePreferences = saved.updatePreferences {
             updateConfig(updatePreferences)
         }
-        if config.showCompletionToast {
+        if saveConfig.showCompletionToast {
             ToastHUD.show(L10n.tr("已保存", "Saved"))
         }
         return true
