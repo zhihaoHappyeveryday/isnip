@@ -11,6 +11,7 @@ public final class PinManager: ObservableObject {
     private let historyCloseTime: () -> Date
     private let historyRootURL: (AirSnipConfig) -> URL
     private var historyMountObserver: AnyCancellable?
+    var onDidRememberClosedPins: ((OutputService.ClipboardCopyID) -> Void)?
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     var onWillCloseAll: (() -> Void)?
@@ -96,9 +97,12 @@ public final class PinManager: ObservableObject {
     private func rememberClosedPins(_ pins: [PinWindowController], closedAt: Date) {
         let config = getConfig?() ?? AirSnipConfig()
         guard config.pinHistoryLimit > 0 else { return }
-        history.remember(
+        let copyID = OutputService.clipboardCopyID(for: pasteboard, currentRevision: pasteboard.changeCount)
+        if history.remember(
             pins.map { $0.snapshot() }, limit: config.pinHistoryLimit, historyRoot: historyRootURL(config), closedAt: closedAt
-        )
+        ) {
+            onDidRememberClosedPins?(copyID)
+        }
     }
 
     func trimClosedHistory(to limit: Int) -> Bool {

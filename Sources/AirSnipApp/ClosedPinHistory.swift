@@ -155,8 +155,9 @@ final class ClosedPinHistory {
 
     var isEmpty: Bool { entries.isEmpty }
 
-    func remember(_ snapshots: [PinSnapshot], limit: Int, historyRoot: URL, closedAt: Date = Date()) {
-        guard limit > 0, !snapshots.isEmpty else { return }
+    @discardableResult
+    func remember(_ snapshots: [PinSnapshot], limit: Int, historyRoot: URL, closedAt: Date = Date()) -> Bool {
+        guard limit > 0, !snapshots.isEmpty else { return false }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -166,7 +167,7 @@ final class ClosedPinHistory {
         guard (try? Self.ensureHistoryRootExists(historyRoot)) != nil,
               let rootIdentity = HistoryRootIdentity(at: historyRoot) else {
             onWriteFailure?()
-            return
+            return false
         }
         legacySessions.cleanUp(in: historyRoot)
         let batch = CloseBatch()
@@ -183,9 +184,14 @@ final class ClosedPinHistory {
         let excess = max(0, next.count - limit)
         guard discard(next.prefix(excess), keeping: Array(next.dropFirst(excess))) else {
             onWriteFailure?()
-            return
+            return false
         }
         writeNext()
+        // Failure to register files can drop a pending entry before the background write starts.
+        return entries.contains {
+            if case .pending(_, _, let entryBatch) = $0.content { return entryBatch === batch }
+            return false
+        }
     }
 
     func trim(to limit: Int) -> Bool {
