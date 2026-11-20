@@ -7,14 +7,6 @@ import Translation
 import AirSnipCore
 
 public enum SmokeTestRunner {
-    private static var isRunningUnderRosetta: Bool {
-        var ret: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        if sysctlbyname("sysctl.proc_translated", &ret, &size, nil, 0) == 0 {
-            return ret == 1
-        }
-        return false
-    }
     @MainActor
     public static func runTranslationChecks() -> Bool {
         let app = NSApplication.shared
@@ -431,16 +423,13 @@ public enum SmokeTestRunner {
                 fputs("FAIL: Failed to create OCR fixture\n", stderr)
                 return false
             }
-            let underRosetta = isRunningUnderRosetta
             for language in ["auto", "zh-Hans"] {
                 let detailed = try LocalVisionOCR.recognizeDetailed(
                     cgImage: ocrImg,
                     languagePreference: language,
                     detectBarcodes: true
                 )
-                let textMatched = underRosetta
-                    ? detailed.rawText.localizedCaseInsensitiveContains("isnip")
-                    : (detailed.rawText.contains("极速截图") && detailed.rawText.contains("iSnip"))
+                let textMatched = detailed.rawText.contains("极速截图") && detailed.rawText.contains("iSnip")
                 guard textMatched else {
                     fputs("FAIL: LocalVisionOCR output missing expected text: \(detailed.rawText)\n", stderr)
                     return false
@@ -488,18 +477,20 @@ public enum SmokeTestRunner {
                 // Exercise the same asynchronous recognition and result panel used by F2 / clipboard OCR,
                 // not just the synchronous Vision engine. This test uses only the synthetic fixture above.
                 let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+                let clipboardCount = NSPasteboard.general.changeCount
                 let ocrManager = OCRBubbleManager()
+                ocrManager.text = "previous result must be replaced"
                 ocrManager.recognizeAndPresent(rawSelectionImage: ocrImg, anchorScreenPoint: nil, config: defaultCfg)
                 let ocrDeadline = Date().addingTimeInterval(60)
                 while ocrManager.isRecognizing && Date() < ocrDeadline {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.02))
                 }
-                let panelTextOK = underRosetta
-                    ? ocrManager.text.localizedCaseInsensitiveContains("isnip")
-                    : (ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip"))
+                let panelTextOK = ocrManager.text.contains("极速截图") && ocrManager.text.contains("iSnip")
+                    && !ocrManager.text.contains("previous result")
                 let ocrPanelOK = !ocrManager.isRecognizing && ocrManager.errorMessage == nil
                     && panelTextOK
                     && ocrManager.barcodes.contains("https://github.com/zzusec/isnip")
+                    && NSPasteboard.general.changeCount == clipboardCount
                 defer { ocrManager.dismiss() }
                 if let previewPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_OCR_PREVIEW_PNG"] {
                     guard let view = NSApp.windows.first(where: { !existingWindows.contains($0.windowNumber) })?.contentView else {
