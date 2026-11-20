@@ -2041,11 +2041,31 @@ public enum SmokeTestRunner {
         }
 
         let origin = NSPoint(x: 75, y: 65)
+        let corner = NSPoint(x: 198, y: 142)
+        let rightEdge = NSPoint(x: corner.x, y: origin.y + 19)
+        let widenedEdge = NSPoint(x: rightEdge.x + 20, y: rightEdge.y)
+        let widenedCorner = NSPoint(x: widenedEdge.x, y: corner.y)
+        let finalCorner = NSPoint(x: widenedCorner.x + 28, y: widenedCorner.y + 35)
         canvas.mouseMoved(with: mouseEvent(.mouseMoved, at: origin))
-        return verifyLabels(at: origin, during: "hover")
-            && drag(from: origin, to: NSPoint(x: 198, y: 142), action: "selection")
-            && drag(from: NSPoint(x: 198, y: 84), to: NSPoint(x: 218, y: 84), action: "edge resize")
-            && drag(from: NSPoint(x: 218, y: 142), to: NSPoint(x: 246, y: 177), action: "corner resize")
+        guard verifyLabels(at: origin, during: "hover"),
+              drag(from: origin, to: corner, action: "selection"),
+              drag(from: rightEdge, to: widenedEdge, action: "edge resize"),
+              drag(from: widenedCorner, to: finalCorner, action: "corner resize") else { return false }
+
+        var output: CGImage?
+        coordinator.onCompleteCopy = { image, _ in output = image }
+        canvas.keyDown(with: NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: overlay.panel.windowNumber, context: nil, characters: "\r",
+            charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: UInt16(kVK_Return)
+        )!)
+        guard let output,
+              output.width == Int(finalCorner.x - origin.x) * scale,
+              output.height == Int(finalCorner.y - origin.y) * scale else {
+            fputs("FAIL: Magnifier resize gestures produced an unexpected screenshot size at \(scale)×\n", stderr)
+            return false
+        }
+        return true
     }
 
     @MainActor
