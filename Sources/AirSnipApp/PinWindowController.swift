@@ -7,6 +7,7 @@ public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     let pasteboard: NSPasteboard
     private let history: ClosedPinHistory
+    private let historyCloseTime: () -> Date
     private let historyRootURL: (AirSnipConfig) -> URL
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
@@ -14,19 +15,20 @@ public final class PinManager: ObservableObject {
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
     public convenience init(pasteboard: NSPasteboard = .general) {
-        self.init(pasteboard: pasteboard, historyRegistryURL: nil) { _ in
-            FileManager.default.temporaryDirectory.appendingPathComponent(ClosedPinHistory.directoryName, isDirectory: true)
-        }
+        let temporaryHistory = TemporaryPinHistoryDirectory()
+        self.init(pasteboard: pasteboard, historyConfigURL: nil) { _ in temporaryHistory.url }
     }
 
     init(
         pasteboard: NSPasteboard,
-        historyRegistryURL: URL?,
+        historyConfigURL: URL?,
+        historyCloseTime: @escaping () -> Date = Date.init,
         historyRootURL: @escaping (AirSnipConfig) -> URL
     ) {
         self.pasteboard = pasteboard
+        self.historyCloseTime = historyCloseTime
         self.historyRootURL = historyRootURL
-        history = ClosedPinHistory(registryURL: historyRegistryURL)
+        history = ClosedPinHistory(configURL: historyConfigURL)
         history.onWriteFailure = { [weak self] in
             self?.showHistoryWarning("贴图历史写入失败，这些贴图无法恢复", "Some closed pins could not be saved for recovery")
         }
@@ -78,15 +80,16 @@ public final class PinManager: ObservableObject {
 
     public func remove(_ pin: PinWindowController) {
         guard let index = windows.firstIndex(where: { $0 === pin }) else { return }
+        let closedAt = historyCloseTime()
         pin.window.orderOut(nil)
-        rememberClosedPins([windows.remove(at: index)])
+        rememberClosedPins([windows.remove(at: index)], closedAt: closedAt)
     }
 
-    private func rememberClosedPins(_ pins: [PinWindowController]) {
+    private func rememberClosedPins(_ pins: [PinWindowController], closedAt: Date) {
         let config = getConfig?() ?? AirSnipConfig()
         guard config.pinHistoryLimit > 0 else { return }
         history.remember(
-            pins.map { $0.snapshot() }, limit: config.pinHistoryLimit, historyRoot: historyRootURL(config)
+            pins.map { $0.snapshot() }, limit: config.pinHistoryLimit, historyRoot: historyRootURL(config), closedAt: closedAt
         )
     }
 
@@ -94,12 +97,12 @@ public final class PinManager: ObservableObject {
         history.trim(to: limit)
     }
 
-    func finishHistorySession() {
-        history.finishSession()
+    func finishHistoryWrites() {
+        history.finishPendingWrites()
     }
 
     public func restoreLastClosedPin(config: AirSnipConfig) {
-        guard !history.isEmpty, canOpenPin(config: config) else { return }
+        guard config.pinHistoryLimit > 0, !history.isEmpty, canOpenPin(config: config) else { return }
         let result = history.restoreLast()
         if result.skippedUnreadable {
             showHistoryWarning("部分贴图历史文件无法读取", "Some closed pin files could not be read")
@@ -123,12 +126,14 @@ public final class PinManager: ObservableObject {
     }
 
     public func closeAll() {
+        guard !windows.isEmpty else { return }
+        let closedAt = historyCloseTime()
         let pins = windows
         for pin in pins {
             pin.window.orderOut(nil)
         }
         windows.removeAll()
-        rememberClosedPins(pins)
+        rememberClosedPins(pins, closedAt: closedAt)
     }
 
     public func restoreAllClickThrough() {
@@ -146,6 +151,12 @@ public final class PinManager: ObservableObject {
         updateConfig? { $0.pinBorder = target }
         ToastHUD.show(target ? L10n.tr("边框已开启", "Pin borders shown") : L10n.tr("边框已隐藏", "Pin borders hidden"))
     }
+}
+
+private final class TemporaryPinHistoryDirectory {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("isnip-pin-history-\(UUID().uuidString)", isDirectory: true)
+
+    deinit { try? FileManager.default.removeItem(at: url) }
 }
 
 private final class PinPanel: NSPanel {

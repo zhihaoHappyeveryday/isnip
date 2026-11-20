@@ -1,9 +1,10 @@
 import CoreGraphics
+import Darwin
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-struct PinDisplayState {
+struct PinDisplayState: Codable {
     let frame: CGRect
     let baseSize: CGSize
     let backingScale: Double
@@ -28,64 +29,142 @@ final class ClosedPinHistory {
         var reportedWriteFailure = false
     }
 
-    private struct Entry {
-        enum Content {
-            case pending(image: CGImage, originalText: String?)
-            case stored(hasOriginalText: Bool)
+    private struct PinFiles: Codable, Hashable {
+        let dayDirectory: URL
+        let id: UUID
+        let hasOriginalText: Bool
+
+        private var baseURL: URL {
+            dayDirectory.appendingPathComponent("pin-\(id.uuidString)")
         }
 
-        let entryDirectory: URL
-        let displayState: PinDisplayState
-        let batch: CloseBatch
-        var content: Content
+        var imageURL: URL { baseURL.appendingPathExtension("png") }
+        var textURL: URL? { hasOriginalText ? baseURL.appendingPathExtension("txt") : nil }
     }
 
-    private let sessionDirectories: PinHistorySessionDirectories
+    private struct Record: Codable {
+        let files: PinFiles
+        let displayState: PinDisplayState
+    }
+
+    private struct Manifest: Codable {
+        let records: [Record]
+        let filesToRemove: Set<PinFiles>
+    }
+
+    private struct Entry {
+        enum Content {
+            case pending(image: CGImage, originalText: String?, batch: CloseBatch)
+            case stored
+        }
+
+        let record: Record
+        var content: Content
+
+        var storedRecord: Record? {
+            if case .stored = content { return record }
+            return nil
+        }
+    }
+
+    private final class Write: @unchecked Sendable {
+        let files: PinFiles
+        private let queue: DispatchQueue
+        // The serial queue owns the write result, including when quit waits for it.
+        private var saved = false
+
+        init(files: PinFiles, queue: DispatchQueue) {
+            self.files = files
+            self.queue = queue
+        }
+
+        func start(image: CGImage, originalText: String?, completion: @escaping @MainActor (Write, Bool) -> Void) {
+            queue.async {
+                let saved = ClosedPinHistory.writeSnapshot(image, originalText: originalText, to: self.files)
+                self.saved = saved
+                DispatchQueue.main.async { completion(self, saved) }
+            }
+        }
+
+        func waitForResult() -> Bool {
+            queue.sync { saved }
+        }
+    }
+
+    private let manifestURL: URL?
+    private let legacySessions: LegacyPinHistorySessions
+    private let writeQueue = DispatchQueue(label: "io.zzusec.airsnip.closed-pin-history", qos: .utility)
     private var entries: [Entry] = []
-    private var inFlightEntryDirectory: URL?
+    private var filesToRemove: Set<PinFiles> = []
+    private var inFlightWrite: Write?
     var onWriteFailure: (() -> Void)?
 
-    init(registryURL: URL?) {
-        sessionDirectories = PinHistorySessionDirectories(registryURL: registryURL)
+    init(configURL: URL?) {
+        let configBase = configURL?.deletingPathExtension()
+        let manifestURL = configBase?.appendingPathExtension("pin-history.json")
+        self.manifestURL = manifestURL
+        legacySessions = LegacyPinHistorySessions(registryURL: configBase?.appendingPathExtension("pin-history-sessions.json"))
+        guard let manifestURL, let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else { return }
+        entries = manifest.records.filter { $0.files.dayDirectory.isFileURL }.map { Entry(record: $0, content: .stored) }
+        filesToRemove = manifest.filesToRemove.filter { $0.dayDirectory.isFileURL }
+        cleanUnusedFiles()
     }
 
     var isEmpty: Bool { entries.isEmpty }
 
-    func remember(_ snapshots: [PinSnapshot], limit: Int, historyRoot: URL) {
+    func remember(_ snapshots: [PinSnapshot], limit: Int, historyRoot: URL, closedAt: Date = Date()) {
         guard limit > 0, !snapshots.isEmpty else { return }
-        guard let sessionDirectory = try? sessionDirectories.sessionDirectory(in: historyRoot) else {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        let dayDirectory = historyRoot.appendingPathComponent(formatter.string(from: closedAt), isDirectory: true)
+        guard (try? Self.ensureHistoryRootExists(historyRoot)) != nil else {
             onWriteFailure?()
             return
         }
+        legacySessions.cleanUp(in: historyRoot)
         let batch = CloseBatch()
-        entries.append(contentsOf: snapshots.suffix(limit).map { snapshot in
-            Entry(
-                entryDirectory: sessionDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
-                displayState: snapshot.displayState,
-                batch: batch,
-                content: .pending(image: snapshot.image, originalText: snapshot.originalText)
+        let closed = snapshots.suffix(limit).map { snapshot in
+            let files = PinFiles(dayDirectory: dayDirectory, id: UUID(), hasOriginalText: snapshot.originalText != nil)
+            return Entry(
+                record: Record(files: files, displayState: snapshot.displayState),
+                content: .pending(image: snapshot.image, originalText: snapshot.originalText, batch: batch)
             )
-        })
-        trim(to: limit)
+        }
+        let next = entries + closed
+        let excess = max(0, next.count - limit)
+        guard discard(next.prefix(excess), keeping: Array(next.dropFirst(excess))) else {
+            onWriteFailure?()
+            return
+        }
         writeNext()
     }
 
     func trim(to limit: Int) {
         let excess = entries.count - limit
         guard excess > 0 else { return }
-        for entry in entries.prefix(excess) { removeStoredFiles(for: entry) }
-        entries.removeFirst(excess)
+        if !discard(entries.prefix(excess), keeping: Array(entries.dropFirst(excess))) {
+            onWriteFailure?()
+        }
     }
 
     func restoreLast() -> (snapshot: PinSnapshot?, skippedUnreadable: Bool) {
         var skippedUnreadable = false
-        while let entry = entries.popLast() {
+        while let entry = entries.last {
             switch entry.content {
-            case .pending(let image, let originalText):
-                return (PinSnapshot(image: image, originalText: originalText, displayState: entry.displayState), skippedUnreadable)
-            case .stored(let hasOriginalText):
-                let snapshot = Self.readSnapshot(entry, hasOriginalText: hasOriginalText)
-                removeStoredFiles(for: entry)
+            case .pending(let image, let originalText, _):
+                entries.removeLast()
+                let snapshot = PinSnapshot(image: image, originalText: originalText, displayState: entry.record.displayState)
+                return (snapshot, skippedUnreadable)
+            case .stored:
+                let snapshot = Self.readSnapshot(entry.record)
+                guard discard(entries.suffix(1), keeping: Array(entries.dropLast())) else {
+                    onWriteFailure?()
+                    return (nil, skippedUnreadable)
+                }
                 if let snapshot { return (snapshot, skippedUnreadable) }
                 skippedUnreadable = true
             }
@@ -93,108 +172,151 @@ final class ClosedPinHistory {
         return (nil, skippedUnreadable)
     }
 
-    func finishSession() {
-        entries.removeAll()
-        sessionDirectories.finishSession()
+    func finishPendingWrites() {
+        while let write = inFlightWrite {
+            completeWrite(write, saved: write.waitForResult())
+        }
     }
 
-    nonisolated static func ensureHistoryRootExists(_ historyRoot: URL) throws {
+    nonisolated static func ensureHistoryRootExists(_ historyRoot: URL, attributes: [FileAttributeKey: Any]? = nil) throws {
         let files = FileManager.default
         var isDirectory: ObjCBool = false
         if files.fileExists(atPath: historyRoot.path, isDirectory: &isDirectory), isDirectory.boolValue { return }
-        try files.createDirectory(at: historyRoot, withIntermediateDirectories: false)
+        try files.createDirectory(at: historyRoot, withIntermediateDirectories: false, attributes: attributes)
     }
 
     private func writeNext() {
-        guard inFlightEntryDirectory == nil,
-              let entry = entries.first(where: {
-                  if case .pending = $0.content { return true }
-                  return false
-              }), case .pending(let image, let originalText) = entry.content else { return }
-
-        let entryDirectory = entry.entryDirectory
-        inFlightEntryDirectory = entryDirectory
-        let write = Task.detached(priority: .utility) {
-            Self.writeSnapshot(image, originalText: originalText, to: entryDirectory)
-        }
-        let hasOriginalText = originalText != nil
-        Task { [weak self] in
-            let saved = await write.value
-            guard let self else {
-                Self.removeEntryDirectory(entryDirectory)
-                return
+        guard inFlightWrite == nil else { return }
+        while let index = entries.firstIndex(where: { $0.storedRecord == nil }),
+              case .pending(let image, let originalText, let batch) = entries[index].content {
+            let files = entries[index].record.files
+            // Register files before writing so a partial or interrupted write can be cleaned up on launch.
+            guard commit(entries, removing: filesToRemove.union([files])) else {
+                entries.remove(at: index)
+                reportWriteFailure(in: batch)
+                continue
             }
-            self.completeWrite(at: entryDirectory, saved: saved, hasOriginalText: hasOriginalText)
+            let write = Write(files: files, queue: writeQueue)
+            inFlightWrite = write
+            write.start(image: image, originalText: originalText) { [weak self] completedWrite, saved in
+                self?.completeWrite(completedWrite, saved: saved)
+            }
+            return
         }
     }
 
-    private func completeWrite(at entryDirectory: URL, saved: Bool, hasOriginalText: Bool) {
-        inFlightEntryDirectory = nil
-        defer { writeNext() }
-
-        guard let index = entries.firstIndex(where: { $0.entryDirectory == entryDirectory }) else {
-            // A restore or eviction can consume an entry before its write finishes.
-            Self.removeEntryDirectory(entryDirectory)
-            return
+    private func completeWrite(_ write: Write, saved: Bool) {
+        // The quit callback may have already finished this write.
+        guard write === inFlightWrite else { return }
+        inFlightWrite = nil
+        let files = write.files
+        defer {
+            cleanUnusedFiles()
+            writeNext()
         }
+        // A restore or eviction can consume an entry before its write finishes.
+        guard let index = entries.firstIndex(where: { $0.record.files == files }),
+              case .pending(_, _, let batch) = entries[index].content else { return }
         if saved {
-            entries[index].content = .stored(hasOriginalText: hasOriginalText)
-            return
+            var next = entries
+            next[index].content = .stored
+            if commit(next, removing: filesToRemove.subtracting([files])) { return }
         }
-        let batch = entries.remove(at: index).batch
+        entries.remove(at: index)
+        reportWriteFailure(in: batch)
+    }
+
+    private func reportWriteFailure(in batch: CloseBatch) {
         if !batch.reportedWriteFailure {
             batch.reportedWriteFailure = true
             onWriteFailure?()
         }
     }
 
-    private func removeStoredFiles(for entry: Entry) {
-        if case .stored = entry.content { Self.removeEntryDirectory(entry.entryDirectory) }
+    private func discard(_ discarded: ArraySlice<Entry>, keeping next: [Entry]) -> Bool {
+        let retiredFiles = discarded.compactMap { $0.storedRecord?.files }
+        if retiredFiles.isEmpty {
+            entries = next
+            return true
+        }
+        guard commit(next, removing: filesToRemove.union(retiredFiles)) else { return false }
+        cleanUnusedFiles()
+        return true
     }
 
-    private nonisolated static func writeSnapshot(_ image: CGImage, originalText: String?, to entryDirectory: URL) -> Bool {
+    private func cleanUnusedFiles() {
+        let removed = filesToRemove.filter { $0 != inFlightWrite?.files && Self.removeFiles($0) }
+        if !removed.isEmpty {
+            _ = commit(entries, removing: filesToRemove.subtracting(removed))
+        }
+    }
+
+    private func commit(_ next: [Entry], removing nextFilesToRemove: Set<PinFiles>) -> Bool {
+        if let manifestURL {
+            let manifest = Manifest(records: next.compactMap(\.storedRecord), filesToRemove: nextFilesToRemove)
+            do {
+                try FileManager.default.createDirectory(at: manifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try JSONEncoder().encode(manifest).write(to: manifestURL, options: .atomic)
+            } catch {
+                return false
+            }
+        }
+        entries = next
+        filesToRemove = nextFilesToRemove
+        return true
+    }
+
+    private nonisolated static func writeSnapshot(_ image: CGImage, originalText: String?, to files: PinFiles) -> Bool {
         autoreleasepool {
             do {
-                try FileManager.default.createDirectory(at: entryDirectory, withIntermediateDirectories: false)
-                let imageURL = entryDirectory.appendingPathComponent("image.png")
-                guard let destination = CGImageDestinationCreateWithURL(imageURL as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+                try ensureHistoryRootExists(files.dayDirectory, attributes: [.posixPermissions: 0o700])
+                guard let destination = CGImageDestinationCreateWithURL(files.imageURL as CFURL, UTType.png.identifier as CFString, 1, nil) else {
                     throw CocoaError(.fileWriteUnknown)
                 }
                 CGImageDestinationAddImage(destination, image, nil)
                 guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
-                if let originalText {
-                    try originalText.write(to: entryDirectory.appendingPathComponent("original.txt"), atomically: false, encoding: .utf8)
+                if let originalText, let textURL = files.textURL {
+                    try originalText.write(to: textURL, atomically: false, encoding: .utf8)
                 }
                 return true
             } catch {
-                removeEntryDirectory(entryDirectory)
                 return false
             }
         }
     }
 
-    private static func readSnapshot(_ entry: Entry, hasOriginalText: Bool) -> PinSnapshot? {
-        let imageURL = entry.entryDirectory.appendingPathComponent("image.png")
+    private static func readSnapshot(_ record: Record) -> PinSnapshot? {
         let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
-        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+        guard let source = CGImageSourceCreateWithURL(record.files.imageURL as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, options) else { return nil }
-        let originalText = hasOriginalText
-            ? try? String(contentsOf: entry.entryDirectory.appendingPathComponent("original.txt"), encoding: .utf8)
-            : nil
-        guard !hasOriginalText || originalText != nil else { return nil }
-        return PinSnapshot(image: image, originalText: originalText, displayState: entry.displayState)
+        var originalText: String?
+        if let textURL = record.files.textURL {
+            guard let text = try? String(contentsOf: textURL, encoding: .utf8) else { return nil }
+            originalText = text
+        }
+        return PinSnapshot(image: image, originalText: originalText, displayState: record.displayState)
     }
 
-    private nonisolated static func removeEntryDirectory(_ entryDirectory: URL) {
-        try? FileManager.default.removeItem(at: entryDirectory)
+    private nonisolated static func removeFiles(_ files: PinFiles) -> Bool {
+        let imageRemoved = removeFile(at: files.imageURL)
+        let textRemoved = files.textURL.map(removeFile(at:)) ?? true
+        return imageRemoved && textRemoved
+    }
+
+    private nonisolated static func removeFile(at url: URL) -> Bool {
+        url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            if unlink(path) == 0 { return true }
+            guard errno == ENOENT || errno == ENOTDIR else { return false }
+            let root = url.deletingLastPathComponent().deletingLastPathComponent()
+            return FileManager.default.fileExists(atPath: root.path)
+        }
     }
 }
 
-private final class PinHistorySessionDirectories {
+private final class LegacyPinHistorySessions {
     private let registryURL: URL?
-    private let sessionID = UUID().uuidString
     private var registeredSessionDirectories: Set<URL> = []
-    private var currentSessionDirectories: Set<URL> = []
 
     init(registryURL: URL?) {
         self.registryURL = registryURL
@@ -208,34 +330,10 @@ private final class PinHistorySessionDirectories {
         }
     }
 
-    deinit { finishSession() }
-
-    func sessionDirectory(in historyRoot: URL) throws -> URL {
-        let sessionDirectory = historyRoot.appendingPathComponent(sessionID, isDirectory: true)
-        if currentSessionDirectories.contains(sessionDirectory) { return sessionDirectory }
-
+    func cleanUp(in historyRoot: URL) {
         removeSessionDirectories(registeredSessionDirectories.filter {
-            !currentSessionDirectories.contains($0) && $0.deletingLastPathComponent() == historyRoot
+            $0.deletingLastPathComponent() == historyRoot
         })
-        let files = FileManager.default
-        try ClosedPinHistory.ensureHistoryRootExists(historyRoot)
-        // Register the session before writing its first file so an interrupted run can be cleaned up.
-        let next = registeredSessionDirectories.union([sessionDirectory])
-        try saveRegistry(next)
-        registeredSessionDirectories = next
-        do {
-            try files.createDirectory(at: sessionDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        } catch {
-            removeSessionDirectories([sessionDirectory])
-            throw error
-        }
-        currentSessionDirectories.insert(sessionDirectory)
-        return sessionDirectory
-    }
-
-    func finishSession() {
-        removeSessionDirectories(currentSessionDirectories)
-        currentSessionDirectories.removeAll()
     }
 
     private func removeSessionDirectories(_ directories: Set<URL>) {
