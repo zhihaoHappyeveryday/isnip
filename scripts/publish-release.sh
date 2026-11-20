@@ -1,5 +1,5 @@
 #!/bin/sh
-# 临时分支打包 → 公开仓库 zzusec/isnip 发布安装包 → 匿名 SHA-256 验收 → 普通快进 main → 本机安装。
+# 将已验收提交合入 Fork 的 main 后，从该提交打包发布并校验公开下载。
 # 用法：sh scripts/publish-release.sh [版本号] [--no-install]
 set -eu
 
@@ -14,8 +14,6 @@ for arg in "$@"; do
 done
 # shellcheck disable=SC2086
 set -- $rest
-
-REPO=zzusec/isnip
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
@@ -35,17 +33,11 @@ if not re.fullmatch(r'\d+\.\d+\.\d+', sys.argv[1]):
     sys.exit('无效版本号；需要 major.minor.patch')
 PY
 
-pub_repo=$(/usr/libexec/PlistBuddy -c 'Print :AirSnipUpdateRepository' "$plist")
-[ "$pub_repo" = "$REPO" ] || die "AirSnipUpdateRepository (${pub_repo}) 与 ${REPO} 不匹配；停止发布"
-
-branch=$(git symbolic-ref --quiet --short HEAD) || die "请在临时分支发布，不能使用 detached HEAD"
-[ "$branch" != main ] || die "发布前只允许提交到临时分支，不能从 main 直接发布"
+REPO=$(/usr/libexec/PlistBuddy -c 'Print :AirSnipUpdateRepository' "$plist")
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "有未提交的改动，请先提交"
 sha=$(git rev-parse HEAD)
-git fetch -q origin
-remote_sha=$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')
-[ "$remote_sha" = "$sha" ] || die "当前提交尚未推送到临时分支 ${branch}"
-git merge-base --is-ancestor origin/main "$sha" || die "main 有当前分支未包含的历史；请先整合，禁止强推"
+remote_main=$(git ls-remote --heads "https://github.com/$REPO.git" refs/heads/main | awk '{print $1}')
+[ "$remote_main" = "$sha" ] || die "请先将已验收提交合入 ${REPO} 的 main，并检出该提交"
 
 TOKEN=${GH_TOKEN:-}
 if [ -z "$TOKEN" ] && [ -r "$HOME/.gh-release-token" ]; then
@@ -116,7 +108,7 @@ result = subprocess.run(
     text=True,
 )
 if result.returncode:
-    sys.exit('创建 Release 请求失败；未更新 main')
+    sys.exit('创建 Release 请求失败')
 data = json.loads(result.stdout)
 if 'upload_url' not in data:
     sys.exit('创建 Release 失败：' + result.stdout[:400])
@@ -158,19 +150,18 @@ expected = {
 }
 assets = metadata.get('assets', [])
 if len(assets) != len(expected) or {a['name'] for a in assets} != expected:
-    sys.exit('Release 附件不完整或包含非允许附件；main 未更新')
+    sys.exit('Release 附件不完整或包含非允许附件')
 for asset in assets:
     data = (pathlib.Path(dist) / asset['name']).read_bytes()
     if asset.get('state') != 'uploaded' or asset.get('size') != len(data):
-        sys.exit('Release 附件状态或大小未通过校验；main 未更新')
+        sys.exit('Release 附件状态或大小未通过校验')
     if asset.get('digest') and asset.get('digest') != 'sha256:' + hashlib.sha256(data).hexdigest():
-        sys.exit('Release 附件摘要未通过校验；main 未更新')
+        sys.exit('Release 附件摘要未通过校验')
 PY
 
-[ "$(git rev-parse HEAD)" = "$sha" ] || die "发布期间 HEAD 已改变；main 未更新"
-[ -z "$(git status --porcelain --untracked-files=no)" ] || die "发布期间源码已改变；main 未更新"
-echo "== 发布验收完成，仅普通快进 origin/main =="
-git push origin "$sha:refs/heads/main" || die "main 快进更新失败；请检查分支历史，禁止强推"
+[ "$(git rev-parse HEAD)" = "$sha" ] || die "发布期间 HEAD 已改变"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die "发布期间源码已改变"
+echo "== 发布验收完成 =="
 
 [ "$install_local" = 1 ] || { echo "（--no-install：跳过本机安装）"; exit 0; }
 echo

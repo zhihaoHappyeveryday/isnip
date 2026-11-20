@@ -55,10 +55,10 @@ def main() -> None:
     script_text = PUBLISH_SCRIPT.read_text(encoding="utf-8")
     if "get('private') is not False" not in script_text:
         fail("publish-release.sh must verify public repository visibility")
-    if '[ "$branch" != main ]' not in script_text:
-        fail("publish-release.sh must forbid publishing directly from main")
-    if "--force" in script_text or "push -f" in script_text:
-        fail("publish-release.sh must never force-push")
+    if "refs/heads/main" not in script_text or '[ "$remote_main" = "$sha" ]' not in script_text:
+        fail("publish-release.sh must publish from the configured repository's main commit")
+    if "git push" in script_text:
+        fail("publish-release.sh must leave merging main to the release owner")
 
     scripts_dir = ROOT / "scripts"
     for sh_file in sorted(scripts_dir.glob("*.sh")):

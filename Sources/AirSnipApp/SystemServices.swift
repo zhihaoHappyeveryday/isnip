@@ -1173,7 +1173,7 @@ public enum UpdateChecker {
     }
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.3.12"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.4.0"
     }
 
     public static var releaseRepo: String {
