@@ -558,7 +558,7 @@ public enum OutputService {
         return (image.cgImage, image.pointSize, copyID, text, image.isClipped)
     }
 
-    static func clipboardCopyID(for pasteboard: NSPasteboard, currentRevision: Int) -> ClipboardCopyID {
+    private static func clipboardCopyID(for pasteboard: NSPasteboard, currentRevision: Int) -> ClipboardCopyID {
         let name = pasteboard.name.rawValue
         var originalCopyRevision = currentRevision
         // A recopy may carry the marker into a new pasteboard revision.

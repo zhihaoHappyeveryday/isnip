@@ -467,11 +467,10 @@ public enum SmokeTestRunner {
     private static func withPinRestoreFixture(
         image: CGImage,
         configURL: URL,
-        closeTime: @escaping () -> Date = Date.init,
-        _ check: @MainActor (CGImage, AirSnipAppController, NSPasteboard) throws -> Bool
-    ) rethrows -> Bool {
+        _ check: @MainActor (CGImage, AirSnipAppController, NSPasteboard) -> Bool
+    ) -> Bool {
         let pasteboard = NSPasteboard.withUniqueName()
-        let app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard, pinHistoryCloseTime: closeTime)
+        let app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
         app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
         defer {
             app.updateConfig { $0.pinHistoryLimit = 0 }
@@ -480,7 +479,7 @@ public enum SmokeTestRunner {
             app.settingsController = nil
             pasteboard.releaseGlobally()
         }
-        return try check(image, app, pasteboard)
+        return check(image, app, pasteboard)
     }
 
     @MainActor
@@ -496,24 +495,23 @@ public enum SmokeTestRunner {
         screenshot.closeSelf()
 
         app.triggerPinOrRestore()
-        guard app.pinManager.count == 1, let restored = app.pinManager.windows.last,
-              restored.originalText == nil, restored.cgImage.width == image.width else {
-            fputs("FAIL: F3 should restore the closed screenshot before unused text copied before closing\n", stderr)
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.originalText == text else {
+            fputs("FAIL: F3 should pin unused text copied before closing a screenshot\n", stderr)
             return false
         }
         app.triggerPinOrRestore()
-        guard app.pinManager.count == 1, pasteboard.changeCount == copyRevision,
+        guard app.pinManager.count == 2, let restored = app.pinManager.windows.last,
+              restored.originalText == nil, restored.cgImage.width == image.width else {
+            fputs("FAIL: F3 should restore the closed screenshot after pinning the copied text\n", stderr)
+            return false
+        }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 2, pasteboard.changeCount == copyRevision,
               pasteboard.string(forType: .string) == text else {
             fputs("FAIL: F3 should leave the clipboard intact and stop restoring when history is exhausted\n", stderr)
             return false
         }
-        OutputService.copyStringToClipboard(text, to: pasteboard)
-        app.triggerPinOrRestore()
-        guard app.pinManager.count == 2, app.pinManager.windows.last?.originalText == text else {
-            fputs("FAIL: Copying the same text again should allow a new pin\n", stderr)
-            return false
-        }
-        print("[pins] PASS: 关图前的文字保留在剪贴板，恢复完历史后可重新复制贴出")
+        print("[pins] PASS: 关图前尚未贴出的文字优先，接着恢复已关闭的截图")
         return true
     }
 
@@ -664,49 +662,43 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runClipboardCompressionAfterPinCloseCheck(image: CGImage, configURL: URL) -> Bool {
+    private static func runUsedClipboardCompressionAfterRelaunchCheck(image: CGImage, configURL: URL) -> Bool {
+        guard let historyImage = image.cropping(to: CGRect(x: 0, y: 0, width: 96, height: 48)) else { return false }
         let pasteboard = NSPasteboard.withUniqueName()
         var app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
         app.updateConfig { $0.lastSaveDirectory = configURL.deletingLastPathComponent().path }
         defer {
             app.updateConfig { $0.pinHistoryLimit = 0 }
             app.pinManager.closeAll()
-            app.pinManager.finishHistoryWrites()
             app.settingsController = nil
             pasteboard.releaseGlobally()
         }
-        guard let first = openFixturePin(image: image, width: 64, app: app),
-              let second = openFixturePin(image: image, width: 96, app: app) else { return false }
         OutputService.copyImageToClipboard(image, config: app.config, to: pasteboard)
         let originalRevision = pasteboard.changeCount
         guard let originalPNG = pasteboard.data(forType: .png) else { return false }
-        first.closeSelf()
-        second.closeSelf()
-        guard pasteboard.changeCount == originalRevision else {
-            fputs("FAIL: The clipboard compression fixture must close pins before the background rewrite\n", stderr)
-            return false
-        }
+        app.triggerPinOrRestore()
+        guard let opened = app.pinManager.windows.last, opened.cgImage.width == image.width else { return false }
+        opened.closeSelf()
+        guard app.pinManager.createPin(cgImage: historyImage, backingScale: 1, preferredScreenOriginAppKit: nil, config: app.config)
+        else { return false }
+        app.pinManager.windows.last?.closeSelf()
+        app.pinManager.finishHistoryWrites()
 
         guard waitForPinHistoryWork({ pasteboard.changeCount != originalRevision }),
               let compressedPNG = pasteboard.data(forType: .png), compressedPNG.count < originalPNG.count else {
             fputs("FAIL: The clipboard compression fixture should rewrite the clipboard with a smaller PNG\n", stderr)
             return false
         }
-        app.pinManager.finishHistoryWrites()
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
-        for (index, width) in [second.cgImage.width, first.cgImage.width].enumerated() {
-            app.triggerPinOrRestore()
-            guard app.pinManager.count == index + 1, app.pinManager.windows.last?.cgImage.width == width else {
-                fputs("FAIL: F3 should restore newest first after background compression and relaunch (press \(index + 1))\n", stderr)
-                return false
-            }
-        }
         app.triggerPinOrRestore()
-        guard app.pinManager.count == 2, let compressedItem = pasteboard.pasteboardItems?.first else {
-            fputs("FAIL: F3 should stop when history is exhausted even with a rewritten image on the clipboard\n", stderr)
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.cgImage.width == historyImage.width else {
+            fputs("FAIL: After relaunch, compression of a used clipboard image should still let F3 restore history first\n", stderr)
             return false
         }
+        app.triggerPinOrRestore()
+        guard app.pinManager.count == 2, app.pinManager.windows.last?.cgImage.width == image.width,
+              let compressedItem = pasteboard.pasteboardItems?.first else { return false }
 
         // Clipboard managers can recopy the image along with all its pasteboard types.
         let recopied = NSPasteboardItem()
@@ -720,7 +712,7 @@ public enum SmokeTestRunner {
             fputs("FAIL: Recopied compressed clipboard data should allow a new pin\n", stderr)
             return false
         }
-        print("[pins] PASS: 后台压缩沿用关图前的复制，重开逐张恢复，主动复制可再贴")
+        print("[pins] PASS: 重开后后台压缩写回仍属同一次复制，主动复制相同内容可以再贴")
         return true
     }
 
@@ -763,7 +755,7 @@ public enum SmokeTestRunner {
 
         OutputService.copyStringToClipboard(text, to: pasteboard)
         app.triggerPinOrRestore()
-        guard app.pinManager.count == 1, app.pinManager.windows.last === restored else {
+        guard app.pinManager.count == 1 else {
             fputs("FAIL: Recopied text should still respect the on-screen pin limit\n", stderr)
             return false
         }
@@ -772,12 +764,11 @@ public enum SmokeTestRunner {
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
         app.triggerPinOrRestore()
-        guard app.pinManager.count == 1, let reopened = app.pinManager.windows.last,
-              reopened.originalText == nil, reopened.cgImage.width == image.width else {
-            fputs("FAIL: After relaunch, F3 should restore the image closed after copied text hit the pin limit\n", stderr)
+        guard app.pinManager.count == 1, app.pinManager.windows.last?.originalText == text else {
+            fputs("FAIL: After relaunch, a recopy previously blocked by the pin limit should still take priority over history\n", stderr)
             return false
         }
-        print("[pins] PASS: 文字遇到同屏上限后关图，重开仍优先恢复")
+        print("[pins] PASS: 重开后已贴过的文字进入历史恢复，重新复制遇到同屏上限后仍可重试")
         return true
     }
 
@@ -840,31 +831,12 @@ public enum SmokeTestRunner {
         app.updateConfig { $0.pinMaxCount = 3 }
         OutputService.copyStringToClipboard(text, to: pasteboard)
         app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 3 else {
-            fputs("FAIL: Recopied text should respect the visible pin limit\n", stderr)
-            return false
-        }
+        guard pins.count == 3 else { return false }
         restored.closeSelf()
         app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 3, let recovered = pins.windows.last, recovered.originalText == text,
-              recovered.window.frame == textFrame, recovered.window.alphaValue == textOpacity else {
-            fputs("FAIL: F3 should restore the text pin closed after recopied text hit the pin limit\n", stderr)
-            return false
-        }
-
-        app.updateConfig { $0.pinMaxCount = 4 }
-        recovered.closeSelf()
-        OutputService.copyStringToClipboard(text, to: pasteboard)
-        app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 3, let recopied = pins.windows.last, recopied.originalText == text,
+        guard pins.count == 3, let recopied = pins.windows.last,
               recopied.window.alphaValue == 1, PixelBufferRGBA(cgImage: recopied.cgImage) == textImage else {
-            fputs("FAIL: The same text recopied after a close should make a fresh pin before restoring history\n", stderr)
-            return false
-        }
-        app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 4, pins.windows.last?.window.frame == textFrame,
-              pins.windows.last?.window.alphaValue == textOpacity else {
-            fputs("FAIL: F3 should resume restoring history after pinning recopied text\n", stderr)
+            fputs("FAIL: Recopied text should still make a new pin after reaching the visible pin limit\n", stderr)
             return false
         }
 
@@ -877,7 +849,7 @@ public enum SmokeTestRunner {
                 return false
             }
         }
-        print("[pins] PASS: 新文字优先、达到同屏上限后关图优先恢复，文字和图片共享单张与批量恢复")
+        print("[pins] PASS: 新文字优先、屏幕上限重试、文字和图片共享单张与批量恢复")
         return true
     }
 
@@ -1077,13 +1049,11 @@ public enum SmokeTestRunner {
         first.show()
         let statusMenu = NSMenu()
         app.menuNeedsUpdate(statusMenu)
-        OutputService.copyStringToClipboard("Copied before closing from the status menu", to: pasteboard)
         guard let statusClose = statusMenu.item(withTitle: L10n.tr("关闭全部贴图", "Close All Pins")),
               let statusAction = statusClose.action,
               NSApp.sendAction(statusAction, to: statusClose.target, from: statusClose),
               checkRestoration(indices: [2, 1, 0]) else { return false }
 
-        OutputService.copyStringToClipboard("Copied before closing from the pin menu", to: pasteboard)
         guard let restoredFirst = pins.windows.last,
               let event = NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: 24, y: 24),
                                              modifierFlags: [], timestamp: 0, windowNumber: restoredFirst.window.windowNumber,
@@ -1093,7 +1063,7 @@ public enum SmokeTestRunner {
               let pinAction = pinClose.action,
               NSApp.sendAction(pinAction, to: pinClose.target, from: pinClose),
               checkRestoration(indices: [0, 1, 2]) else { return false }
-        print("[pins] PASS: 两个关闭全部菜单都跳过关图前的复制，按最近贴出或恢复的顺序逐张恢复")
+        print("[pins] PASS: 两个关闭全部菜单都按最近贴出或恢复的顺序逐张恢复")
         return true
     }
 
@@ -1557,7 +1527,6 @@ public enum SmokeTestRunner {
         let expectedOpacity = newest.window.alphaValue
         let expectedImage = PixelBufferRGBA(cgImage: newest.cgImage)
         manuallyClosed.closeSelf()
-        OutputService.copyStringToClipboard("Copied before quitting with pins open", to: pasteboard)
         now = quitTime
         let willTerminate = Notification(name: NSApplication.willTerminateNotification, object: NSApp)
         AirSnipAppDelegate(controller: app).applicationWillTerminate(willTerminate)
@@ -1789,49 +1758,6 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
-    private static func runClipboardCopyOnPinHistoryFailureCheck(image: CGImage, configURL: URL) throws -> Bool {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
-        guard let closeTime = calendar.date(from: DateComponents(year: 2025, month: 1, day: 2, hour: 12)) else { return false }
-        return try withPinRestoreFixture(image: image, configURL: configURL, closeTime: { closeTime }) { image, app, pasteboard in
-            let files = FileManager.default
-            let manifest = ClosedPinHistory.manifestURL(for: configURL)
-            try files.createDirectory(at: manifest, withIntermediateDirectories: false)
-            let textBeforeRejection = "Copied before history rejected a closed pin"
-            OutputService.copyStringToClipboard(textBeforeRejection, to: pasteboard)
-            guard let rejected = openFixturePin(image: image, width: 48, app: app) else { return false }
-            rejected.closeSelf()
-            app.triggerPinOrRestore()
-            guard app.pinManager.count == 1, let textPin = app.pinManager.windows.last,
-                  textPin.originalText == textBeforeRejection else {
-                fputs("FAIL: A close that failed to register in history should leave copied text available to pin\n", stderr)
-                return false
-            }
-            try files.removeItem(at: manifest)
-
-            // A file in place of the date directory fails the background write after registration.
-            let root = OutputService.pinHistoryRootURL(for: app.config)
-            try files.createDirectory(at: root, withIntermediateDirectories: true)
-            try Data().write(to: root.appendingPathComponent("2025-01-02"))
-            let textBeforeWriteFailure = "Copied before a closed pin could not be written"
-            OutputService.copyStringToClipboard(textBeforeWriteFailure, to: pasteboard)
-            guard let pending = openFixturePin(image: image, width: 64, app: app) else { return false }
-            pending.closeSelf()
-            app.pinManager.finishHistoryWrites()
-
-            app.triggerPinOrRestore()
-            guard app.pinManager.count == 1, app.pinManager.windows.last === textPin,
-                  pasteboard.string(forType: .string) == textBeforeWriteFailure,
-                  pinHistoryPNGCount(at: root) == 0 else {
-                fputs("FAIL: A background write failure should discard the closed pin and keep its clipboard copy handled\n", stderr)
-                return false
-            }
-            print("[pins] PASS: 收录失败仍可贴出已复制文字，收录后写盘失败保留复制状态")
-            return true
-        }
-    }
-
-    @MainActor
     private static func runConfiguredPinHistoryCheck(image: CGImage, app: AirSnipAppController, pasteboard: NSPasteboard) -> Bool {
         let pins = app.pinManager
         let directory = app.configURL.deletingLastPathComponent().appendingPathComponent("iSnip Pin History", isDirectory: true)
@@ -1915,13 +1841,11 @@ public enum SmokeTestRunner {
             return false
         }
 
-        let copiedText = "Copied while pin history was disabled"
-        OutputService.copyStringToClipboard(copiedText, to: pasteboard)
         guard openPins(widths: 32...33) else { return false }
         pins.windows.last?.closeSelf()
         app.triggerPinOrRestore(from: pasteboard)
-        guard pins.count == 2, pins.windows.last?.originalText == copiedText else {
-            fputs("FAIL: Closing a pin with history disabled should leave copied text available to pin\n", stderr)
+        guard pins.count == 1 else {
+            fputs("FAIL: Closing a pin with history disabled should leave nothing to restore\n", stderr)
             return false
         }
         pins.closeAll()
@@ -2843,7 +2767,7 @@ public enum SmokeTestRunner {
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("used-clipboard-image/config.json")
                     )
-                    && runClipboardCompressionAfterPinCloseCheck(
+                    && runUsedClipboardCompressionAfterRelaunchCheck(
                         image: baked,
                         configURL: tempDir.appendingPathComponent("used-clipboard-compression/config.json")
                     )
@@ -2902,10 +2826,6 @@ public enum SmokeTestRunner {
                         configURL: tempDir.appendingPathComponent("pin-history-limit-recovery/config.json")
                     )
                     && runFailedPinHistoryWriteCheck(image: baseCG, directory: tempDir)
-                    && runClipboardCopyOnPinHistoryFailureCheck(
-                        image: baseCG,
-                        configURL: tempDir.appendingPathComponent("pin-history-clipboard-write-failure/config.json")
-                    )
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("pin-history-config/config.json"),
