@@ -102,6 +102,7 @@ public final class OCRBubbleManager: ObservableObject {
     private var translateAfterRecognition = false
 
     private var panel: KeyableBubblePanel?
+    private var prewarmTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
     private var copyFeedbackTask: Task<Void, Never>?
     var showCompletionToast = true
@@ -110,13 +111,16 @@ public final class OCRBubbleManager: ObservableObject {
 
     public init() {}
 
+    func prewarm(languagePreference: String) {
+        prewarmTask = LocalVisionOCR.prewarm(languagePreference: languagePreference)
+    }
+
     public func recognizeAndPresent(
         rawSelectionImage: CGImage,
         anchorScreenPoint: NSPoint?,
         config: AirSnipConfig,
         translateOnCompletion: Bool = false
     ) {
-        recognitionTask?.cancel()
         suppressCallback = true
         self.appLanguage = config.language
         self.showCompletionToast = config.showCompletionToast
@@ -161,11 +165,13 @@ public final class OCRBubbleManager: ObservableObject {
 
     public func rerunRecognitionIfPossible() {
         guard let img = sourceImage else { return }
-        recognitionTask?.cancel()
         startRecognition(on: img)
     }
 
     private func startRecognition(on image: CGImage) {
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        recognitionTask?.cancel()
         self.isRecognizing = true
         self.errorMessage = nil
         self.text = ""
@@ -178,13 +184,9 @@ public final class OCRBubbleManager: ObservableObject {
 
         recognitionTask = Task { [weak self] in
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try LocalVisionOCR.recognizeDetailed(
-                        cgImage: image,
-                        languagePreference: lang,
-                        detectBarcodes: wantBarcodes
-                    )
-                }.value
+                let result = try await LocalVisionOCR.recognizeInBackground(
+                    cgImage: image, languagePreference: lang, detectBarcodes: wantBarcodes
+                )
                 guard !Task.isCancelled, let self else { return }
                 self.isRecognizing = false
                 self.barcodes = result.barcodes
@@ -342,6 +344,8 @@ public final class OCRBubbleManager: ObservableObject {
 
     public func dismiss() {
         recognitionTask?.cancel()
+        recognitionTask = nil
+        isRecognizing = false
         copyFeedbackTask?.cancel()
         copiedFeedback = false
         copiedTranslationFeedback = false

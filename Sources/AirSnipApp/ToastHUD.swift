@@ -106,6 +106,7 @@ enum ToastHUD {
     }
 
     private static func dismiss(_ panel: NSPanel, after duration: TimeInterval) {
+        guard duration.isFinite else { return }
         dismissTask = Task {
             try? await Task.sleep(for: .seconds(duration))
             guard !Task.isCancelled else { return }

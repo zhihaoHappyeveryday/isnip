@@ -60,9 +60,6 @@ public enum ScreenCaptureService {
         proc.arguments = ["-c", script, "relaunch", "\(pid)", bundlePath] + extraArguments
         try? proc.run()
         NSApp.terminate(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            exit(0)
-        }
     }
 
     public static func showPermissionGuidanceAlert(error: Error? = nil) {
@@ -575,10 +572,14 @@ public enum OutputService {
         return image
     }
 
+    typealias ClipboardPin = (
+        cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?, isTextPreviewClipped: Bool
+    )
+
     static func readPinFromClipboard(
         from pasteboard: NSPasteboard,
         excluding previousCopy: ClipboardCopyID?
-    ) -> (cgImage: CGImage, pointSize: NSSize, copyID: ClipboardCopyID, originalText: String?, isTextPreviewClipped: Bool)? {
+    ) -> ClipboardPin? {
         let currentRevision = pasteboard.changeCount
         let copyID = clipboardCopyID(for: pasteboard, currentRevision: currentRevision)
         guard copyID != previousCopy else { return nil }

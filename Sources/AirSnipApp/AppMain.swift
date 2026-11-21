@@ -23,6 +23,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private let selectionTranslation = SelectionTranslationController()
     private var selectionSourceApplication: NSRunningApplication?
     public let configURL: URL
+    private var configUpdates: [(mutate: (inout AirSnipConfig) -> Void, completion: () -> Void)] = []
+    private var isUpdatingHistoryLimit = false
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
@@ -36,13 +38,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if let data = try? Data(contentsOf: lastPinnedClipboardCopyURL) {
             lastPinnedClipboardCopy = try? JSONDecoder().decode(OutputService.ClipboardCopyID.self, from: data)
         }
+        let loadedConfig = AirSnipConfig.load(from: configURL)
         self.pinManager = PinManager(
             pasteboard: pinPasteboard,
             historyConfigURL: configURL,
             historyCloseTime: pinHistoryCloseTime,
+            historyLimit: loadedConfig.pinHistoryLimit,
             historyRootURL: OutputService.pinHistoryRootURL(for:)
         )
-        let loadedConfig = AirSnipConfig.load(from: configURL)
         L10n.current = loadedConfig.language
         self.config = loadedConfig
         super.init()
@@ -55,7 +58,6 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         pinManager.getConfig = { [weak self] in
             self?.config ?? AirSnipConfig()
         }
-        _ = pinManager.trimClosedHistory(to: loadedConfig.pinHistoryLimit)
         pinManager.updateConfig = { [weak self] block in
             self?.updateConfig(block)
         }
@@ -124,7 +126,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if #available(macOS 15.0, *) {
             selectionTranslation.setEnabled(config.translation.showSelectionButton)
         }
-        LocalVisionOCR.prewarm(languagePreference: config.ocr.language)
+        ocrBubbleManager.prewarm(languagePreference: config.ocr.language)
 
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -180,22 +182,51 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         }
     }
 
-    public func updateConfig(_ mutate: (inout AirSnipConfig) -> Void) {
+    public func updateConfig(_ mutate: @escaping (inout AirSnipConfig) -> Void, completion: @escaping () -> Void = {}) {
+        configUpdates.append((mutate, completion))
+        applyConfigUpdates()
+    }
+
+    private func applyConfigUpdates() {
+        guard !isUpdatingHistoryLimit else { return }
+        while !configUpdates.isEmpty {
+            let update = configUpdates.removeFirst()
+            var next = config
+            update.mutate(&next)
+            guard next.pinHistoryLimit != config.pinHistoryLimit else {
+                applyConfig(next, save: true)
+                update.completion()
+                continue
+            }
+
+            isUpdatingHistoryLimit = true
+            let requested = next
+            pinManager.updateHistoryLimit(to: requested.pinHistoryLimit, savingConfig: { [configURL] limit in
+                var saved = requested
+                saved.pinHistoryLimit = limit
+                try saved.save(to: configURL)
+            }, completion: { [weak self] limit in
+                guard let self else { return }
+                var applied = requested
+                applied.pinHistoryLimit = limit
+                self.applyConfig(applied, save: false)
+                update.completion()
+                self.isUpdatingHistoryLimit = false
+                self.applyConfigUpdates()
+            })
+            return
+        }
+    }
+
+    private func applyConfig(_ next: AirSnipConfig, save: Bool) {
         let oldHotkeys = config.hotkeys
         let oldLang = config.language
         let oldSelectionButton = config.translation.showSelectionButton
-        let oldPinHistoryLimit = config.pinHistoryLimit
-        var next = config
-        mutate(&next)
-        let pinHistoryLimitChanged = next.pinHistoryLimit != oldPinHistoryLimit
-        if pinHistoryLimitChanged {
-            next = savePinHistoryLimitChange(next, from: oldPinHistoryLimit)
-        }
         config = next
         activeCaptureSession?.refreshWindowedPinConfig(config)
         L10n.current = config.language
         ocrBubbleManager.showCompletionToast = config.showCompletionToast
-        if !pinHistoryLimitChanged {
+        if save {
             try? config.save(to: configURL)
         }
         if config.language != oldLang {
@@ -209,36 +240,6 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             if config.translation.showSelectionButton { SelectedTextService.requestAccess() }
             selectionTranslation.setEnabled(config.translation.showSelectionButton)
         }
-    }
-
-    private func savePinHistoryLimitChange(_ requested: AirSnipConfig, from previousLimit: Int) -> AirSnipConfig {
-        let limit = requested.pinHistoryLimit
-        var fallback = requested
-        fallback.pinHistoryLimit = previousLimit
-
-        // Retry an incomplete trim before raising the saved limit.
-        if limit > previousLimit, !pinManager.trimClosedHistory(to: previousLimit) {
-            try? fallback.save(to: configURL)
-            return fallback
-        }
-
-        do {
-            // Save reductions before deleting any history. Startup enforces the saved limit.
-            try requested.save(to: configURL)
-        } catch {
-            ToastHUD.show(
-                L10n.tr("无法保存可恢复贴图数", "Could not save the recoverable pin limit", in: requested.language),
-                kind: .warning,
-                detail: L10n.tr("请再试一次", "Please try again", in: requested.language)
-            )
-            return fallback
-        }
-
-        if limit < previousLimit, !pinManager.trimClosedHistory(to: limit) {
-            // If rollback cannot be saved, keep the limit that is already on disk.
-            if (try? fallback.save(to: configURL)) != nil { return fallback }
-        }
-        return requested
     }
 
     // MARK: - Menu Bar Status Item
@@ -615,15 +616,23 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         )
     }
 
-    public func triggerPinOrRestore(from pasteboard: NSPasteboard? = nil) {
+    public func triggerPinOrRestore(from pasteboard: NSPasteboard? = nil, completion: @escaping () -> Void = {}) {
         cleanupStaleCaptureSessionIfNeeded()
-        guard activeCaptureSession == nil else { return }
-        guard let clip = OutputService.readPinFromClipboard(
-            from: pasteboard ?? pinManager.pasteboard, excluding: lastPinnedClipboardCopy
-        ) else {
-            pinManager.restoreLastClosedPin(config: config)
+        guard activeCaptureSession == nil, !pinManager.isQuitting else {
+            completion()
             return
         }
+        let clip = OutputService.readPinFromClipboard(
+            from: pasteboard ?? pinManager.pasteboard, excluding: lastPinnedClipboardCopy
+        )
+        pinManager.restoreLastClosedPin(config: config, unlessHandled: { [weak self] in
+            guard let self, let clip, clip.copyID != self.lastPinnedClipboardCopy else { return false }
+            self.pinFromClipboard(clip)
+            return true
+        }, completion: completion)
+    }
+
+    private func pinFromClipboard(_ clip: OutputService.ClipboardPin) {
         let scale = Double(clip.cgImage.width) / max(1.0, Double(clip.pointSize.width))
         var pinCfg = config
         pinCfg.pinPosition = .center
@@ -803,6 +812,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
 public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
     private var controller: AirSnipAppController?
+    private var isSavingOnQuit = false
 
     public override init() {
         super.init()
@@ -834,8 +844,26 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    public func applicationWillTerminate(_ notification: Notification) {
-        controller?.pinManager.saveOpenPinsOnQuit()
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller else { return .terminateNow }
+        guard !isSavingOnQuit else { return .terminateLater }
+        isSavingOnQuit = true
+        controller.ocrBubbleManager.dismiss()
+
+        let progress = Timer(timeInterval: 1, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                ToastHUD.show(
+                    L10n.tr("正在保存贴图历史", "Saving pin history", in: controller.config.language),
+                    kind: .information, duration: .infinity
+                )
+            }
+        }
+        RunLoop.main.add(progress, forMode: .common)
+        controller.pinManager.saveOpenPinsOnQuit {
+            progress.invalidate()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

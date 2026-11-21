@@ -20,10 +20,14 @@ struct PinSnapshot {
     let image: CGImage
     let originalText: String?
     let displayState: PinDisplayState
+    var historyID: UUID? = nil
 }
 
-@MainActor
-final class ClosedPinHistory {
+final class ClosedPinHistory: @unchecked Sendable {
+    enum Failure {
+        case savePin, trim, saveLimit
+    }
+
     private final class CloseBatch {
         var reportedWriteFailure = false
     }
@@ -105,45 +109,32 @@ final class ClosedPinHistory {
         case unreadable
     }
 
-    private final class Write: @unchecked Sendable {
-        let files: PinFiles
-        private let queue: DispatchQueue
-        // The serial queue owns the write result, including when quit waits for it.
-        private var saved = false
-
-        init(files: PinFiles, queue: DispatchQueue) {
-            self.files = files
-            self.queue = queue
-        }
-
-        func start(image: CGImage, originalText: String?, completion: @escaping @MainActor (Write, Bool) -> Void) {
-            queue.async {
-                let saved = ClosedPinHistory.writeSnapshot(image, originalText: originalText, to: self.files)
-                self.saved = saved
-                DispatchQueue.main.async { completion(self, saved) }
-            }
-        }
-
-        func waitForResult() -> Bool {
-            queue.sync { saved }
-        }
-    }
-
+    // The history queue owns the ordered entries and their manifest. Encoding one PNG at
+    // a time on the write queue lets a pending pin still be restored directly from memory.
+    private let queue = DispatchQueue(label: "io.zzusec.airsnip.closed-pin-history", qos: .userInitiated)
+    private let writeQueue = DispatchQueue(label: "io.zzusec.airsnip.closed-pin-write", qos: .utility)
     private let manifestURL: URL?
-    private let legacySessions: LegacyPinHistorySessions
-    private let writeQueue = DispatchQueue(label: "io.zzusec.airsnip.closed-pin-history", qos: .utility)
+    private var legacySessions: LegacyPinHistorySessions?
+    private var limit: Int
     private var entries: [Entry] = []
     private var cleanupCandidates: Set<PinFiles> = []
-    private var inFlightWrite: Write?
-    var onWriteFailure: (() -> Void)?
+    private var inFlightWrite: PinFiles?
+    private var writeCompletions: [@MainActor () -> Void] = []
+    @MainActor var onFailure: ((Failure) -> Void)?
 
     static func manifestURL(for configURL: URL) -> URL {
         configURL.deletingPathExtension().appendingPathExtension("pin-history.json")
     }
 
-    init(configURL: URL?) {
-        let manifestURL = configURL.map(Self.manifestURL(for:))
-        self.manifestURL = manifestURL
+    init(configURL: URL?, limit: Int = AirSnipConfig.defaultPinHistoryLimit) {
+        manifestURL = configURL.map(Self.manifestURL(for:))
+        self.limit = limit
+        queue.async {
+            self.load(configURL: configURL)
+        }
+    }
+
+    private func load(configURL: URL?) {
         let legacyRegistryURL = configURL?.deletingPathExtension().appendingPathExtension("pin-history-sessions.json")
         legacySessions = LegacyPinHistorySessions(registryURL: legacyRegistryURL)
         guard let manifestURL, let data = try? Data(contentsOf: manifestURL),
@@ -151,12 +142,23 @@ final class ClosedPinHistory {
         entries = manifest.records.filter { $0.files.dayDirectory.isFileURL }.map { Entry(record: $0, content: .stored) }
         cleanupCandidates = manifest.cleanupCandidates.filter { $0.dayDirectory.isFileURL }
         cleanUnusedFiles()
+        _ = enforceLimit()
     }
 
-    var isEmpty: Bool { entries.isEmpty }
+    func remember(_ snapshots: [PinSnapshot], historyRoot: URL, closedAt: Date = Date()) {
+        guard !snapshots.isEmpty else { return }
+        queue.async {
+            self.rememberOnQueue(snapshots, historyRoot: historyRoot, closedAt: closedAt)
+        }
+    }
 
-    func remember(_ snapshots: [PinSnapshot], limit: Int, historyRoot: URL, closedAt: Date = Date()) {
-        guard limit > 0, !snapshots.isEmpty else { return }
+    private func rememberOnQueue(_ snapshots: [PinSnapshot], historyRoot: URL, closedAt: Date) {
+        guard limit > 0 else { return }
+        // If consuming a restored pin failed, the original record still covers a concurrent close.
+        let existingIDs = Set(entries.map { $0.record.files.id })
+        let closedSnapshots = snapshots.filter { $0.historyID.map(existingIDs.contains) != true }.suffix(limit)
+        guard !closedSnapshots.isEmpty else { return }
+
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -165,12 +167,12 @@ final class ClosedPinHistory {
         let dayDirectory = historyRoot.appendingPathComponent(formatter.string(from: closedAt), isDirectory: true)
         guard (try? Self.ensureHistoryRootExists(historyRoot)) != nil,
               let rootIdentity = HistoryRootIdentity(at: historyRoot) else {
-            onWriteFailure?()
+            report(.savePin)
             return
         }
-        legacySessions.cleanUp(in: historyRoot)
+        legacySessions?.cleanUp(in: historyRoot)
         let batch = CloseBatch()
-        let closed = snapshots.suffix(limit).map { snapshot in
+        let closed = closedSnapshots.map { snapshot in
             let files = PinFiles(
                 dayDirectory: dayDirectory, id: UUID(), hasOriginalText: snapshot.originalText != nil, rootIdentity: rootIdentity
             )
@@ -182,24 +184,76 @@ final class ClosedPinHistory {
         let next = entries + closed
         let excess = max(0, next.count - limit)
         guard discard(next.prefix(excess), keeping: Array(next.dropFirst(excess))) else {
-            onWriteFailure?()
+            report(.savePin)
             return
         }
         writeNext()
     }
 
-    func trim(to limit: Int) -> Bool {
-        let excess = entries.count - limit
-        guard excess > 0 else { return true }
-        return discard(entries.prefix(excess), keeping: Array(entries.dropFirst(excess)))
+    func updateLimit(to requested: Int, savingConfig: @escaping (Int) throws -> Void, completion: @escaping @MainActor (Int) -> Void) {
+        queue.async {
+            self.saveLimitChange(requested, save: savingConfig)
+            let applied = self.limit
+            Self.onMain { completion(applied) }
+        }
     }
 
-    func restoreLast() -> (snapshot: PinSnapshot?, skippedUnreadable: Bool) {
+    private func saveLimitChange(_ requested: Int, save: (Int) throws -> Void) {
+        let previous = limit
+        // Retry a previously interrupted trim before allowing older history to become eligible.
+        if requested > previous, !enforceLimit() {
+            try? save(previous)
+            return
+        }
+        do {
+            // Startup also enforces the saved limit if a reduction is interrupted.
+            try save(requested)
+        } catch {
+            report(.saveLimit)
+            return
+        }
+        limit = requested
+        if requested < previous, !enforceLimit(), (try? save(previous)) != nil {
+            limit = previous
+        }
+    }
+
+    private func enforceLimit() -> Bool {
+        let excess = entries.count - limit
+        guard excess > 0 else { return true }
+        guard discard(entries.prefix(excess), keeping: Array(entries.dropFirst(excess))) else {
+            report(.trim)
+            return false
+        }
+        return true
+    }
+
+    func restoreLast(
+        if shouldRestore: @escaping @MainActor (_ hasHistory: Bool) -> Bool,
+        present: @escaping @MainActor (PinSnapshot) -> Bool,
+        completion: @escaping @MainActor (_ restored: Bool, _ skippedUnreadable: Bool) -> Void
+    ) {
+        queue.async {
+            let result = self.restoreOnQueue(if: shouldRestore, present: present)
+            Self.onMain { completion(result.restored, result.skippedUnreadable) }
+        }
+    }
+
+    private func restoreOnQueue(
+        if shouldRestore: @escaping @MainActor (Bool) -> Bool,
+        present: @escaping @MainActor (PinSnapshot) -> Bool
+    ) -> (restored: Bool, skippedUnreadable: Bool) {
+        let hasHistory = limit > 0 && !entries.isEmpty
+        guard Self.askMain({ shouldRestore(hasHistory) }) else { return (false, false) }
+        cleanUnusedFiles()
+        guard enforceLimit(), limit > 0 else { return (false, false) }
+
         var skippedUnreadable = false
         for index in entries.indices.reversed() {
             let snapshot: PinSnapshot?
             switch Self.readSnapshot(entries[index]) {
             case .loaded(let restored):
+                guard Self.askMain({ present(restored) }) else { return (false, skippedUnreadable) }
                 snapshot = restored
             case .rootUnavailable:
                 continue
@@ -210,22 +264,47 @@ final class ClosedPinHistory {
             var next = entries
             next.remove(at: index)
             guard discard(entries[index...index], keeping: next) else {
-                onWriteFailure?()
-                return (nil, skippedUnreadable)
+                report(.savePin)
+                return (false, skippedUnreadable)
             }
-            if let snapshot { return (snapshot, skippedUnreadable) }
+            if snapshot != nil { return (true, skippedUnreadable) }
             skippedUnreadable = true
         }
-        return (nil, skippedUnreadable)
+        return (false, skippedUnreadable)
     }
 
-    func finishPendingWrites() {
-        while let write = inFlightWrite {
-            completeWrite(write, saved: write.waitForResult())
+    func finishPendingWrites(enforcingLimit: Bool = false, completion: @escaping @MainActor () -> Void) {
+        queue.async {
+            if enforcingLimit { _ = self.enforceLimit() }
+            self.writeCompletions.append(completion)
+            self.writeNext()
         }
     }
 
-    nonisolated static func ensureHistoryRootExists(_ historyRoot: URL, attributes: [FileAttributeKey: Any]? = nil) throws {
+    func retryCleanup() {
+        queue.async { self.cleanUnusedFiles() }
+    }
+
+    private func report(_ failure: Failure) {
+        Self.onMain { self.onFailure?(failure) }
+    }
+
+    private static func onMain(_ action: @escaping @MainActor () -> Void) {
+        // AppKit can wait for a reply in a modal run loop during termination.
+        RunLoop.main.perform(inModes: [.common]) {
+            MainActor.assumeIsolated(action)
+        }
+    }
+
+    private static func askMain(_ action: @escaping @MainActor () -> Bool) -> Bool {
+        var accepted = false
+        let work = DispatchWorkItem { accepted = MainActor.assumeIsolated(action) }
+        onMain { work.perform() }
+        work.wait()
+        return accepted
+    }
+
+    static func ensureHistoryRootExists(_ historyRoot: URL, attributes: [FileAttributeKey: Any]? = nil) throws {
         let files = FileManager.default
         var isDirectory: ObjCBool = false
         if files.fileExists(atPath: historyRoot.path, isDirectory: &isDirectory), isDirectory.boolValue { return }
@@ -242,20 +321,20 @@ final class ClosedPinHistory {
                 reportWriteFailure(in: batch)
                 continue
             }
-            let write = Write(files: files, queue: writeQueue)
-            inFlightWrite = write
-            write.start(image: image, originalText: originalText) { [weak self] completedWrite, saved in
-                self?.completeWrite(completedWrite, saved: saved)
+            inFlightWrite = files
+            writeQueue.async {
+                let saved = Self.writeSnapshot(image, originalText: originalText, to: files)
+                self.queue.async { self.completeWrite(files, saved: saved) }
             }
             return
         }
+        let completions = writeCompletions
+        writeCompletions.removeAll()
+        Self.onMain { completions.forEach { $0() } }
     }
 
-    private func completeWrite(_ write: Write, saved: Bool) {
-        // The quit callback may have already finished this write.
-        guard write === inFlightWrite else { return }
+    private func completeWrite(_ files: PinFiles, saved: Bool) {
         inFlightWrite = nil
-        let files = write.files
         defer {
             cleanUnusedFiles()
             writeNext()
@@ -275,7 +354,7 @@ final class ClosedPinHistory {
     private func reportWriteFailure(in batch: CloseBatch) {
         if !batch.reportedWriteFailure {
             batch.reportedWriteFailure = true
-            onWriteFailure?()
+            report(.savePin)
         }
     }
 
@@ -290,8 +369,8 @@ final class ClosedPinHistory {
         return true
     }
 
-    func cleanUnusedFiles() {
-        let removed = cleanupCandidates.filter { $0 != inFlightWrite?.files && Self.removeFiles($0) }
+    private func cleanUnusedFiles() {
+        let removed = cleanupCandidates.filter { $0 != inFlightWrite && Self.removeFiles($0) }
         if !removed.isEmpty {
             _ = saveAndApply(entries, cleanupCandidates: cleanupCandidates.subtracting(removed))
         }
@@ -312,7 +391,7 @@ final class ClosedPinHistory {
         return true
     }
 
-    private nonisolated static func writeSnapshot(_ image: CGImage, originalText: String?, to files: PinFiles) -> Bool {
+    private static func writeSnapshot(_ image: CGImage, originalText: String?, to files: PinFiles) -> Bool {
         guard files.isHistoryRootAvailable else { return false }
         return autoreleasepool {
             do {
@@ -336,7 +415,7 @@ final class ClosedPinHistory {
         let record = entry.record
         switch entry.content {
         case .pending(let image, let originalText, _):
-            return .loaded(PinSnapshot(image: image, originalText: originalText, displayState: record.displayState))
+            return .loaded(PinSnapshot(image: image, originalText: originalText, displayState: record.displayState, historyID: record.files.id))
         case .stored:
             guard record.files.isHistoryRootAvailable else { return .rootUnavailable }
             if let snapshot = readStoredSnapshot(record) { return .loaded(snapshot) }
@@ -354,16 +433,16 @@ final class ClosedPinHistory {
             guard let text = try? String(contentsOf: textURL, encoding: .utf8) else { return nil }
             originalText = text
         }
-        return PinSnapshot(image: image, originalText: originalText, displayState: record.displayState)
+        return PinSnapshot(image: image, originalText: originalText, displayState: record.displayState, historyID: record.files.id)
     }
 
-    private nonisolated static func removeFiles(_ files: PinFiles) -> Bool {
+    private static func removeFiles(_ files: PinFiles) -> Bool {
         let imageRemoved = removeFile(at: files.imageURL, from: files)
         let textRemoved = files.textURL.map { removeFile(at: $0, from: files) } ?? true
         return imageRemoved && textRemoved
     }
 
-    private nonisolated static func removeFile(at url: URL, from files: PinFiles) -> Bool {
+    private static func removeFile(at url: URL, from files: PinFiles) -> Bool {
         guard files.isHistoryRootAvailable else { return false }
         return url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return false }

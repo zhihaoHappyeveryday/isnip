@@ -69,6 +69,20 @@ final class LocalVisionOCRTests: XCTestCase {
         XCTAssertEqual(attempts, 3)
     }
 
+    func testCancelledOCRDoesNotTryAnotherRecognitionEngine() {
+        for stage in 1...2 {
+            var attempts = 0
+            XCTAssertThrowsError(try LocalVisionOCR.performTextRecognition(languagePreference: "en-US") { _ in
+                attempts += 1
+                if attempts < stage { throw NSError(domain: "OCRTest", code: attempts) }
+                throw CancellationError()
+            }) { error in
+                XCTAssertTrue(error is CancellationError)
+            }
+            XCTAssertEqual(attempts, stage)
+        }
+    }
+
     func testDarkTerminalScreenshotRecognizesChineseAndCommands() throws {
         let context = try makeContext(width: 1100, height: 220)
         context.setFillColor(CGColor(srgbRed: 0.13, green: 0.15, blue: 0.19, alpha: 1))

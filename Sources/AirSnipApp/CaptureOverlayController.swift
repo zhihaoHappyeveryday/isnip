@@ -161,7 +161,7 @@ public final class CaptureSessionCoordinator {
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
     public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, Bool) -> Void)?
     var getShowCompletionToast: (() -> Bool)?
-    var onUpdatePreferences: (((inout AirSnipConfig) -> Void) -> Void)?
+    var onUpdatePreferences: ((@escaping (inout AirSnipConfig) -> Void) -> Void)?
     public var onSessionEnded: (() -> Void)?
 
     fileprivate var showsCompletionToast: Bool {
@@ -448,7 +448,7 @@ public final class CaptureSessionCoordinator {
         }
     }
 
-    func mutateConfig(_ change: (inout AirSnipConfig) -> Void) {
+    func mutateConfig(_ change: @escaping (inout AirSnipConfig) -> Void) {
         // Keep the session snapshot in sync and apply the same preference change to the app's current config.
         change(&config)
         onUpdatePreferences?(change)

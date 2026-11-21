@@ -3,6 +3,7 @@ import CoreGraphics
 import CoreML
 import CoreText
 import Vision
+import os
 
 public struct OCRTextSegment: Equatable, Sendable {
     public var left: Double
@@ -182,6 +183,47 @@ public enum OCRLinesJoiner {
 }
 
 public enum LocalVisionOCR {
+    private static let timing = OSSignposter(subsystem: "io.zzusec.airsnip", category: "OCR")
+
+    private final class VisionWork: @unchecked Sendable {
+        private let lock = NSLock()
+        private var activeRequest: VNRequest?
+
+        func perform(_ request: VNRequest, using handler: VNImageRequestHandler) throws {
+            lock.withLock { activeRequest = request }
+            defer { lock.withLock { activeRequest = nil } }
+            try Task.checkCancellation()
+            do {
+                try handler.perform([request])
+            } catch {
+                try Task.checkCancellation()
+                throw error
+            }
+            try Task.checkCancellation()
+        }
+
+        func cancel() {
+            let request = lock.withLock { activeRequest }
+            request?.cancel()
+        }
+    }
+
+    private static func runInBackground<Value: Sendable>(
+        priority: TaskPriority,
+        _ operation: @escaping @Sendable (VisionWork) throws -> Value
+    ) async throws -> Value {
+        try Task.checkCancellation()
+        let work = VisionWork()
+        let task = Task.detached(priority: priority) { try operation(work) }
+        return try await withTaskCancellationHandler {
+            let result = try await task.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            task.cancel()
+            work.cancel()
+        }
+    }
     /// Vision downsizes large images internally, losing small text in long screenshots and even throwing
     /// VNErrorInvalidImage when the short edge collapses to two pixels. Keep native pixels in overlapping
     /// tiles for long/oversized images; ordinary screenshots still use a single request.
@@ -299,18 +341,25 @@ public enum LocalVisionOCR {
         // Tier 1: Default hardware-accelerated .accurate (GPU/ANE on Apple Silicon & supported Intel/AMD GPUs)
         let primary = VNRecognizeTextRequest()
         configure(primary, languagePreference: languagePreference)
-        if (try? perform(primary)) != nil {
+        do {
+            try perform(primary)
             return primary.results ?? []
-        }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {}
 
         // Tier 2: Fresh .accurate pinned to MLCPUComputeDevice (handles unsupported Radeon/Metal shader drivers on amd64 Macs)
+        try Task.checkCancellation()
         let cpuAccurate = VNRecognizeTextRequest()
         configure(cpuAccurate, languagePreference: languagePreference)
         pinToCPU(cpuAccurate)
         do {
             try perform(cpuAccurate)
             return cpuAccurate.results ?? []
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             let fastFallback = VNRecognizeTextRequest()
             fastFallback.recognitionLevel = .fast
             fastFallback.usesLanguageCorrection = true
@@ -334,11 +383,18 @@ public enum LocalVisionOCR {
     /// Vision loads / compiles its recognition models on the first request after boot or cache eviction,
     /// which was measured at 16–25 s. Running one tiny request in the background at launch moves that cost
     /// off the user's critical path so the first real screenshot OCR is fast.
-    public static func prewarm(languagePreference: String = "auto") {
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard let image = makeWarmupImage() else { return }
-            let handler = VNImageRequestHandler(cgImage: image, options: [:])
-            _ = try? performTextRecognition(languagePreference: languagePreference) { try handler.perform([$0]) }
+    public static func prewarm(languagePreference: String = "auto") -> Task<Void, Never> {
+        Task(priority: .utility) {
+            _ = try? await runInBackground(priority: .utility) { work in
+                try Task.checkCancellation()
+                let interval = timing.beginInterval("OCR prewarm")
+                defer { timing.endInterval("OCR prewarm", interval) }
+                guard let image = makeWarmupImage() else { return }
+                let handler = VNImageRequestHandler(cgImage: image, options: [:])
+                _ = try performTextRecognition(languagePreference: languagePreference) {
+                    try work.perform($0, using: handler)
+                }
+            }
         }
     }
 
@@ -378,6 +434,32 @@ public enum LocalVisionOCR {
         languagePreference: String = "auto",
         detectBarcodes: Bool = true
     ) throws -> OCRRecognitionResult {
+        try recognizeDetailed(cgImage: cgImage, languagePreference: languagePreference, detectBarcodes: detectBarcodes) {
+            try $1.perform([$0])
+        }
+    }
+
+    public static func recognizeInBackground(
+        cgImage: CGImage,
+        languagePreference: String,
+        detectBarcodes: Bool
+    ) async throws -> OCRRecognitionResult {
+        try await runInBackground(priority: .userInitiated) { work in
+            let interval = timing.beginInterval("OCR recognition")
+            defer { timing.endInterval("OCR recognition", interval) }
+            return try recognizeDetailed(
+                cgImage: cgImage, languagePreference: languagePreference, detectBarcodes: detectBarcodes
+            ) { try work.perform($0, using: $1) }
+        }
+    }
+
+    private static func recognizeDetailed(
+        cgImage: CGImage,
+        languagePreference: String,
+        detectBarcodes: Bool,
+        perform: (VNRequest, VNImageRequestHandler) throws -> Void
+    ) throws -> OCRRecognitionResult {
+        try Task.checkCancellation()
         // There cannot be legible text or a barcode in a one-/two-pixel-wide image. Vision throws
         // VNErrorInvalidImage for these inputs; return the normal empty result instead.
         guard cgImage.width > 2, cgImage.height > 2 else {
@@ -390,6 +472,7 @@ public enum LocalVisionOCR {
         let hasHorizontalSeams = tiles.contains { $0.minX > 0 }
 
         for (tileIndex, tile) in tiles.enumerated() {
+            try Task.checkCancellation()
             // Release Vision's intermediate images after every tile, not after the entire longshot.
             try autoreleasepool {
                 let image: CGImage
@@ -403,7 +486,9 @@ public enum LocalVisionOCR {
                 }
 
                 let handler = VNImageRequestHandler(cgImage: image, options: [:])
-                let observations = try performTextRecognition(languagePreference: languagePreference) { try handler.perform([$0]) }
+                let observations = try performTextRecognition(languagePreference: languagePreference) {
+                    try perform($0, handler)
+                }
 
                 for observation in observations {
                     guard let candidate = observation.topCandidates(1).first else { continue }
@@ -439,30 +524,34 @@ public enum LocalVisionOCR {
                 }
 
                 if detectBarcodes {
+                    try Task.checkCancellation()
                     // Barcode detection is optional: a failure must not discard successfully recognized text.
                     let barcodeRequest = VNDetectBarcodesRequest()
-                    if (try? handler.perform([barcodeRequest])) == nil {
+                    let barcodes: [VNBarcodeObservation]
+                    do {
+                        try perform(barcodeRequest, handler)
+                        barcodes = barcodeRequest.results ?? []
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        try Task.checkCancellation()
                         let cpuBarcodeRequest = VNDetectBarcodesRequest()
                         pinToCPU(cpuBarcodeRequest)
-                        _ = try? handler.perform([cpuBarcodeRequest])
-                        for item in cpuBarcodeRequest.results ?? [] {
-                            if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-                               !payload.isEmpty, !detectedPayloads.contains(payload) {
-                                detectedPayloads.append(payload)
-                            }
-                        }
-                    } else {
-                        for item in barcodeRequest.results ?? [] {
-                            if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-                               !payload.isEmpty, !detectedPayloads.contains(payload) {
-                                detectedPayloads.append(payload)
-                            }
+                        _ = try? perform(cpuBarcodeRequest, handler)
+                        try Task.checkCancellation()
+                        barcodes = cpuBarcodeRequest.results ?? []
+                    }
+                    for item in barcodes {
+                        if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !payload.isEmpty, !detectedPayloads.contains(payload) {
+                            detectedPayloads.append(payload)
                         }
                     }
                 }
             }
         }
 
+        try Task.checkCancellation()
         let rawText = OCRLinesJoiner.joinSegments(mergeTileLines(lines))
         let paragraphText = OCRLinesJoiner.mergeWrappedParagraphs(rawText)
         return OCRRecognitionResult(

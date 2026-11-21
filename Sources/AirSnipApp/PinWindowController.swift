@@ -11,11 +11,12 @@ public final class PinManager: ObservableObject {
     private let historyCloseTime: () -> Date
     private let historyRootURL: (AirSnipConfig) -> URL
     private var historyMountObserver: AnyCancellable?
+    private(set) var isQuitting = false
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
     var onWillCloseAll: (() -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
-    public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
+    public var updateConfig: ((@escaping (inout AirSnipConfig) -> Void) -> Void)?
 
     public convenience init(pasteboard: NSPasteboard = .general) {
         let temporaryHistory = TemporaryPinHistoryDirectory()
@@ -26,19 +27,20 @@ public final class PinManager: ObservableObject {
         pasteboard: NSPasteboard,
         historyConfigURL: URL?,
         historyCloseTime: @escaping () -> Date = Date.init,
+        historyLimit: Int = AirSnipConfig.defaultPinHistoryLimit,
         historyRootURL: @escaping (AirSnipConfig) -> URL
     ) {
         self.pasteboard = pasteboard
         self.historyCloseTime = historyCloseTime
         self.historyRootURL = historyRootURL
-        history = ClosedPinHistory(configURL: historyConfigURL)
-        history.onWriteFailure = { [weak self] in
-            self?.showHistoryWarning("部分贴图未存入历史，无法恢复", "Some pins were not saved to history and cannot be restored")
+        history = ClosedPinHistory(configURL: historyConfigURL, limit: historyLimit)
+        history.onFailure = { [weak self] failure in
+            self?.showHistoryFailure(failure)
         }
         historyMountObserver = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak history] _ in
-                history?.cleanUnusedFiles()
+                history?.retryCleanup()
             }
     }
 
@@ -53,7 +55,7 @@ public final class PinManager: ObservableObject {
         config: AirSnipConfig,
         originalText: String? = nil
     ) -> Bool {
-        guard canOpenPin(config: config) else { return false }
+        guard !isQuitting, canOpenPin(config: config) else { return false }
         let pointW = max(32.0, Double(cgImage.width) / max(1.0, backingScale))
         let pointH = max(32.0, Double(cgImage.height) / max(1.0, backingScale))
         let size = NSSize(width: pointW, height: pointH)
@@ -95,42 +97,65 @@ public final class PinManager: ObservableObject {
 
     private func rememberClosedPins(_ pins: [PinWindowController], closedAt: Date) {
         let config = getConfig?() ?? AirSnipConfig()
-        guard config.pinHistoryLimit > 0 else { return }
         history.remember(
-            pins.map { $0.snapshot() }, limit: config.pinHistoryLimit, historyRoot: historyRootURL(config), closedAt: closedAt
+            pins.map { $0.snapshot() }, historyRoot: historyRootURL(config), closedAt: closedAt
         )
     }
 
-    func trimClosedHistory(to limit: Int) -> Bool {
-        guard history.trim(to: limit) else {
-            let language = getConfig?().language
+    func updateHistoryLimit(to limit: Int, savingConfig: @escaping (Int) throws -> Void, completion: @escaping (Int) -> Void) {
+        history.updateLimit(to: limit, savingConfig: savingConfig, completion: completion)
+    }
+
+    func finishHistoryWrites(completion: @escaping () -> Void) {
+        history.finishPendingWrites(completion: completion)
+    }
+
+    public func restoreLastClosedPin(
+        config: AirSnipConfig,
+        unlessHandled: @escaping () -> Bool = { false },
+        completion: @escaping () -> Void = {}
+    ) {
+        var openedPin: PinWindowController?
+        history.restoreLast(if: { [weak self] hasHistory in
+            guard let self, !self.isQuitting, !unlessHandled() else { return false }
+            return !hasHistory || self.canOpenPin(config: self.getConfig?() ?? config)
+        }, present: { [weak self] snapshot in
+            guard let self, !self.isQuitting, self.canOpenPin(config: self.getConfig?() ?? config) else { return false }
+            let pin = PinWindowController(restoring: snapshot, manager: self)
+            openedPin = pin
+            self.windows.append(pin)
+            pin.show()
+            return true
+        }, completion: { [weak self] restored, skippedUnreadable in
+            if let self, !restored, let pin = openedPin {
+                pin.window.orderOut(nil)
+                self.windows.removeAll { $0 === pin }
+            }
+            if skippedUnreadable {
+                self?.showHistoryWarning("部分贴图历史文件无法读取", "Some closed pin files could not be read")
+            }
+            completion()
+        })
+    }
+
+    private func showHistoryFailure(_ failure: ClosedPinHistory.Failure) {
+        let language = getConfig?().language
+        switch failure {
+        case .savePin:
+            showHistoryWarning("部分贴图未存入历史，无法恢复", "Some pins were not saved to history and cannot be restored")
+        case .trim:
             ToastHUD.show(
                 L10n.tr("无法更新可恢复贴图数", "Could not update the recoverable pin limit", in: language),
                 kind: .warning,
                 detail: L10n.tr("请再试一次", "Please try again", in: language)
             )
-            return false
+        case .saveLimit:
+            ToastHUD.show(
+                L10n.tr("无法保存可恢复贴图数", "Could not save the recoverable pin limit", in: language),
+                kind: .warning,
+                detail: L10n.tr("请再试一次", "Please try again", in: language)
+            )
         }
-        return true
-    }
-
-    func finishHistoryWrites() {
-        history.finishPendingWrites()
-    }
-
-    public func restoreLastClosedPin(config: AirSnipConfig) {
-        history.cleanUnusedFiles()
-        let limit = config.pinHistoryLimit
-        guard trimClosedHistory(to: limit), limit > 0, !history.isEmpty,
-              canOpenPin(config: config) else { return }
-        let result = history.restoreLast()
-        if result.skippedUnreadable {
-            showHistoryWarning("部分贴图历史文件无法读取", "Some closed pin files could not be read")
-        }
-        guard let snapshot = result.snapshot else { return }
-        let pin = PinWindowController(restoring: snapshot, manager: self)
-        windows.append(pin)
-        pin.show()
     }
 
     private func showHistoryWarning(_ zh: String, _ en: String) {
@@ -162,12 +187,10 @@ public final class PinManager: ObservableObject {
         rememberClosedPins(pins, closedAt: closedAt)
     }
 
-    func saveOpenPinsOnQuit() {
+    func saveOpenPinsOnQuit(completion: @escaping () -> Void) {
+        isQuitting = true
         closeAll()
-        if let config = getConfig?() {
-            _ = trimClosedHistory(to: config.pinHistoryLimit)
-        }
-        finishHistoryWrites()
+        history.finishPendingWrites(enforcingLimit: true, completion: completion)
     }
 
     public func restoreAllClickThrough() {
@@ -216,6 +239,7 @@ public final class PinWindowController: NSObject {
 
     private weak var manager: PinManager?
     private let contentView: PinCanvasView
+    private var historyID: UUID?
 
     public init(
         cgImage: CGImage,
@@ -266,6 +290,7 @@ public final class PinWindowController: NSObject {
             cgImage: snapshot.image, baseSize: display.baseSize, backingScale: display.backingScale,
             origin: display.frame.origin, showBorder: display.showBorder, manager: manager, originalText: snapshot.originalText
         )
+        historyID = snapshot.historyID
         zoomScale = display.zoomScale
         opacity = display.preferredOpacity
         isClickThrough = display.isClickThrough
@@ -291,7 +316,8 @@ public final class PinWindowController: NSObject {
                 frame: window.frame, baseSize: baseSize, backingScale: backingScale, zoomScale: zoomScale,
                 preferredOpacity: opacity, effectiveWindowOpacity: window.alphaValue,
                 showBorder: showBorder, isClickThrough: isClickThrough
-            )
+            ),
+            historyID: historyID
         )
     }
 
