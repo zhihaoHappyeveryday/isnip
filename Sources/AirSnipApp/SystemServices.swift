@@ -105,6 +105,7 @@ public enum ScreenCaptureService {
 
     public struct GlobalWindowDescriptor: Sendable {
         public let windowID: UInt32
+        public let processID: pid_t
         public let ownerName: String
         public let title: String
         public let globalRectTopDown: ASRect
@@ -142,6 +143,7 @@ public enum ScreenCaptureService {
             let title = (entry[kCGWindowName as String] as? String) ?? ""
             descriptors.append(GlobalWindowDescriptor(
                 windowID: winID,
+                processID: entry[kCGWindowOwnerPID as String] as? pid_t ?? 0,
                 ownerName: ownerName,
                 title: title,
                 globalRectTopDown: ASRect(x: cgRect.origin.x, y: cgRect.origin.y, width: cgRect.width, height: cgRect.height)

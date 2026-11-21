@@ -17,13 +17,6 @@ private final class FullScreenBorderPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
-struct LongshotViewport {
-    let capture: (Set<Int>) async -> PixelBufferRGBA?
-    let scroll: (Int) -> Void
-    let positionCursor: (NSRect?) -> Void
-    let hasAccessibilityPermission: () -> Bool
-}
-
 private extension LongshotStepResult {
     var isStationary: Bool { self == .still || self == .refreshed }
 }
@@ -52,6 +45,8 @@ public final class LongshotSessionController: ObservableObject {
     private let autoStartRequested: Bool
 
     private var canvas: LongshotCanvas
+    private var captureSource: LongshotViewport.Source?
+    private var canUseFrozenReference = true
     private var hasStitchedSegment = false
     private var borderWindow: NSPanel?
     private var previewWindow: NSPanel?
@@ -63,11 +58,17 @@ public final class LongshotSessionController: ObservableObject {
     private var globalScrollMonitor: Any?
     private var pendingOutput: ((CGImage) -> Void)?
 
-    private enum ViewportPosition: Equatable {
+    private struct StartPreview {
+        let frame: LongshotViewport.Frame?
+        let hint: String
+        var recheckAfterScroll = false
+    }
+
+    private enum ViewportPosition {
         case connected
         case settling(LongshotFrameMode)
         case unmatched(LongshotFrameMode)
-        case awaitingStart(PixelBufferRGBA?, hint: String)
+        case awaitingStart(StartPreview)
         case heightLimit
 
         var isSettling: Bool {
@@ -75,13 +76,13 @@ public final class LongshotSessionController: ObservableObject {
             return false
         }
 
-        var isAwaitingStart: Bool {
-            if case .awaitingStart = self { return true }
+        var isConnected: Bool {
+            if case .connected = self { return true }
             return false
         }
 
-        var awaitingStartHint: String? {
-            if case .awaitingStart(_, let hint) = self { return hint }
+        var startPreview: StartPreview? {
+            if case .awaitingStart(let preview) = self { return preview }
             return nil
         }
 
@@ -95,10 +96,14 @@ public final class LongshotSessionController: ObservableObject {
 
     private var viewportPosition: ViewportPosition = .connected
     private var captureRevision = 0
-    private var captureContinuation: AsyncStream<PixelBufferRGBA>.Continuation?
+    private var captureContinuation: AsyncStream<LongshotViewport.Frame>.Continuation?
+    private var restoreTask: Task<Bool, Never>?
     private var autoScrollStartDelay: UInt64?
     private var adaptiveScale = 1.0
     private var rewoundSinceLastSegment = false
+    private var confirmedPosition: LongshotViewport.Position?
+    private var lastScroll: (points: Int, pixels: Int)?
+    private var nextStepLimit: Int?
 
     public var onSpeedChanged: ((LongshotScrollSpeed) -> Void)?
     public var onFinishCopy: ((CGImage, Double) -> Void)?
@@ -112,26 +117,10 @@ public final class LongshotSessionController: ObservableObject {
         viewportTopDown: ASRect,
         initialCrop: PixelBufferRGBA,
         config: AirSnipConfig,
-        autoStartScroll: Bool = false
+        autoStartScroll: Bool = false,
+        snapshot: CapturedScreenSnapshot? = nil
     ) {
-        let scrollAnchor = AccessibilityService.globalCGPoint(
-            on: screen,
-            localTopDownPoint: ASPoint(viewportTopDown.midX, viewportTopDown.minY + viewportTopDown.height * 0.46)
-        )
-        let viewport = LongshotViewport(
-            capture: { windowIDs in
-                await ScreenCaptureService.captureDisplayRegion(
-                    screen: screen, localTopDownRect: viewportTopDown, excludingWindowNumbers: windowIDs
-                )
-            },
-            scroll: { AccessibilityService.postPixelScroll(at: scrollAnchor, downwardPoints: $0) },
-            positionCursor: { avoidRect in
-                AccessibilityService.moveCursorIntoViewportIfNeeded(
-                    screen: screen, viewportTopDown: viewportTopDown, avoidAppKitRect: avoidRect
-                )
-            },
-            hasAccessibilityPermission: AccessibilityService.hasPermission
-        )
+        let viewport = LongshotViewport.desktop(screen: screen, selection: viewportTopDown, snapshot: snapshot)
         self.init(
             screen: screen, viewportTopDown: viewportTopDown, initialCrop: initialCrop,
             config: config, autoStartScroll: autoStartScroll, viewport: viewport
@@ -152,6 +141,7 @@ public final class LongshotSessionController: ObservableObject {
         self.backingScale = Double(screen.backingScaleFactor)
         self.config = config
         self.scrollSpeed = config.longshotScrollSpeed
+        self.captureSource = viewport.initialSource
         self.autoStartRequested = autoStartScroll
         self.pixelWidth = initialCrop.width
         self.pixelHeight = initialCrop.height
@@ -161,14 +151,16 @@ public final class LongshotSessionController: ObservableObject {
         self.thumbnailImage = stitchCanvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
     }
 
-    private static func makeCanvas(startingWith frame: PixelBufferRGBA, maxHeight: Int) -> LongshotCanvas {
+    private static func makeCanvas(
+        startingWith frame: PixelBufferRGBA, maxHeight: Int, reference: LongshotReference? = nil
+    ) -> LongshotCanvas {
         let canvas = LongshotCanvas(
             width: frame.width,
             frameHeight: frame.height,
             params: LongshotParams(minRatio: 0.84, minFixedRows: 8),
             maxHeight: maxHeight
         )
-        canvas.seed(frame)
+        canvas.seed(frame, reference: reference)
         return canvas
     }
 
@@ -189,6 +181,7 @@ public final class LongshotSessionController: ObservableObject {
 
     public func stopAndCleanup() {
         isAutoScrolling = false
+        invalidateCapture()
         captureLoopTask?.cancel()
         captureLoopTask = nil
         pendingOutput = nil
@@ -208,12 +201,19 @@ public final class LongshotSessionController: ObservableObject {
         if isAutoScrolling {
             pauseAutoScrolling()
         } else {
+            if canRestartFromPreview, let event = NSApp.currentEvent,
+               event.type == .leftMouseUp, event.clickCount > 1 { return }
             beginAutoScrolling(initialDelayMs: 90)
         }
     }
 
+    private func toggleAutoScrollFromKeyboard() {
+        guard !canRestartFromPreview else { return }
+        toggleAutoScroll()
+    }
+
     public func beginAutoScrolling(initialDelayMs: UInt64 = 90) {
-        guard pendingOutput == nil, viewportPosition != .heightLimit else { return }
+        guard pendingOutput == nil, !heightLimitReached else { return }
         guard viewport.hasAccessibilityPermission() else {
             needsAccessibilityAuth = true
             isAutoScrolling = false
@@ -224,7 +224,6 @@ public final class LongshotSessionController: ObservableObject {
         needsAccessibilityAuth = false
         invalidateCapture()
         autoScrollStartDelay = initialDelayMs
-        rewoundSinceLastSegment = false
         isAutoScrolling = true
         statusHint = ""
     }
@@ -233,7 +232,7 @@ public final class LongshotSessionController: ObservableObject {
         guard isAutoScrolling else { return }
         invalidateCapture()
         isAutoScrolling = false
-        if let hint = viewportPosition.awaitingStartHint { statusHint = hint }
+        if let preview = viewportPosition.startPreview { statusHint = preview.hint }
     }
 
     public func setScrollSpeed(_ speed: LongshotScrollSpeed) {
@@ -376,7 +375,10 @@ public final class LongshotSessionController: ObservableObject {
     }
 
     var appLanguage: AppLanguage { config.language }
-    var heightLimitReached: Bool { viewportPosition == .heightLimit }
+    var heightLimitReached: Bool {
+        if case .heightLimit = viewportPosition { return true }
+        return false
+    }
 
     private func applyWindowTheme(to win: NSWindow) {
         switch config.theme {
@@ -405,7 +407,7 @@ public final class LongshotSessionController: ObservableObject {
         let registeredIDs = GlobalHotkeyManager.shared?.registerTransientHotKeys(carbonSpecs) { [weak self] id in
             guard let self else { return }
             switch id {
-            case 101: self.toggleAutoScroll()
+            case 101: self.toggleAutoScrollFromKeyboard()
             case 102, 104, 107: self.finishAndSave(forceDialog: false)
             case 103, 105, 108, 109: self.finishAndSave(forceDialog: true)
             case 106: self.cancel()
@@ -423,7 +425,7 @@ public final class LongshotSessionController: ObservableObject {
             switch Int(ev.keyCode) {
             case kVK_Space where !anyMod:
                 if fromGlobalMonitor && registeredIDs.contains(101) { return false }
-                self.toggleAutoScroll()
+                if !ev.isARepeat { self.toggleAutoScrollFromKeyboard() }
                 return true
             case kVK_Return:
                 let opt = flags.contains(.option)
@@ -477,9 +479,16 @@ public final class LongshotSessionController: ObservableObject {
             let userRolledDiscreteWheel = (ev.phase == [] && ev.momentumPhase == [] && abs(ev.scrollingDeltaY) > 0.5)
             guard userTouchedTrackpad || userRolledDiscreteWheel else { return }
             Task { @MainActor [weak self] in
-                guard let self, self.isAutoScrolling else { return }
-                self.pauseAutoScrolling()
+                self?.handleManualScroll()
             }
+        }
+    }
+
+    func handleManualScroll() {
+        pauseAutoScrolling()
+        if var preview = viewportPosition.startPreview {
+            preview.recheckAfterScroll = true
+            viewportPosition = .awaitingStart(preview)
         }
     }
 
@@ -499,10 +508,10 @@ public final class LongshotSessionController: ObservableObject {
 
         if needsAccessibilityAuth && viewport.hasAccessibilityPermission() {
             needsAccessibilityAuth = false
-            if autoStartRequested && !hasStitchedSegment && !viewportPosition.isAwaitingStart && !isAutoScrolling {
+            if autoStartRequested && !hasStitchedSegment && viewportPosition.startPreview == nil && !isAutoScrolling {
                 beginAutoScrolling(initialDelayMs: 120)
             } else if !isAutoScrolling {
-                statusHint = viewportPosition.awaitingStartHint ?? ""
+                statusHint = viewportPosition.startPreview?.hint ?? ""
             }
         }
 
@@ -514,8 +523,19 @@ public final class LongshotSessionController: ObservableObject {
 
         let delay = viewportPosition.isSettling ? max(115, scrollSpeed.settleMilliseconds) : 115
         try? await Task.sleep(for: .milliseconds(delay))
-        guard isCurrent(revision), !viewportPosition.isAwaitingStart,
-              !heightLimitReached || segmentCount == 0 else { return }
+        guard isCurrent(revision), !heightLimitReached || segmentCount == 0 else { return }
+        if var preview = viewportPosition.startPreview {
+            if preview.recheckAfterScroll {
+                preview.recheckAfterScroll = false
+                viewportPosition = .awaitingStart(preview)
+                let capture = await captureAndMatch(revision: revision, mode: .reconnecting)
+                guard isCurrent(revision), let step = capture.result, step != .failed else { return }
+                closeFloatingStartPreview()
+                refreshPreview()
+                applyCaptureResult(step)
+            }
+            return
+        }
         await checkCurrentViewport(revision: revision, retryFailure: false)
     }
 
@@ -532,6 +552,7 @@ public final class LongshotSessionController: ObservableObject {
     private func invalidateCapture() {
         captureRevision += 1
         captureContinuation?.finish()
+        restoreTask?.cancel()
     }
 
     private func isCurrent(_ revision: Int) -> Bool {
@@ -539,12 +560,15 @@ public final class LongshotSessionController: ObservableObject {
     }
 
     private struct ViewportMatch {
-        var frame: PixelBufferRGBA?
+        var frame: LongshotViewport.Frame?
         var result: LongshotStepResult?
+        var retried = false
+        var position: LongshotViewport.Position? { frame?.position }
     }
 
     private func captureAndMatch(
-        revision: Int, mode: LongshotFrameMode, attempts: Int = 3, retryStill: Bool = false
+        revision: Int, mode: LongshotFrameMode, attempts: Int = 3, retryStill: Bool = false,
+        restoring positionToRestore: LongshotViewport.Position? = nil
     ) async -> ViewportMatch {
         let deadline = ContinuousClock.now + .seconds(3)
         var capture = ViewportMatch()
@@ -562,25 +586,32 @@ public final class LongshotSessionController: ObservableObject {
                 if capture.result != .failed { capture.result = nil }
                 continue
             }
-            let step = canvas.push(frame, mode: mode)
+            guard !frame.needsTarget, acceptsSource(frame, expected: captureSource),
+                  positionToRestore == nil || frame.position == positionToRestore else {
+                capture = ViewportMatch(frame: frame, result: .failed, retried: attempt > 0)
+                continue
+            }
+            seedInitialReference(from: frame)
+            let step = canvas.push(
+                frame.image, mode: mode, reference: frame.reference,
+                requireMovement: positionChanged(from: confirmedPosition, to: frame.position)
+            )
             recordStitch(step)
-            capture = ViewportMatch(frame: frame, result: step)
+            if step != .failed && step != .limitReached { confirm(frame) }
+            capture = ViewportMatch(frame: frame, result: step, retried: attempt > 0)
             if step != .failed && (!retryStill || !step.isStationary) { break }
         }
         return capture
     }
 
     private func prepareFirstFrame(revision: Int) async {
-        let preview: PixelBufferRGBA?
-        if case .awaitingStart(let frame, _) = viewportPosition {
-            preview = frame
-        } else {
-            preview = nil
-        }
-        let startCanvas = preview.map { Self.makeCanvas(startingWith: $0, maxHeight: canvas.maxHeight) } ?? canvas
+        let preview = viewportPosition.startPreview?.frame
+        let startCanvas = preview.map {
+            Self.makeCanvas(startingWith: $0.image, maxHeight: canvas.maxHeight, reference: $0.reference)
+        } ?? canvas
         let mode = viewportPosition.frameMode
         let deadline = ContinuousClock.now + .seconds(3)
-        var latestFrame: PixelBufferRGBA?
+        var latestFrame: LongshotViewport.Frame?
         for delay in [0, 300, 500, 700, 900] {
             let retryAt = min(deadline, ContinuousClock.now + .milliseconds(delay))
             try? await Task.sleep(until: retryAt, clock: .continuous)
@@ -589,33 +620,46 @@ public final class LongshotSessionController: ObservableObject {
             let frame = await captureFrame(until: deadline)
             guard isCurrent(revision) else { return }
             guard let frame else { continue }
+            if frame.needsTarget {
+                statusHint = L10n.tr("把鼠标移到要截的正文上", "Move the pointer over the content to capture", in: config.language)
+                autoScrollStartDelay = 150
+                return
+            }
 
             latestFrame = frame
-            let step = preview == nil
-                ? startCanvas.confirmStart(with: frame, mode: mode)
-                : startCanvas.push(frame, mode: mode)
+            let expected = preview?.source ?? captureSource
+            guard acceptsSource(frame, expected: expected) else { continue }
+            if preview == nil { seedInitialReference(from: frame) }
+            let startingPosition = preview == nil ? (confirmedPosition ?? frame.initialPosition) : preview?.position
+            let moved = positionChanged(from: startingPosition, to: frame.position)
+            let samePosition = startingPosition != nil && startingPosition == frame.position
+            let step: LongshotStepResult
+            if preview != nil {
+                guard !moved else { continue }
+                step = startCanvas.confirmPreview(with: frame.image, reference: frame.reference)
+            } else {
+                step = startCanvas.confirmStart(with: frame.image, mode: mode, reference: frame.reference,
+                                                samePosition: samePosition, requireMovement: moved)
+            }
             guard step != .failed else { continue }
             canvas = startCanvas
-            if hasFloatingStartPreview {
-                previewWindow?.orderOut(nil)
-                previewWindow = nil
-                hasFloatingStartPreview = false
+            confirm(frame)
+            closeFloatingStartPreview()
+            if preview != nil {
+                lastScroll = nil
+                nextStepLimit = nil
             }
             recordStitch(step)
             if step == .still || step == .limitReached { refreshPreview() }
             applyCaptureResult(step)
-            if isAutoScrolling, ContinuousClock.now >= deadline {
-                isAutoScrolling = false
-                statusHint = L10n.tr("已接上，点播放按钮继续", "View matched. Press Play to continue.", in: config.language)
-            }
             return
         }
         pauseBeforeFirstSegment(latestFrame: latestFrame, previousPreview: preview)
     }
 
-    private func captureFrame(until deadline: ContinuousClock.Instant) async -> PixelBufferRGBA? {
+    private func captureFrame(until deadline: ContinuousClock.Instant) async -> LongshotViewport.Frame? {
         // A system capture may outlast the deadline even after cancellation.
-        let (frames, continuation) = AsyncStream<PixelBufferRGBA>.makeStream()
+        let (frames, continuation) = AsyncStream<LongshotViewport.Frame>.makeStream()
         captureContinuation = continuation
         let windowIDs = currentOwnWindowIDs()
         let capture = Task { [viewport] in
@@ -635,17 +679,17 @@ public final class LongshotSessionController: ObservableObject {
         }
         var iterator = frames.makeAsyncIterator()
         guard let frame = await iterator.next(), ContinuousClock.now < deadline,
-              frame.width == canvas.width, frame.height == canvas.frameHeight else { return nil }
+              frame.image.width == canvas.width, frame.image.height == canvas.frameHeight else { return nil }
         return frame
     }
 
     private func pauseBeforeFirstSegment(
-        latestFrame: PixelBufferRGBA?, previousPreview: PixelBufferRGBA? = nil, afterScroll: Bool = false
+        latestFrame: LongshotViewport.Frame?, previousPreview: LongshotViewport.Frame? = nil, afterScroll: Bool = false
     ) {
         isAutoScrolling = false
         let preview = latestFrame ?? previousPreview
         if let preview {
-            thumbnailImage = preview.makeCGImage()
+            thumbnailImage = preview.image.makeCGImage()
             if previewWindow == nil {
                 let visible = screen.visibleFrame
                 showPreviewWindow(in: NSRect(
@@ -660,17 +704,50 @@ public final class LongshotSessionController: ObservableObject {
             hint = L10n.tr("未抓到画面，点「自动翻页」重试", "No screen captured. Click Auto-Scroll to retry.", in: config.language)
         } else if afterScroll {
             hint = L10n.tr(
-                "首段未拼上，点「自动翻页」从当前画面重新开始",
-                "No first segment. Click Auto-Scroll to restart here.", in: config.language
+                "首段未拼上，可从预览处开始",
+                "First segment did not match. You can start from the preview.", in: config.language
             )
         } else {
             hint = L10n.tr(
-                "无法确认起点，点「自动翻页」从这里开始",
-                "Cannot confirm the start. Click Auto-Scroll to start here.", in: config.language
+                "无法确认起点，可从预览处开始",
+                "Cannot confirm the start. You can start from the preview.", in: config.language
             )
         }
-        viewportPosition = .awaitingStart(preview, hint: hint)
+        viewportPosition = .awaitingStart(StartPreview(frame: preview, hint: hint))
         statusHint = hint
+    }
+
+    var canRestartFromPreview: Bool { viewportPosition.startPreview?.frame != nil }
+
+    private func closeFloatingStartPreview() {
+        if hasFloatingStartPreview {
+            previewWindow?.orderOut(nil)
+            previewWindow = nil
+            hasFloatingStartPreview = false
+        }
+    }
+
+    private func acceptsSource(_ frame: LongshotViewport.Frame, expected: LongshotViewport.Source?) -> Bool {
+        guard let expected else { return true }
+        return frame.source.map(expected.matches) ?? false
+    }
+
+    private func confirm(_ frame: LongshotViewport.Frame) {
+        canUseFrozenReference = false
+        captureSource = frame.source ?? captureSource
+        confirmedPosition = frame.position
+    }
+
+    private func positionChanged(from previous: LongshotViewport.Position?, to current: LongshotViewport.Position?) -> Bool {
+        guard let previous, let current else { return false }
+        return previous.targetID == current.targetID && previous.fraction != current.fraction
+    }
+
+    private func seedInitialReference(from frame: LongshotViewport.Frame) {
+        guard canUseFrozenReference, let reference = frame.initialReference,
+              let original = canvas.exportBuffer() else { return }
+        canUseFrozenReference = false
+        canvas.seed(original, reference: reference)
     }
 
     private func autoScroll(revision: Int) async {
@@ -678,24 +755,29 @@ public final class LongshotSessionController: ObservableObject {
             autoScrollStartDelay = nil
             try? await Task.sleep(for: .milliseconds(delay))
             guard isCurrent(revision) else { return }
-            viewport.positionCursor(controlWindow?.frame)
-            try? await Task.sleep(for: .milliseconds(55))
-            guard isCurrent(revision) else { return }
             if hasStitchedSegment {
-                let capture = await captureAndMatch(revision: revision, mode: viewportPosition.frameMode)
+                let capture = await captureAndMatch(revision: revision, mode: .reconnecting)
                 guard isCurrent(revision) else { return }
                 applyCaptureResult(capture.result)
                 if capture.result == nil || capture.result == .failed { isAutoScrolling = false }
             } else {
                 await prepareFirstFrame(revision: revision)
             }
+            if isCurrent(revision), isAutoScrolling, autoScrollStartDelay == nil {
+                await viewport.positionCursor(controlWindow?.frame) { self.isCurrent(revision) }
+                try? await Task.sleep(for: .milliseconds(55))
+            }
             return
         }
 
+        if confirmedPosition?.isAtEnd == true {
+            stopAtEnd()
+            return
+        }
         let distance = autoScrollDistance()
         guard distance > 0 else {
             isAutoScrolling = false
-            statusHint = L10n.tr("请放大选区", "Enlarge the selection", in: config.language)
+            statusHint = L10n.tr("重新框选，多框几行正文", "Select a taller area with more scrolling content", in: config.language)
             return
         }
 
@@ -703,9 +785,12 @@ public final class LongshotSessionController: ObservableObject {
         let capture = await captureAndMatch(revision: revision, mode: .automatic, retryStill: true)
         guard isCurrent(revision) else { return }
 
-        if capture.result == .failed, !rewoundSinceLastSegment {
+        if capture.result == .failed, !rewoundSinceLastSegment,
+           let frame = capture.frame, acceptsSource(frame, expected: captureSource),
+           let confirmedPosition, let position = capture.position,
+           position.targetID == confirmedPosition.targetID, position.fraction > confirmedPosition.fraction {
             rewoundSinceLastSegment = true
-            await recoverAfterScroll(distance, startingWith: capture, revision: revision)
+            await recoverAfterScroll(to: confirmedPosition, afterStep: distance, capture: capture, revision: revision)
             return
         }
         guard let result = capture.result, result != .failed else {
@@ -713,33 +798,51 @@ public final class LongshotSessionController: ObservableObject {
             return
         }
         applyCaptureResult(result)
-        if result.isStationary {
+        if case .appended(let offset, _) = result, offset > 0 {
+            lastScroll = (distance, offset)
+            nextStepLimit = capture.retried ? max(1, distance / 2) : nil
+            adaptiveScale = capture.retried ? max(0.30, adaptiveScale * 0.75) : min(1, adaptiveScale * 1.15)
+        }
+        if capture.position?.isAtEnd == true, result != .limitReached {
+            stopAtEnd()
+        } else if result.isStationary {
             isAutoScrolling = false
             statusHint = L10n.tr("未检测到新内容", "No new content", in: config.language)
         }
     }
 
-    private func recoverAfterScroll(_ distance: Int, startingWith capture: ViewportMatch, revision: Int) async {
-        adaptiveScale = max(0.30, adaptiveScale * 0.60)
-        let rewindStep = (distance + 2) / 3
-        var remaining = distance
-        var latest = capture
-        for _ in 0..<3 {
-            guard remaining > 0 else { break }
-            let step = min(remaining, rewindStep)
-            remaining -= step
-            await scrollAndSettle(-step, revision: revision)
-            let capture = await captureAndMatch(revision: revision, mode: .reconnecting, attempts: 2, retryStill: true)
-            guard isCurrent(revision) else { return }
+    private func stopAtEnd() {
+        isAutoScrolling = false
+        statusHint = segmentCount > 0
+            ? L10n.tr("已到末尾，可以复制或保存", "Reached the end. Copy or save the capture.", in: config.language)
+            : L10n.tr("未检测到新内容", "No new content", in: config.language)
+    }
 
-            if let result = capture.result, result != .failed {
-                applyCaptureResult(result)
-                return
-            }
-            latest = ViewportMatch(frame: capture.frame ?? latest.frame, result: capture.result)
-            if capture.result == nil { break }
+    private func recoverAfterScroll(
+        to position: LongshotViewport.Position, afterStep distance: Int, capture: ViewportMatch, revision: Int
+    ) async {
+        let restore = Task { [viewport] in await viewport.restorePosition(position) }
+        restoreTask = restore
+        let restored = await restore.value
+        restoreTask = nil
+        guard isCurrent(revision) else { return }
+        guard restored else {
+            pauseAfterFailedScroll(capture)
+            return
         }
-        pauseAfterFailedScroll(latest)
+        adaptiveScale = max(0.30, adaptiveScale * 0.60)
+        lastScroll = nil
+        nextStepLimit = max(1, distance / 2)
+        viewportPosition = .settling(.reconnecting)
+        try? await Task.sleep(for: .milliseconds(scrollSpeed.settleMilliseconds))
+        guard isCurrent(revision) else { return }
+        let recovered = await captureAndMatch(revision: revision, mode: .reconnecting, restoring: position)
+        guard isCurrent(revision) else { return }
+        if let result = recovered.result, result != .failed {
+            applyCaptureResult(result)
+        } else {
+            pauseAfterFailedScroll(ViewportMatch(frame: recovered.frame ?? capture.frame, result: recovered.result))
+        }
     }
 
     private func pauseAfterFailedScroll(_ capture: ViewportMatch) {
@@ -752,11 +855,15 @@ public final class LongshotSessionController: ObservableObject {
     }
 
     private func autoScrollDistance() -> Int {
-        let fixedHeight = Double(canvas.headerHeight + canvas.footerHeight) / backingScale
-        let bodyHeight = viewportTopDown.height - fixedHeight
-        let fraction = min(segmentCount == 0 ? 0.58 : 0.86, scrollSpeed.viewportStepFraction * adaptiveScale)
-        let overlap = max(8 / backingScale, bodyHeight * 0.14)
-        return Int(max(0, min(bodyHeight * fraction, bodyHeight - overlap)))
+        let bodyHeight = Double(canvas.scrollingBodyHeight) / backingScale
+        let overlap = min(40 / backingScale, max(4 / backingScale, bodyHeight / 3))
+        let maximum = min(bodyHeight * scrollSpeed.viewportStepFraction * adaptiveScale, bodyHeight - overlap)
+        guard maximum >= 1 else { return 0 }
+        let pointLimit = min(nextStepLimit ?? Int(maximum), Int(maximum))
+        guard let lastScroll else { return min(pointLimit, 6, max(1, Int(maximum / 4))) }
+        let pixelsPerPoint = Double(lastScroll.pixels) / Double(lastScroll.points)
+        let desired = min(maximum * backingScale, Double(lastScroll.pixels) * 2)
+        return max(1, min(pointLimit, Int(desired / pixelsPerPoint)))
     }
 
     private func scrollAndSettle(_ distance: Int, revision: Int) async {
@@ -765,14 +872,14 @@ public final class LongshotSessionController: ObservableObject {
         }
         guard isCurrent(revision) else { return }
 
-        viewportPosition = .settling(distance > 0 ? .automatic : .reconnecting)
-        let tickCount = max(3, Int(ceil(Double(abs(distance)) / 220.0)))
-        let pointsPerTick = abs(distance) / tickCount
-        let remainder = abs(distance) % tickCount
+        viewportPosition = .settling(.automatic)
+        let tickCount = max(3, Int(ceil(Double(distance) / 220.0)))
+        let pointsPerTick = distance / tickCount
+        let remainder = distance % tickCount
         for tick in 0..<tickCount {
             guard isCurrent(revision) else { return }
             let points = pointsPerTick + (tick < remainder ? 1 : 0)
-            if points > 0 { viewport.scroll(distance > 0 ? points : -points) }
+            if points > 0 { viewport.scroll(points) }
             if tick + 1 < tickCount { try? await Task.sleep(for: .milliseconds(6)) }
         }
         try? await Task.sleep(for: .milliseconds(scrollSpeed.settleMilliseconds))
@@ -784,7 +891,7 @@ public final class LongshotSessionController: ObservableObject {
             viewportPosition = .connected
             statusHint = ""
         case .still, .refreshed, .overlapping:
-            if viewportPosition != .connected { statusHint = "" }
+            if !viewportPosition.isConnected { statusHint = "" }
             viewportPosition = .connected
         case .limitReached:
             isAutoScrolling = false
@@ -830,7 +937,8 @@ public final class LongshotSessionController: ObservableObject {
         guard pendingOutput == nil, canvas.undoLast() else { return }
         invalidateCapture()
         isAutoScrolling = false
-        if viewportPosition == .heightLimit { viewportPosition = .unmatched(.manual) }
+        confirmedPosition = nil
+        if heightLimitReached { viewportPosition = .unmatched(.manual) }
         refreshPreview()
         statusHint = ""
     }
@@ -847,7 +955,7 @@ public final class LongshotSessionController: ObservableObject {
         guard captureLoopTask != nil, pendingOutput == nil else { return }
         isAutoScrolling = false
         invalidateCapture()
-        if viewportPosition.isAwaitingStart {
+        if viewportPosition.startPreview != nil {
             statusHint = L10n.tr(
                 "尚未拼成长截图，请先点「自动翻页」",
                 "No long screenshot yet. Click Auto-Scroll first.", in: config.language
@@ -873,7 +981,7 @@ public final class LongshotSessionController: ObservableObject {
             }
             return
         }
-        guard viewportPosition == .connected || viewportPosition == .heightLimit else { return }
+        guard viewportPosition.isConnected || heightLimitReached else { return }
         guard let image = canvas.exportBuffer()?.makeCGImage() else {
             statusHint = L10n.tr("无法生成长截图", "Could not create the long screenshot", in: config.language)
             return
@@ -1072,6 +1180,9 @@ struct LongshotControlBarView: View {
         let l = controller.appLanguage
         if controller.isAutoScrolling {
             return L10n.tr("暂停", "Pause", in: l)
+        }
+        if controller.canRestartFromPreview {
+            return L10n.tr("从这里开始", "Start Here", in: l)
         }
         if controller.segmentCount > 0 {
             return L10n.tr("继续", "Resume", in: l)

@@ -159,7 +159,7 @@ public final class CaptureSessionCoordinator {
     var onSaveImage: ((CGImage, Double, Bool, AirSnipConfig) -> Bool)?
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
-    public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, Bool) -> Void)?
+    public var onStartLongshot: ((CapturedScreenSnapshot, ASRect, PixelBufferRGBA, Bool) -> Void)?
     var getShowCompletionToast: (() -> Bool)?
     var onUpdatePreferences: ((@escaping (inout AirSnipConfig) -> Void) -> Void)?
     public var onSessionEnded: (() -> Void)?
@@ -517,13 +517,13 @@ public final class CaptureSessionCoordinator {
     }
 
     func finishIntoLongshot(
-        screen: NSScreen,
+        snapshot: CapturedScreenSnapshot,
         viewportTopDown: ASRect,
         initialCrop: PixelBufferRGBA,
         forceAutoScroll: Bool = false
     ) {
         closeAllWindows()
-        onStartLongshot?(screen, viewportTopDown, initialCrop, forceAutoScroll)
+        onStartLongshot?(snapshot, viewportTopDown, initialCrop, forceAutoScroll)
         onSessionEnded?()
     }
 
@@ -4438,7 +4438,7 @@ final class OverlayCanvasView: NSView {
             width: Double(pxRect.width) / scale, height: Double(pxRect.height) / scale
         )
         coordinator?.finishIntoLongshot(
-            screen: snapshot.screen,
+            snapshot: snapshot,
             viewportTopDown: viewport,
             initialCrop: initialCrop,
             forceAutoScroll: forceAutoScroll

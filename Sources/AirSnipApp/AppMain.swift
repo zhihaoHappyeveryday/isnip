@@ -570,9 +570,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 try? await Task.sleep(nanoseconds: 150_000_000)
             }
             do {
+                var startPosition: LongshotViewport.StartPosition?
+                if case .directLongshotCapture = mode {
+                    startPosition = await LongshotViewport.captureStartPosition()
+                }
                 let snapshots = try await ScreenCaptureService.captureAllDisplays()
                 guard !snapshots.isEmpty else { return }
-                let coordinator = self.makeSessionCoordinator(mode: mode, translateOCR: translateOCR)
+                if let position = startPosition, !(await position.stillAtStart()) { startPosition = nil }
+                let coordinator = self.makeSessionCoordinator(mode: mode, translateOCR: translateOCR, longshotStartPosition: startPosition)
                 self.activeCaptureSession = coordinator
                 coordinator.startWithSnapshots(snapshots)
             } catch {
@@ -675,6 +680,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     func makeSessionCoordinator(
         mode: CaptureSessionCoordinator.SessionMode,
         translateOCR: Bool = false,
+        longshotStartPosition: LongshotViewport.StartPosition? = nil,
         chooseSaveDestination: @escaping OutputService.ChooseSaveDestination = OutputService.chooseSaveDestination
     ) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
@@ -712,13 +718,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 translateOnCompletion: translateOCR
             )
         }
-        coordinator.onStartLongshot = { [weak self] screen, vpRect, initBuf, forceAutoScroll in
+        coordinator.onStartLongshot = { [weak self] snapshot, vpRect, initBuf, forceAutoScroll in
             guard let self else { return }
             self.beginLongshotSession(
-                screen: screen,
+                snapshot: snapshot,
                 viewportTopDown: vpRect,
                 initialCrop: initBuf,
-                forceAutoScroll: forceAutoScroll
+                forceAutoScroll: forceAutoScroll,
+                startPosition: longshotStartPosition
             )
         }
         coordinator.onSessionEnded = { [weak self] in
@@ -758,17 +765,21 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     }
 
     private func beginLongshotSession(
-        screen: NSScreen,
+        snapshot: CapturedScreenSnapshot,
         viewportTopDown: ASRect,
         initialCrop: PixelBufferRGBA,
-        forceAutoScroll: Bool
+        forceAutoScroll: Bool,
+        startPosition: LongshotViewport.StartPosition?
     ) {
+        let viewport = LongshotViewport.desktop(screen: snapshot.screen, selection: viewportTopDown,
+                                               snapshot: snapshot, startPosition: startPosition)
         let ls = LongshotSessionController(
-            screen: screen,
+            screen: snapshot.screen,
             viewportTopDown: viewportTopDown,
             initialCrop: initialCrop,
             config: config,
-            autoStartScroll: forceAutoScroll || config.longshotAutoScroll
+            autoStartScroll: forceAutoScroll || config.longshotAutoScroll,
+            viewport: viewport
         )
         ls.onSpeedChanged = { [weak self] newSpeed in
             self?.updateConfig { $0.longshotScrollSpeed = newSpeed }

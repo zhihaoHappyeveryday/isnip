@@ -22,7 +22,7 @@ final class LongshotRecoveryTests: XCTestCase {
         try await waitUntil { !controller.isAutoScrolling }
         XCTAssertTrue(scrolls.isEmpty)
         XCTAssertEqual(controller.segmentCount, 0)
-        let restartHint = "Cannot confirm the start. Click Auto-Scroll to start here."
+        let restartHint = "Cannot confirm the start. You can start from the preview."
         XCTAssertEqual(controller.statusHint, restartHint)
         guard controller.statusHint == restartHint else { return }
         XCTAssertTrue(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)) == newStart, "Unexpected start preview")
@@ -61,8 +61,48 @@ final class LongshotRecoveryTests: XCTestCase {
 
         XCTAssertTrue(scrolls.isEmpty)
         XCTAssertEqual(controller.segmentCount, 0)
-        XCTAssertEqual(controller.statusHint, "Cannot confirm the start. Click Auto-Scroll to start here.")
+        XCTAssertEqual(controller.statusHint, "Cannot confirm the start. You can start from the preview.")
         XCTAssertTrue(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)) == changedFrame, "Unexpected start preview")
+    }
+
+    @MainActor
+    func testSameVerifiedStartPositionCanRefreshTheFirstScreen() async throws {
+        let page = ScrollingPage()
+        let controller = try makeController(page, autoStart: true, scrollPosition: { page.position }) { page.frame }
+        defer { controller.stopAndCleanup() }
+        page.repaintedRows = 0..<4
+        let repaintedStart = page.frame
+        controller.start()
+        try await waitUntil { controller.segmentCount > 0 }
+
+        var output: PixelBufferRGBA?
+        controller.onFinishCopy = { image, _ in output = PixelBufferRGBA(cgImage: image) }
+        controller.finishAndCopy()
+        try await waitUntil { output != nil }
+        XCTAssertEqual(output?.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: page.frameHeight)), repaintedStart)
+    }
+
+    @MainActor
+    func testReplacingThePageAtTheSameScrollbarPositionRequiresConfirmation() async throws {
+        let page = ScrollingPage()
+        var moves: [Int] = []
+        let controller = try makeController(page, autoStart: true, scroll: { points in
+            moves.append(points)
+            page.scroll(points)
+        }, scrollPosition: { page.position }) { page.frame }
+        defer { controller.stopAndCleanup() }
+        page.repaintedRows = 0..<page.frameHeight
+        controller.start()
+        try await waitUntil { controller.canRestartFromPreview && !controller.isAutoScrolling }
+        XCTAssertTrue(moves.isEmpty)
+
+        page.repaintedRows = 0..<0
+        controller.toggleAutoScroll()
+        try await waitUntil { !controller.isAutoScrolling }
+        XCTAssertTrue(moves.isEmpty)
+        XCTAssertEqual(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)), page.frame)
+        controller.toggleAutoScroll()
+        try await waitUntil { controller.segmentCount > 0 }
     }
 
     @MainActor
@@ -129,7 +169,7 @@ final class LongshotRecoveryTests: XCTestCase {
         try await waitUntil { !controller.isAutoScrolling }
 
         XCTAssertTrue(scrolls.isEmpty)
-        let restartHint = "Cannot confirm the start. Click Auto-Scroll to start here."
+        let restartHint = "Cannot confirm the start. You can start from the preview."
         XCTAssertEqual(controller.statusHint, restartHint)
         guard controller.statusHint == restartHint else { return }
 
@@ -270,30 +310,32 @@ final class LongshotRecoveryTests: XCTestCase {
 
     @MainActor
     func testAutomaticRewindRecoversAJumpWithoutDuplicatingRows() async throws {
-        let page = ScrollingPage()
+        let page = ScrollingPage(frameHeight: 24, height: 110)
         var crossedTheSeam = false
-        var didRewind = false
-        var capturedJump = false
+        var restored: [Int] = []
         let controller = try makeController(page, autoStart: true, scroll: { points in
-            if points < 0 { didRewind = true }
             if points > 0, !crossedTheSeam {
                 crossedTheSeam = true
-                page.top += 90
+                page.top = 30
+            } else {
+                page.scroll(points)
             }
-            page.scroll(points)
-        }) {
-            if crossedTheSeam, !didRewind {
-                if capturedJump { return nil }
-                capturedJump = true
-            }
-            return page.frame
-        }
+        }, scrollPosition: { page.position }, restorePosition: { position in
+            page.top = page.top(at: position)
+            restored.append(page.top)
+            return true
+        }) { page.frame }
         defer { controller.stopAndCleanup() }
         controller.start()
 
         try await waitUntil { !controller.isAutoScrolling }
-        XCTAssertTrue(didRewind)
-        XCTAssertEqual(controller.pixelHeight, 480)
+        XCTAssertEqual(restored, [0])
+        XCTAssertEqual(controller.statusHint, "Reached the end. Copy or save the capture.")
+        var output: PixelBufferRGBA?
+        controller.onFinishCopy = { image, _ in output = PixelBufferRGBA(cgImage: image) }
+        controller.finishAndCopy()
+        try await waitUntil { output != nil }
+        XCTAssertEqual(output, page.fullImage)
     }
 
     @MainActor
@@ -385,18 +427,18 @@ final class LongshotRecoveryTests: XCTestCase {
         controller.start()
 
         try await waitUntil { !controller.isAutoScrolling }
-        XCTAssertTrue(attemptedRecovery)
+        XCTAssertFalse(attemptedRecovery, "A wheel request alone cannot justify rewinding")
         XCTAssertEqual(controller.segmentCount, 1)
         XCTAssertEqual(controller.statusHint, "Stitch interrupted. Scroll manually to reconnect.")
         controller.finishAndCopy()
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertNil(outputHeight)
 
-        page.top = 100
-        try await waitUntil { controller.pixelHeight == 220 }
+        page.top = 70
+        try await waitUntil { controller.pixelHeight == 190 }
         controller.finishAndCopy()
         try await waitUntil { outputHeight != nil }
-        XCTAssertEqual(outputHeight, 220)
+        XCTAssertEqual(outputHeight, 190)
     }
 
     @MainActor
@@ -438,63 +480,52 @@ final class LongshotRecoveryTests: XCTestCase {
     @MainActor
     func testPausingDuringRecoveryStopsFurtherWheelEvents() async throws {
         let page = ScrollingPage()
-        var crossedTheSeam = false
-        var rewindCount = 0
-        let controller = try makeController(page, autoStart: true, scroll: { points in
-            if points < 0 { rewindCount += 1 }
-            if points > 0, !crossedTheSeam {
-                crossedTheSeam = true
-                page.top += 90
-            }
-            page.scroll(points)
-        }) {
-            page.frame
-        }
+        var scrolls = 0
+        var restoring = false
+        let controller = try makeController(page, autoStart: true, scroll: { _ in
+            scrolls += 1
+            page.top = 200
+        }, scrollPosition: { page.position }, restorePosition: { position in
+            page.top = page.top(at: position)
+            restoring = true
+            return true
+        }) { page.frame }
         defer { controller.stopAndCleanup() }
         controller.start()
 
-        try await waitUntil { rewindCount > 0 }
-        controller.toggleAutoScroll()
-        let pausedTop = page.top
+        try await waitUntil { restoring }
+        controller.pauseAutoScrolling()
+        let pausedScrolls = scrolls
         try await Task.sleep(for: .milliseconds(350))
         XCTAssertFalse(controller.isAutoScrolling)
-        XCTAssertEqual(page.top, pausedTop)
+        XCTAssertEqual(scrolls, pausedScrolls)
+        XCTAssertEqual(page.top, 0)
     }
 
     @MainActor
-    func testFirstFailedStepStopsWithinTheRewindBudgetAndCanRestartHere() async throws {
+    func testFirstFailedStepCanRestartFromThePreviewWithoutRewinding() async throws {
         let page = ScrollingPage()
-        var forwardPoints = 0
-        var reversePoints = 0
-        var rewindsChecked: Set<Int> = []
         var canScrollNormally = false
+        var moves: [Int] = []
         let controller = try makeController(page, autoStart: true, scroll: { points in
+            moves.append(points)
             if canScrollNormally {
                 page.scroll(points)
-            } else if points > 0 {
-                forwardPoints += points
-                page.top = 200
             } else {
-                reversePoints -= points
+                page.top = 200
             }
-        }) {
-            if reversePoints > 0, !canScrollNormally { rewindsChecked.insert(reversePoints) }
-            return page.frame
-        }
+        }) { page.frame }
         defer { controller.stopAndCleanup() }
         controller.start()
         try await waitUntil { !controller.isAutoScrolling }
 
-        XCTAssertGreaterThan(forwardPoints, 0)
-        XCTAssertLessThanOrEqual(reversePoints, forwardPoints)
-        XCTAssertEqual(rewindsChecked.count, 3)
+        XCTAssertFalse(moves.isEmpty)
+        XCTAssertTrue(moves.allSatisfy { $0 > 0 })
         XCTAssertEqual(controller.segmentCount, 0)
-        let restartHint = "No first segment. Click Auto-Scroll to restart here."
-        XCTAssertEqual(controller.statusHint, restartHint)
-        guard controller.statusHint == restartHint else { return }
-
+        XCTAssertTrue(controller.canRestartFromPreview)
+        XCTAssertEqual(controller.statusHint, "First segment did not match. You can start from the preview.")
         let newStart = page.frame
-        XCTAssertTrue(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)) == newStart, "Unexpected start preview")
+        XCTAssertEqual(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)), newStart)
         canScrollNormally = true
         controller.toggleAutoScroll()
         try await waitUntil { controller.segmentCount > 0 }
@@ -502,66 +533,127 @@ final class LongshotRecoveryTests: XCTestCase {
     }
 
     @MainActor
-    func testMissingRewindCaptureKeepsTheLastAvailableStartPreview() async throws {
+    func testManualScrollCanRecoverTheOriginalStartBeforeTheFirstSegment() async throws {
+        let page = ScrollingPage()
+        var shouldJump = true
+        let controller = try makeController(page, autoStart: true, scroll: { points in
+            if shouldJump { page.top = 200 } else { page.scroll(points) }
+        }) { page.frame }
+        defer { controller.stopAndCleanup() }
+        let original = page.frame
+        controller.start()
+        try await waitUntil { controller.canRestartFromPreview }
+
+        page.top = 0
+        controller.handleManualScroll()
+        try await waitUntil { !controller.canRestartFromPreview }
+        XCTAssertFalse(controller.isAutoScrolling)
+        XCTAssertEqual(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)), original)
+
+        shouldJump = false
+        controller.toggleAutoScroll()
+        try await waitUntil { controller.segmentCount > 0 }
+        var output: PixelBufferRGBA?
+        controller.onFinishCopy = { image, _ in output = PixelBufferRGBA(cgImage: image) }
+        controller.finishAndCopy()
+        try await waitUntil { output != nil }
+        XCTAssertEqual(output?.cropped(to: PixelRect(x: 0, y: 0, width: original.width, height: original.height)), original)
+    }
+
+    @MainActor
+    func testMissingCaptureAfterRestoreKeepsTheLastAvailableStartPreview() async throws {
         let page = ScrollingPage()
         var hasRewound = false
-        let controller = try makeController(page, autoStart: true, scroll: { points in
-            if points < 0 {
-                hasRewound = true
-            } else {
-                page.top = 200
-            }
+        var lastFrame = page.frame
+        let controller = try makeController(page, autoStart: true, scroll: { _ in
+            page.top = 200
+        }, scrollPosition: { page.position }, restorePosition: { position in
+            page.top = page.top(at: position)
+            hasRewound = true
+            return true
         }) {
-            hasRewound ? nil : page.frame
+            guard !hasRewound else { return nil }
+            lastFrame = page.frame
+            return lastFrame
         }
         defer { controller.stopAndCleanup() }
         controller.start()
         try await waitUntil { !controller.isAutoScrolling }
 
         XCTAssertTrue(hasRewound)
-        XCTAssertEqual(controller.statusHint, "No first segment. Click Auto-Scroll to restart here.")
-        XCTAssertTrue(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)) == page.frame, "Unexpected start preview")
+        XCTAssertTrue(controller.canRestartFromPreview)
+        XCTAssertEqual(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)), lastFrame)
     }
 
     @MainActor
-    func testRewindPreviewUsesTheLastValidFrameEvenWhenTheNextCaptureMisses() async throws {
+    func testRestoreMustLandAtTheVerifiedPosition() async throws {
         let page = ScrollingPage()
-        let originalStart = page.frame
-        var rewindFrames = 0
-        var hasRewound = false
+        var restored: [Int] = []
+        let controller = try makeController(page, autoStart: true, scroll: { _ in
+            page.top = 200
+        }, scrollPosition: { page.position }, restorePosition: { position in
+            restored.append(page.top(at: position))
+            page.top = 20
+            return true
+        }) { page.frame }
+        defer { controller.stopAndCleanup() }
+        controller.start()
+        try await waitUntil { !controller.isAutoScrolling }
+
+        XCTAssertEqual(restored, [0])
+        XCTAssertEqual(controller.segmentCount, 0)
+        XCTAssertTrue(controller.canRestartFromPreview)
+        XCTAssertEqual(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)), page.frame)
+    }
+
+    @MainActor
+    func testRepeatedJumpsAndResumeKeepTheLastStitchedSegment() async throws {
+        let page = ScrollingPage()
+        var shouldJump = false
+        var moves: [Int] = []
+        var restored: [Int] = []
         let controller = try makeController(page, autoStart: true, scroll: { points in
-            hasRewound = points < 0
-            page.top = hasRewound ? 0 : 200
-        }) {
-            if hasRewound {
-                rewindFrames += 1
-                if rewindFrames > 1 { return nil }
+            moves.append(points)
+            if shouldJump {
+                page.top = 240
+            } else {
+                page.scroll(points)
             }
+        }, scrollPosition: { page.position }, restorePosition: { position in
+            page.top = page.top(at: position)
+            restored.append(page.top)
+            return true
+        }) {
+            if page.top > 0 { shouldJump = true }
             return page.frame
         }
         defer { controller.stopAndCleanup() }
         controller.start()
         try await waitUntil { !controller.isAutoScrolling }
 
-        XCTAssertGreaterThanOrEqual(rewindFrames, 2)
-        XCTAssertEqual(controller.statusHint, "No first segment. Click Auto-Scroll to restart here.")
-        XCTAssertTrue(controller.thumbnailImage.flatMap(PixelBufferRGBA.init(cgImage:)) == originalStart, "Expected the screen reached during rewind")
+        XCTAssertEqual(controller.segmentCount, 1)
+        XCTAssertEqual(restored, [controller.pixelHeight - page.frameHeight])
+        XCTAssertFalse(controller.canRestartFromPreview)
+        let scrollsBeforeResuming = moves
+        let heightBeforeResuming = controller.pixelHeight
+        for _ in 0..<2 {
+            controller.toggleAutoScroll()
+            try await waitUntil { !controller.isAutoScrolling }
+        }
+        XCTAssertEqual(moves, scrollsBeforeResuming)
+        XCTAssertEqual(controller.pixelHeight, heightBeforeResuming)
     }
 
     @MainActor
-    func testRepeatedPageJumpsStopWhenRewindCannotMakeProgress() async throws {
+    func testStationaryScreenDoesNotClaimThePageEnded() async throws {
         let page = ScrollingPage()
-        let controller = try makeController(page, autoStart: true, scroll: { points in
-            page.top = points > 0 ? 200 : 0
-        }) {
-            page.frame
-        }
+        let controller = try makeController(page, autoStart: true, scroll: { _ in }) { page.frame }
         defer { controller.stopAndCleanup() }
         controller.start()
-
         try await waitUntil { !controller.isAutoScrolling }
+
+        XCTAssertEqual(controller.statusHint, "No new content")
         XCTAssertEqual(controller.segmentCount, 0)
-        XCTAssertEqual(controller.statusHint, "No first segment. Click Auto-Scroll to restart here.")
     }
 
     @MainActor
@@ -588,7 +680,9 @@ final class LongshotRecoveryTests: XCTestCase {
     @MainActor
     func testFirstSegmentOverTheLimitCanBeReplacedByAShorterScroll() async throws {
         let page = ScrollingPage()
-        let controller = try makeController(page, autoStart: true, maxHeight: 150) { page.frame }
+        let controller = try makeController(page, autoStart: true, scroll: { _ in
+            page.top = 42
+        }, maxHeight: 150) { page.frame }
         defer { controller.stopAndCleanup() }
         var outputHeight: Int?
         controller.onFinishCopy = { image, _ in outputHeight = image.height }
@@ -625,6 +719,8 @@ final class LongshotRecoveryTests: XCTestCase {
         autoStart: Bool = false,
         scroll: ((Int) -> Void)? = nil,
         maxHeight: Int = 30_000,
+        scrollPosition: @escaping () -> LongshotViewport.Position? = { nil },
+        restorePosition: @escaping (LongshotViewport.Position) async -> Bool = { _ in false },
         capture: @escaping () async -> PixelBufferRGBA?
     ) throws -> LongshotSessionController {
         _ = NSApplication.shared
@@ -637,6 +733,7 @@ final class LongshotRecoveryTests: XCTestCase {
         var config = AirSnipConfig()
         config.language = .en
         config.longshotMaxHeight = maxHeight
+        let initialPosition = scrollPosition()
         return LongshotSessionController(
             screen: screen,
             viewportTopDown: ASRect(x: 50, y: y, width: Double(page.width) / scale, height: height),
@@ -644,10 +741,19 @@ final class LongshotRecoveryTests: XCTestCase {
             config: config,
             autoStartScroll: autoStart,
             viewport: LongshotViewport(
-                capture: { _ in await capture() },
+                initialSource: nil,
+                capture: { _ in
+                    let before = scrollPosition()
+                    guard let image = await capture() else { return nil }
+                    let after = scrollPosition()
+                    return LongshotViewport.Frame(
+                        image: image, initialPosition: initialPosition, position: before == after ? after : nil
+                    )
+                },
                 scroll: scroll ?? page.scroll,
-                positionCursor: { _ in },
-                hasAccessibilityPermission: { true }
+                positionCursor: { _, _ in },
+                hasAccessibilityPermission: { true },
+                restorePosition: restorePosition
             )
         )
     }
@@ -664,13 +770,15 @@ final class LongshotRecoveryTests: XCTestCase {
     private final class ScrollingPage {
         let width = 64
         let frameHeight: Int
-        private let height = 480
-        private let pixels: PixelBufferRGBA
+        private let height: Int
+        let fullImage: PixelBufferRGBA
         var scale = 1
         var top = 0
+        var repaintedRows = 0..<0
 
-        init(frameHeight: Int = 120, repeatRows: Int? = nil) {
+        init(frameHeight: Int = 120, height: Int = 480, repeatRows: Int? = nil) {
             self.frameHeight = frameHeight
+            self.height = height
             var bytes = [UInt8](repeating: 255, count: width * height * 4)
             var random: UInt32 = 1
             for index in stride(from: 0, to: bytes.count, by: 4) {
@@ -683,11 +791,26 @@ final class LongshotRecoveryTests: XCTestCase {
                 let strip = Array(bytes.prefix(width * repeatRows * 4))
                 bytes = bytes.indices.map { strip[$0 % strip.count] }
             }
-            pixels = PixelBufferRGBA(width: width, height: height, rgba: bytes)
+            fullImage = PixelBufferRGBA(width: width, height: height, rgba: bytes)
         }
 
         var frame: PixelBufferRGBA {
-            pixels.cropped(to: PixelRect(x: 0, y: top, width: width, height: frameHeight))!
+            let crop = fullImage.cropped(to: PixelRect(x: 0, y: top, width: width, height: frameHeight))!
+            let rows = repaintedRows.clamped(to: top..<(top + frameHeight))
+            guard !rows.isEmpty else { return crop }
+            var pixels = crop.rgba
+            for index in stride(from: (rows.lowerBound - top) * width * 4, to: (rows.upperBound - top) * width * 4, by: 4) {
+                pixels[index] &+= 80
+            }
+            return PixelBufferRGBA(width: width, height: frameHeight, rgba: pixels)
+        }
+
+        var position: LongshotViewport.Position {
+            LongshotViewport.Position(targetID: 1, fraction: Double(top) / Double(height - frameHeight))
+        }
+
+        func top(at position: LongshotViewport.Position) -> Int {
+            Int((position.fraction * Double(height - frameHeight)).rounded())
         }
 
         func scroll(_ points: Int) {
