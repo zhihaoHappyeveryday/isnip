@@ -53,6 +53,7 @@ final class ClosedPinHistory: @unchecked Sendable {
     private struct PinFiles: Codable, Hashable {
         let dayDirectory: URL
         let id: UUID
+        let baseName: String?
         let hasOriginalText: Bool
         let rootIdentity: HistoryRootIdentity?
 
@@ -64,7 +65,8 @@ final class ClosedPinHistory: @unchecked Sendable {
         }
 
         private var baseURL: URL {
-            dayDirectory.appendingPathComponent("pin-\(id.uuidString)")
+            // Older manifests derived the filename from the record ID.
+            dayDirectory.appending(component: baseName ?? "pin-\(id.uuidString)")
         }
 
         var imageURL: URL { baseURL.appendingPathExtension("png") }
@@ -171,10 +173,27 @@ final class ClosedPinHistory: @unchecked Sendable {
             return
         }
         legacySessions?.cleanUp(in: historyRoot)
+
+        let timestampName = NameStyle.datetime.formatBaseName(date: closedAt)
+        let trackedFiles = entries.map(\.record.files) + Array(cleanupCandidates)
+        let reservedNames = Set(trackedFiles.lazy.filter { $0.rootIdentity == rootIdentity }.compactMap(\.baseName))
+        let fileManager = FileManager.default
+        var suffix = 1
         let batch = CloseBatch()
         let closed = closedSnapshots.map { snapshot in
+            var name: String
+            var baseURL: URL
+            repeat {
+                name = suffix == 1 ? timestampName : "\(timestampName)-\(suffix)"
+                baseURL = dayDirectory.appending(component: name)
+                suffix += 1
+            } while reservedNames.contains(name)
+                || fileManager.fileExists(atPath: baseURL.appendingPathExtension("png").path)
+                || fileManager.fileExists(atPath: baseURL.appendingPathExtension("txt").path)
+
             let files = PinFiles(
-                dayDirectory: dayDirectory, id: UUID(), hasOriginalText: snapshot.originalText != nil, rootIdentity: rootIdentity
+                dayDirectory: dayDirectory, id: UUID(), baseName: name,
+                hasOriginalText: snapshot.originalText != nil, rootIdentity: rootIdentity
             )
             return Entry(
                 record: Record(files: files, displayState: snapshot.displayState),
