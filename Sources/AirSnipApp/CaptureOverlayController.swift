@@ -4425,16 +4425,21 @@ final class OverlayCanvasView: NSView {
             )
             return
         }
+        let scale = snapshot.backingScale
         let pxRect = PixelRect(
-            x: Int((sel.minX * snapshot.backingScale).rounded()),
-            y: Int((sel.minY * snapshot.backingScale).rounded()),
-            width: max(1, Int((sel.width * snapshot.backingScale).rounded())),
-            height: max(1, Int((sel.height * snapshot.backingScale).rounded()))
-        )
+            x: Int((sel.minX * scale).rounded()),
+            y: Int((sel.minY * scale).rounded()),
+            width: max(1, Int((sel.width * scale).rounded())),
+            height: max(1, Int((sel.height * scale).rounded()))
+        ).clamped(toWidth: snapshot.rawBuffer.width, height: snapshot.rawBuffer.height)
         guard let initialCrop = snapshot.rawBuffer.cropped(to: pxRect) else { return }
+        let viewport = ASRect(
+            x: Double(pxRect.x) / scale, y: Double(pxRect.y) / scale,
+            width: Double(pxRect.width) / scale, height: Double(pxRect.height) / scale
+        )
         coordinator?.finishIntoLongshot(
             screen: snapshot.screen,
-            viewportTopDown: sel,
+            viewportTopDown: viewport,
             initialCrop: initialCrop,
             forceAutoScroll: forceAutoScroll
         )

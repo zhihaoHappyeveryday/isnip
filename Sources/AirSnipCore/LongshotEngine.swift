@@ -1191,6 +1191,17 @@ public final class LongshotCanvas {
 
     /// Match the viewport against the last confirmed frame and add only rows outside the captured range.
     public func push(_ frame: PixelBufferRGBA, mode: LongshotFrameMode = .manual) -> LongshotStepResult {
+        push(frame, mode: mode, verifyStationary: mode != .manual)
+    }
+
+    /// Match the first live capture without assuming identical pixels imply the original scroll position.
+    public func confirmStart(with frame: PixelBufferRGBA, mode: LongshotFrameMode) -> LongshotStepResult {
+        push(frame, mode: mode, verifyStationary: true)
+    }
+
+    private func push(
+        _ frame: PixelBufferRGBA, mode: LongshotFrameMode, verifyStationary: Bool
+    ) -> LongshotStepResult {
         guard frame.width == width, frame.height == frameHeight,
               let previousSignatures else { return .failed }
         let rgba = frame.rgba
@@ -1207,7 +1218,7 @@ public final class LongshotCanvas {
                 fixedBottom: 0,
                 activeBins: allBins,
                 params: params,
-                verifyStationary: mode != .manual
+                verifyStationary: verifyStationary
             )
             if initCheck.isAmbiguous { return .failed }
             if initCheck.match.confident && initCheck.match.offset == 0 {
@@ -1320,7 +1331,7 @@ public final class LongshotCanvas {
             fixedBottom: footerHeight,
             activeBins: activeBins,
             params: params,
-            verifyStationary: mode != .manual
+            verifyStationary: verifyStationary
         ).match
 
         guard match.confident, mode != .automatic || match.offset >= 0 else { return .failed }
