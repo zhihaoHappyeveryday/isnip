@@ -564,7 +564,7 @@ private struct GeneralSettingsPane: View {
                             ScreenCaptureService.openScreenCaptureSystemSettings()
                         }
                         MagpieTextAction(L10n.tr("重置权限", "Reset", in: lang)) {
-                            ScreenCaptureService.resetScreenCapturePermissionAndRelaunch()
+                            PermissionReset.screenRecordingAndAccessibility.resetAndRelaunch()
                         }
                     }
                 }
@@ -605,6 +605,9 @@ private struct GeneralSettingsPane: View {
                         }
                         MagpieTextAction(L10n.tr("打开设置", "Open Settings", in: lang)) {
                             AccessibilityService.openSystemSettings()
+                        }
+                        MagpieTextAction(L10n.tr("重置权限", "Reset", in: lang)) {
+                            PermissionReset.accessibility.resetAndRelaunch()
                         }
                     }
                 }

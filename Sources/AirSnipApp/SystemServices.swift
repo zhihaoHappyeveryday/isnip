@@ -65,17 +65,6 @@ public enum ScreenCaptureService {
         }
     }
 
-    public static func resetScreenCapturePermissionAndRelaunch() {
-        if let bundleID = Bundle.main.bundleIdentifier {
-            let reset = Process()
-            reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            reset.arguments = ["reset", "ScreenCapture", bundleID]
-            try? reset.run()
-            reset.waitUntilExit()
-        }
-        relaunchApplication(extraArguments: ["--request-screen-capture"])
-    }
-
     public static func showPermissionGuidanceAlert(error: Error? = nil) {
         let _ = error
         NSApp.activate(ignoringOtherApps: true)
@@ -109,7 +98,7 @@ public enum ScreenCaptureService {
         case .alertFirstButtonReturn:
             relaunchApplication()
         case .alertSecondButtonReturn:
-            resetScreenCapturePermissionAndRelaunch()
+            PermissionReset.screenRecordingAndAccessibility.resetAndRelaunch()
         case .alertThirdButtonReturn:
             openScreenCaptureSystemSettings()
         default:
@@ -302,6 +291,50 @@ public enum ScreenCaptureService {
         } catch {
             return nil
         }
+    }
+}
+
+@MainActor
+enum PermissionReset {
+    case screenRecordingAndAccessibility
+    case accessibility
+
+    static let requestScreenCaptureArgument = "--request-screen-capture"
+    static let requestAccessibilityArgument = "--request-accessibility"
+
+    func resetAndRelaunch(
+        reset: @MainActor (String) -> Bool = PermissionReset.resetPermission,
+        relaunch: @MainActor ([String]) -> Void = ScreenCaptureService.relaunchApplication
+    ) {
+        let screenRecordingReset = self == .screenRecordingAndAccessibility && reset("ScreenCapture")
+        let accessibilityReset = reset("Accessibility")
+        if screenRecordingReset {
+            relaunch([Self.requestScreenCaptureArgument])
+        } else if accessibilityReset {
+            relaunch([Self.requestAccessibilityArgument])
+        }
+    }
+
+    private static func resetPermission(_ permission: String) -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            NSLog("Could not reset iSnip %@ permission: missing bundle identifier", permission)
+            return false
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        process.arguments = ["reset", permission, bundleID]
+        do {
+            try process.run()
+        } catch {
+            NSLog("Could not reset iSnip %@ permission: %@", permission, error.localizedDescription)
+            return false
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            NSLog("Could not reset iSnip %@ permission (tccutil status %d)", permission, process.terminationStatus)
+            return false
+        }
+        return true
     }
 }
 

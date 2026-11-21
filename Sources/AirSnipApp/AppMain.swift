@@ -801,8 +801,10 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--open-settings") {
             ctrl.openSettings()
         }
-        if CommandLine.arguments.contains("--request-screen-capture") {
+        if CommandLine.arguments.contains(PermissionReset.requestScreenCaptureArgument) {
             _ = ScreenCaptureService.requestScreenCapturePermissionIfNeeded()
+        } else if CommandLine.arguments.contains(PermissionReset.requestAccessibilityArgument) {
+            _ = AccessibilityService.requestPermissionPrompt()
         }
     }
 
