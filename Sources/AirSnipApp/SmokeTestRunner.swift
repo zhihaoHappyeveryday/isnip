@@ -464,6 +464,128 @@ public enum SmokeTestRunner {
     }
 
     @MainActor
+    private static func runPinZoomChecks(image: CGImage) -> Bool {
+        guard let sample = image.cropping(to: CGRect(x: 0, y: 0, width: 201, height: 151)) else { return false }
+        var config = AirSnipConfig()
+        config.pinHistoryLimit = 0
+        let pins = PinManager()
+        pins.getConfig = { config }
+        defer { pins.closeAll() }
+
+        for backingScale: Double in [1, 2] {
+            guard pins.createPin(cgImage: sample, backingScale: backingScale, preferredScreenOriginAppKit: nil, config: config),
+                  let pin = pins.windows.last else { return false }
+            let initialSize = pin.window.frame.size
+            let originalCanvasSize = NSSize(
+                width: Double(sample.width) / backingScale, height: Double(sample.height) / backingScale
+            )
+            guard pin.window.contentView?.frame.size == originalCanvasSize else {
+                fputs("FAIL: Pin canvas should open at the original size \(originalCanvasSize)\n", stderr)
+                return false
+            }
+            for direction in [CGFloat(1), -1, 1, -1] {
+                for _ in 0..<10 { pin.adjustZoom(delta: direction, anchorInWindow: .zero) }
+                for _ in 0..<10 { pin.adjustZoom(delta: -direction, anchorInWindow: .zero) }
+                guard pin.zoomScale == 1, pin.window.frame.size == initialSize,
+                      pin.window.contentView?.frame.size == originalCanvasSize else {
+                    fputs("FAIL: Pin zoom round trip at \(backingScale)× returned \(pin.zoomScale), \(pin.window.frame.size) instead of 100%, \(initialSize)\n", stderr)
+                    return false
+                }
+            }
+            let limits: [(direction: CGFloat, scale: CGFloat, reversedScale: CGFloat)] = [
+                (1, 4, 3.7037037037037),
+                (-1, 0.2, 0.216),
+            ]
+            for limit in limits {
+                for _ in 0..<30 { pin.adjustZoom(delta: limit.direction, anchorInWindow: .zero) }
+                guard pin.zoomScale == limit.scale else {
+                    fputs("FAIL: Pin zoom should stop at \(limit.scale)\n", stderr)
+                    return false
+                }
+                pin.adjustZoom(delta: -limit.direction, anchorInWindow: .zero)
+                guard abs(pin.zoomScale - limit.reversedScale) < 0.000001 else {
+                    fputs("FAIL: Pin zoom should reverse from the clamped scale\n", stderr)
+                    return false
+                }
+                pin.resetTransform()
+            }
+            pin.closeSelf()
+        }
+        print("[pins] PASS: 1× 与 2× 贴图在等量滚动后回到原大小，且遵守缩放上下限")
+        return true
+    }
+
+    @MainActor
+    private static func runRestoredPinZoomChecks(image: CGImage, configURL: URL) -> Bool {
+        let examples: [(storedScale: CGFloat, direction: CGFloat, nextPercent: Int)] = [
+            (1.06, -1, 93),
+            (0.98, 1, 108),
+            (1.08216, -1, 93), // The next step rounds from 100.2% to 100%.
+            (0.924, 1, 108), // The next step rounds from 99.792% to 100%.
+            (0.9995, 1, 108),
+        ]
+        let baseSize = NSSize(width: image.width, height: image.height)
+        let origin = NSPoint(x: 60, y: 100)
+        let snapshots = examples.map { example in
+            let frame = NSRect(origin: origin, size: NSSize(
+                width: round(baseSize.width * example.storedScale), height: round(baseSize.height * example.storedScale)
+            ))
+            let display = PinDisplayState(
+                frame: frame, baseSize: baseSize, backingScale: 1, zoomScale: example.storedScale,
+                preferredOpacity: 1, effectiveWindowOpacity: 1, showBorder: true, isClickThrough: false
+            )
+            return PinSnapshot(image: image, originalText: nil, displayState: display)
+        }
+        let historyRoot = configURL.deletingLastPathComponent().appendingPathComponent(
+            AirSnipConfig.defaultPinHistoryDirectoryName, isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(at: historyRoot, withIntermediateDirectories: true)
+        } catch {
+            fputs("FAIL: Could not prepare the pin zoom history fixture: \(error)\n", stderr)
+            return false
+        }
+        let history = ClosedPinHistory(configURL: configURL)
+        history.remember(Array(snapshots.reversed()), limit: snapshots.count, historyRoot: historyRoot)
+        history.finishPendingWrites()
+
+        return withPinRestoreFixture(image: image, configURL: configURL) { _, app, _ in
+            let pins = app.pinManager
+            for (example, snapshot) in zip(examples, snapshots) {
+                pins.restoreLastClosedPin(config: app.config)
+                guard let pin = pins.windows.last, pin.zoomScale == example.storedScale,
+                      pin.window.frame.size == snapshot.displayState.frame.size else {
+                    let restored = pins.windows.last
+                    let actualScale = String(describing: restored?.zoomScale)
+                    let actualSize = String(describing: restored?.window.frame.size)
+                    fputs("FAIL: Expected restored pin at \(example.storedScale), \(snapshot.displayState.frame.size), got \(actualScale), \(actualSize)\n", stderr)
+                    return false
+                }
+                let previousFrame = pin.window.frame
+                let anchor = NSPoint(x: previousFrame.width / 2, y: previousFrame.height / 2)
+                pin.adjustZoom(delta: example.direction, anchorInWindow: anchor)
+                guard pin.zoomScale == 1, pin.window.frame.size == baseSize,
+                      pin.window.contentView?.frame.size == baseSize else {
+                    fputs("FAIL: Restored pin at \(example.storedScale) should stop at the original size, got \(pin.zoomScale)\n", stderr)
+                    return false
+                }
+                guard abs(pin.window.frame.midX - previousFrame.midX) <= 1,
+                      abs(pin.window.frame.midY - previousFrame.midY) <= 1 else {
+                    fputs("FAIL: Zooming to 100% should keep the pin centered on the zoom anchor\n", stderr)
+                    return false
+                }
+                pin.adjustZoom(delta: example.direction, anchorInWindow: .zero)
+                guard Int((pin.zoomScale * 100).rounded()) == example.nextPercent else {
+                    fputs("FAIL: Pin should keep zooming on the step after reaching 100%\n", stderr)
+                    return false
+                }
+            }
+            print("[pins] PASS: 历史贴图按原比例打开，双向停在真实 100%，下一格继续缩放")
+            return true
+        }
+    }
+
+    @MainActor
     private static func withPinRestoreFixture(
         image: CGImage,
         configURL: URL,
@@ -2855,6 +2977,10 @@ public enum SmokeTestRunner {
             let pinRestoreOK = try MainActor.assumeIsolated {
                 guard let screen = NSScreen.main ?? NSScreen.screens.first else { return false }
                 return try runCroppedPinStorageCheck(on: screen)
+                    && runPinZoomChecks(image: baseCG)
+                    && runRestoredPinZoomChecks(
+                        image: baseCG, configURL: tempDir.appendingPathComponent("pin-zoom-history/config.json")
+                    )
                     && withPinRestoreFixture(
                         image: baseCG,
                         configURL: tempDir.appendingPathComponent("clipboard-copy-before-close/config.json"),

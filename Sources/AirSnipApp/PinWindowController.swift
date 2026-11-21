@@ -241,6 +241,8 @@ public final class PinWindowController: NSObject {
 
         contentView.owner = self
         panel.contentView = contentView
+        // NSPanel rounds the initial content rect outward. Reapply the size at its current origin.
+        setPinFrame(NSRect(origin: panel.frame.origin, size: baseSize), display: false)
         contentView.needsDisplay = true
     }
 
@@ -255,8 +257,12 @@ public final class PinWindowController: NSObject {
         isClickThrough = display.isClickThrough
         window.ignoresMouseEvents = display.isClickThrough
         window.alphaValue = display.effectiveWindowOpacity
-        window.setFrame(display.frame, display: false)
-        contentView.frame = NSRect(origin: .zero, size: display.frame.size)
+        setPinFrame(display.frame, display: false)
+    }
+
+    private func setPinFrame(_ frame: NSRect, display: Bool) {
+        window.setFrame(frame, display: display)
+        contentView.frame = NSRect(origin: .zero, size: frame.size)
     }
 
     public func show() {
@@ -303,8 +309,7 @@ public final class PinWindowController: NSObject {
         let center = NSPoint(x: frame.midX, y: frame.midY)
         frame.size = baseSize
         frame.origin = NSPoint(x: center.x - baseSize.width * 0.5, y: center.y - baseSize.height * 0.5)
-        window.setFrame(frame, display: true)
-        contentView.frame = NSRect(origin: .zero, size: baseSize)
+        setPinFrame(frame, display: true)
     }
 
     public func setShowBorder(_ on: Bool) {
@@ -322,24 +327,30 @@ public final class PinWindowController: NSObject {
     }
 
     public func adjustZoom(delta: CGFloat, anchorInWindow: NSPoint) {
-        let factor: CGFloat = delta > 0 ? 1.08 : 0.925
-        let newScale = max(0.2, min(4.0, zoomScale * factor))
-        guard abs(newScale - zoomScale) > 0.001 else { return }
+        let step: CGFloat = 1.08
+        let proposedScale = delta > 0 ? zoomScale * step : zoomScale / step
+        let boundedScale = max(0.2, min(4.0, proposedScale))
+        let boundedPercent = Int((boundedScale * 100).rounded())
+        let crossesOriginalSize = (zoomScale < 1.0 && boundedScale > 1.0)
+            || (zoomScale > 1.0 && boundedScale < 1.0)
+        let returnsToOriginalSize = crossesOriginalSize || boundedPercent == 100
+        let newScale = returnsToOriginalSize ? 1.0 : boundedScale
+        guard newScale != zoomScale else { return }
 
         let oldFrame = window.frame
         let relX = anchorInWindow.x / max(1, oldFrame.width)
         let relY = anchorInWindow.y / max(1, oldFrame.height)
 
         zoomScale = newScale
-        let newW = round(baseSize.width * zoomScale)
-        let newH = round(baseSize.height * zoomScale)
+        let newSize = returnsToOriginalSize ? baseSize : NSSize(
+            width: round(baseSize.width * newScale), height: round(baseSize.height * newScale)
+        )
         let screenAnchorX = oldFrame.minX + anchorInWindow.x
         let screenAnchorY = oldFrame.minY + anchorInWindow.y
-        let newOrigin = NSPoint(x: screenAnchorX - newW * relX, y: screenAnchorY - newH * relY)
+        let newOrigin = NSPoint(x: screenAnchorX - newSize.width * relX, y: screenAnchorY - newSize.height * relY)
 
-        window.setFrame(NSRect(origin: newOrigin, size: NSSize(width: newW, height: newH)), display: true)
-        contentView.frame = NSRect(x: 0, y: 0, width: newW, height: newH)
-        contentView.showBadgeTemporarily("\(Int((zoomScale * 100).rounded()))%")
+        setPinFrame(NSRect(origin: newOrigin, size: newSize), display: true)
+        contentView.showBadgeTemporarily("\(returnsToOriginalSize ? 100 : boundedPercent)%")
         contentView.needsDisplay = true
     }
 
@@ -357,8 +368,7 @@ public final class PinWindowController: NSObject {
         window.alphaValue = 1.0
         var f = window.frame
         f.size = baseSize
-        window.setFrame(f, display: true)
-        contentView.frame = NSRect(origin: .zero, size: baseSize)
+        setPinFrame(f, display: true)
         contentView.needsDisplay = true
     }
 
