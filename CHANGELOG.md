@@ -1,5 +1,13 @@
 # Changelog
 
+## macOS v1.0.5
+
+本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
+
+- **长截图**　修复自动翻页时可能漏拼、暂停后只得到首屏的问题。每次滚动后先确认新画面拼接成功，再继续翻页。拼接中断时自动补抓并尝试回滚，仍接不上时保留预览，可以手动滚回后继续。
+- **已知问题**　复验中，OCR 接翻译可能在识别阶段超时，v1.0.3 也能复现。
+- **下载**　Apple 芯片 Mac 请选择 arm64，Intel Mac 请选择 amd64。两种架构均提供 DMG、ZIP 和 SHA-256 校验文件。
+
 ## macOS v1.0.3
 
 本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
