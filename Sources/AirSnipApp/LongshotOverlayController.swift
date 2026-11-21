@@ -17,27 +17,41 @@ private final class FullScreenBorderPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
+struct LongshotViewport {
+    let capture: (Set<Int>) async -> PixelBufferRGBA?
+    let scroll: (Int) -> Void
+    let positionCursor: (NSRect?) -> Void
+    let hasAccessibilityPermission: () -> Bool
+}
+
+private extension LongshotStepResult {
+    var isStationary: Bool { self == .still || self == .refreshed }
+}
+
 @MainActor
 public final class LongshotSessionController: ObservableObject {
     @Published public private(set) var pixelWidth: Int = 0
     @Published public private(set) var pixelHeight: Int = 0
     @Published public private(set) var segmentCount: Int = 0
     @Published public private(set) var canUndo: Bool = false
-    @Published public private(set) var statusHint: String = ""
+    @Published public private(set) var statusHint: String = "" {
+        didSet {
+            if statusHint != oldValue { fitControlBar() }
+        }
+    }
     @Published public private(set) var thumbnailImage: CGImage?
     @Published public private(set) var isAutoScrolling: Bool = false
     @Published public private(set) var needsAccessibilityAuth: Bool = false
-    @Published public private(set) var reachedBottom: Bool = false
     @Published public private(set) var scrollSpeed: LongshotScrollSpeed
 
     private let screen: NSScreen
     private let viewportTopDown: ASRect
+    private let viewport: LongshotViewport
     private let backingScale: Double
-    private let initialFallbackCrop: PixelBufferRGBA
     private var config: AirSnipConfig
     private let autoStartRequested: Bool
 
-    private var canvas: LongshotCanvas?
+    private let canvas: LongshotCanvas
     private var borderWindow: NSPanel?
     private var previewWindow: NSPanel?
     private var controlWindow: ControlBarPanel?
@@ -45,14 +59,32 @@ public final class LongshotSessionController: ObservableObject {
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var globalScrollMonitor: Any?
-    private var isFinalizing: Bool = false
+    private var pendingOutput: ((CGImage) -> Void)?
 
-    private var pendingInitialDelayMs: UInt64 = 0
-    private var pendingInitialWarp: Bool = false
-    private var pendingSettleRecapture: Bool = false
-    private var consecutiveStillCount: Int = 0
-    private var adaptiveScale: Double = 1.0
-    private var goodStepStreak: Int = 0
+    private enum ViewportPosition: Equatable {
+        case connected
+        case settling(LongshotFrameMode)
+        case unmatched(LongshotFrameMode)
+        case heightLimit
+
+        var isSettling: Bool {
+            if case .settling = self { return true }
+            return false
+        }
+
+        var frameMode: LongshotFrameMode {
+            switch self {
+            case .settling(let mode), .unmatched(let mode): return mode
+            case .connected, .heightLimit: return .manual
+            }
+        }
+    }
+
+    private var viewportPosition: ViewportPosition = .connected
+    private var captureRevision = 0
+    private var autoScrollStartDelay: UInt64?
+    private var adaptiveScale = 1.0
+    private var rewoundSinceLastSegment = false
 
     public var onSpeedChanged: ((LongshotScrollSpeed) -> Void)?
     public var onFinishCopy: ((CGImage, Double) -> Void)?
@@ -61,17 +93,49 @@ public final class LongshotSessionController: ObservableObject {
     public var onFinishOCR: ((CGImage) -> Void)?
     public var onCancel: (() -> Void)?
 
-    public init(
+    public convenience init(
         screen: NSScreen,
         viewportTopDown: ASRect,
         initialCrop: PixelBufferRGBA,
         config: AirSnipConfig,
         autoStartScroll: Bool = false
     ) {
+        let scrollAnchor = AccessibilityService.globalCGPoint(
+            on: screen,
+            localTopDownPoint: ASPoint(viewportTopDown.midX, viewportTopDown.minY + viewportTopDown.height * 0.46)
+        )
+        let viewport = LongshotViewport(
+            capture: { windowIDs in
+                await ScreenCaptureService.captureDisplayRegion(
+                    screen: screen, localTopDownRect: viewportTopDown, excludingWindowNumbers: windowIDs
+                )
+            },
+            scroll: { AccessibilityService.postPixelScroll(at: scrollAnchor, downwardPoints: $0) },
+            positionCursor: { avoidRect in
+                AccessibilityService.moveCursorIntoViewportIfNeeded(
+                    screen: screen, viewportTopDown: viewportTopDown, avoidAppKitRect: avoidRect
+                )
+            },
+            hasAccessibilityPermission: AccessibilityService.hasPermission
+        )
+        self.init(
+            screen: screen, viewportTopDown: viewportTopDown, initialCrop: initialCrop,
+            config: config, autoStartScroll: autoStartScroll, viewport: viewport
+        )
+    }
+
+    init(
+        screen: NSScreen,
+        viewportTopDown: ASRect,
+        initialCrop: PixelBufferRGBA,
+        config: AirSnipConfig,
+        autoStartScroll: Bool = false,
+        viewport: LongshotViewport
+    ) {
         self.screen = screen
         self.viewportTopDown = viewportTopDown
+        self.viewport = viewport
         self.backingScale = Double(screen.backingScaleFactor)
-        self.initialFallbackCrop = initialCrop
         self.config = config
         self.scrollSpeed = config.longshotScrollSpeed
         self.autoStartRequested = autoStartScroll
@@ -93,7 +157,7 @@ public final class LongshotSessionController: ObservableObject {
         setupWindows()
         installKeyMonitors()
         if autoStartRequested {
-            if AccessibilityService.hasPermission() {
+            if viewport.hasAccessibilityPermission() {
                 beginAutoScrolling(initialDelayMs: 220)
             } else {
                 needsAccessibilityAuth = true
@@ -108,6 +172,7 @@ public final class LongshotSessionController: ObservableObject {
         isAutoScrolling = false
         captureLoopTask?.cancel()
         captureLoopTask = nil
+        pendingOutput = nil
         GlobalHotkeyManager.shared?.unregisterTransientHotKeys()
         if let g = globalKeyMonitor { NSEvent.removeMonitor(g); globalKeyMonitor = nil }
         if let l = localKeyMonitor { NSEvent.removeMonitor(l); localKeyMonitor = nil }
@@ -129,7 +194,8 @@ public final class LongshotSessionController: ObservableObject {
     }
 
     public func beginAutoScrolling(initialDelayMs: UInt64 = 90) {
-        guard AccessibilityService.hasPermission() else {
+        guard pendingOutput == nil, viewportPosition != .heightLimit else { return }
+        guard viewport.hasAccessibilityPermission() else {
             needsAccessibilityAuth = true
             isAutoScrolling = false
             _ = AccessibilityService.requestPermissionPrompt()
@@ -137,20 +203,17 @@ public final class LongshotSessionController: ObservableObject {
             return
         }
         needsAccessibilityAuth = false
-        reachedBottom = false
-        consecutiveStillCount = 0
-        adaptiveScale = 1.0
-        goodStepStreak = 0
-        pendingSettleRecapture = false
-        pendingInitialDelayMs = initialDelayMs
-        pendingInitialWarp = true
+        captureRevision += 1
+        autoScrollStartDelay = initialDelayMs
+        rewoundSinceLastSegment = false
         isAutoScrolling = true
         statusHint = ""
     }
 
-    public func pauseAutoScrolling(customHint: String? = nil) {
+    public func pauseAutoScrolling() {
+        guard isAutoScrolling else { return }
+        captureRevision += 1
         isAutoScrolling = false
-        statusHint = customHint ?? ""
     }
 
     public func setScrollSpeed(_ speed: LongshotScrollSpeed) {
@@ -241,8 +304,7 @@ public final class LongshotSessionController: ObservableObject {
 
         // 3. Control bar window below (or above / cleanly inside bottom of) viewport, always respecting Dock & menu bar
         let vis = screen.visibleFrame
-        let isEn = config.language.isEnglish
-        let barW = min(max(isEn ? 536 : 496, vis.width - 24), isEn ? 584 : 544)
+        let barW = controlBarWidth(in: vis)
         let barH: CGFloat = 42
         let barX = max(vis.minX + 12, min(vis.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
         let barY: CGFloat
@@ -272,7 +334,24 @@ public final class LongshotSessionController: ObservableObject {
         self.controlWindow = cWin
     }
 
+    private func controlBarWidth(in visibleFrame: NSRect) -> CGFloat {
+        let base: CGFloat = config.language.isEnglish ? 584 : 544
+        let hintWidth = (statusHint as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
+        return min(visibleFrame.width - 24, base + (statusHint.isEmpty ? 0 : ceil(hintWidth) + 16))
+    }
+
+    private func fitControlBar() {
+        guard let controlWindow else { return }
+        let visible = screen.visibleFrame
+        var frame = controlWindow.frame
+        frame.size.width = controlBarWidth(in: visible)
+        let center = screen.frame.minX + viewportTopDown.midX
+        frame.origin.x = max(visible.minX + 12, min(visible.maxX - frame.width - 12, center - frame.width / 2))
+        controlWindow.setFrame(frame, display: true)
+    }
+
     var appLanguage: AppLanguage { config.language }
+    var heightLimitReached: Bool { viewportPosition == .heightLimit }
 
     private func applyWindowTheme(to win: NSWindow) {
         switch config.theme {
@@ -380,219 +459,198 @@ public final class LongshotSessionController: ObservableObject {
     }
 
     private func startSessionLoop() {
-        var ownWinIDs = Set<Int>()
-        if let id = borderWindow?.windowNumber, id > 0 { ownWinIDs.insert(id) }
-        if let id = previewWindow?.windowNumber, id > 0 { ownWinIDs.insert(id) }
-        if let id = controlWindow?.windowNumber, id > 0 { ownWinIDs.insert(id) }
-
-        let targetScreen = self.screen
-        let targetRect = self.viewportTopDown
-
         captureLoopTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self else { break }
-
-                if self.needsAccessibilityAuth && AccessibilityService.hasPermission() {
-                    self.needsAccessibilityAuth = false
-                    if self.autoStartRequested && self.segmentCount == 0 && !self.isAutoScrolling {
-                        self.beginAutoScrolling(initialDelayMs: 120)
-                    } else if !self.isAutoScrolling {
-                        self.statusHint = ""
-                    }
-                }
-
-                if self.isAutoScrolling {
-                    if self.pendingInitialDelayMs > 0 {
-                        let delayNs = self.pendingInitialDelayMs * 1_000_000
-                        self.pendingInitialDelayMs = 0
-                        try? await Task.sleep(nanoseconds: delayNs)
-                        guard !Task.isCancelled, self.isAutoScrolling else { continue }
-                    }
-
-                    if self.pendingInitialWarp {
-                        self.pendingInitialWarp = false
-                        AccessibilityService.moveCursorIntoViewportIfNeeded(
-                            screen: targetScreen,
-                            viewportTopDown: targetRect,
-                            avoidAppKitRect: self.controlWindow?.frame
-                        )
-                        try? await Task.sleep(nanoseconds: 55_000_000)
-                        guard !Task.isCancelled, self.isAutoScrolling else { continue }
-                    }
-
-                    // Hold scrolling steady while the user hovers over the control bar to click Pause / Finish / Save
-                    if let cWin = self.controlWindow, cWin.frame.contains(NSEvent.mouseLocation) {
-                        try? await Task.sleep(nanoseconds: 100_000_000)
-                        continue
-                    }
-
-                    // If the previous 1-screen jump was still painting/settling, re-capture once after 110ms BEFORE scrolling again
-                    // so we never double-jump past `prevFrame` and lose overlap!
-                    if self.pendingSettleRecapture {
-                        self.pendingSettleRecapture = false
-                        try? await Task.sleep(nanoseconds: 110_000_000)
-                        guard !Task.isCancelled, self.isAutoScrolling else { continue }
-                        if let retryFrame = await ScreenCaptureService.captureDisplayRegion(
-                            screen: targetScreen,
-                            localTopDownRect: targetRect,
-                            excludingWindowNumbers: ownWinIDs
-                        ) {
-                            self.handleAutoScrollFrame(retryFrame, screen: targetScreen, viewport: targetRect, wasSettleRetry: true)
-                        }
-                        continue
-                    }
-
-                    // Full-page stepping:
-                    // - Step 0 (`segmentCount == 0`, before fixed header/footer height is measured): scroll ~58% of window height
-                    //   so even tall browser toolbars + sticky site headers leave >=20% clean overlap to lock exact seams.
-                    // - Step 1+ (`segmentCount >= 1`): deduct exact `headerHeight + footerHeight` and advance ~78%–85% of the
-                    //   scrollable body per jump (~1 full screen per step, keeping 15%–22% seam overlap for pixel-exact stitching).
-                    let fixedHeaderFooterPt: Double
-                    if let c = self.canvas, self.segmentCount > 0 {
-                        fixedHeaderFooterPt = Double(c.headerHeight + c.footerHeight) / self.backingScale
-                    } else {
-                        fixedHeaderFooterPt = 0
-                    }
-                    let scrollableBodyPt = max(64.0, targetRect.height - fixedHeaderFooterPt)
-                    let rawFraction = self.scrollSpeed.viewportStepFraction * self.adaptiveScale
-                    let effectiveFraction = (self.segmentCount == 0) ? min(0.58, rawFraction) : min(0.86, rawFraction)
-                    let minSeamOverlapPt = max(48.0, scrollableBodyPt * 0.14)
-                    let maxSafeStepPt = max(36.0, scrollableBodyPt - minSeamOverlapPt)
-                    let totalStepPt = max(36, Int(min(maxSafeStepPt, scrollableBodyPt * effectiveFraction).rounded()))
-
-                    let tickCount = max(3, Int(ceil(Double(totalStepPt) / 220.0)))
-                    let baseTick = totalStepPt / tickCount
-                    let remTicks = totalStepPt % tickCount
-                    let scrollAnchor = AccessibilityService.globalCGPoint(
-                        on: targetScreen,
-                        localTopDownPoint: ASPoint(
-                            targetRect.midX,
-                            targetRect.minY + targetRect.height * 0.46
-                        )
-                    )
-
-                    for t in 0..<tickCount {
-                        guard !Task.isCancelled, self.isAutoScrolling else { break }
-                        let delta = baseTick + (t < remTicks ? 1 : 0)
-                        if delta > 0 {
-                            AccessibilityService.postPixelScrollDown(at: scrollAnchor, deltaPointsDown: delta)
-                        }
-                        if t + 1 < tickCount {
-                            try? await Task.sleep(nanoseconds: 6_000_000)
-                        }
-                    }
-
-                    guard !Task.isCancelled, self.isAutoScrolling else { continue }
-                    try? await Task.sleep(nanoseconds: self.scrollSpeed.settleMilliseconds * 1_000_000)
-                    guard !Task.isCancelled, self.isAutoScrolling else { continue }
-
-                    guard let frame = await ScreenCaptureService.captureDisplayRegion(
-                        screen: targetScreen,
-                        localTopDownRect: targetRect,
-                        excludingWindowNumbers: ownWinIDs
-                    ) else {
-                        continue
-                    }
-                    self.handleAutoScrollFrame(frame, screen: targetScreen, viewport: targetRect, wasSettleRetry: false)
-                } else {
-                    try? await Task.sleep(nanoseconds: 115_000_000)
-                    guard !Task.isCancelled, !self.isAutoScrolling else { continue }
-                    guard let frame = await ScreenCaptureService.captureDisplayRegion(
-                        screen: targetScreen,
-                        localTopDownRect: targetRect,
-                        excludingWindowNumbers: ownWinIDs
-                    ) else {
-                        continue
-                    }
-                    _ = self.processFrame(frame, fromAutoScroll: false)
-                }
+            while !Task.isCancelled, let self {
+                await self.captureNext()
             }
         }
     }
 
-    private func handleAutoScrollFrame(_ frame: PixelBufferRGBA, screen: NSScreen, viewport: ASRect, wasSettleRetry: Bool) {
-        let step = processFrame(frame, fromAutoScroll: true)
-        switch step {
-        case .appended:
-            consecutiveStillCount = 0
-            reachedBottom = false
-            pendingSettleRecapture = false
-            goodStepStreak += 1
-            if goodStepStreak >= 2 {
-                adaptiveScale = 1.0
-            }
-            statusHint = ""
-
-        case .still:
-            consecutiveStillCount += 1
-            pendingSettleRecapture = false
-            if segmentCount == 0 && consecutiveStillCount == 1 {
-                AccessibilityService.moveCursorIntoViewportIfNeeded(
-                    screen: screen,
-                    viewportTopDown: viewport,
-                    avoidAppKitRect: controlWindow?.frame
-                )
-            }
-            let stopThreshold = segmentCount > 0 ? 3 : 4
-            if consecutiveStillCount >= stopThreshold {
-                isAutoScrolling = false
-                reachedBottom = segmentCount > 0
-                statusHint = L10n.tr("已到底", "Reached bottom", in: config.language)
-            }
-
-        case .failed:
-            goodStepStreak = 0
-            if !wasSettleRetry {
-                pendingSettleRecapture = true
-            } else {
-                adaptiveScale = max(0.45, adaptiveScale * 0.65)
-            }
-
-        case .limitReached:
-            isAutoScrolling = false
-            pendingSettleRecapture = false
-            statusHint = L10n.tr("已达上限", "Height limit reached", in: config.language)
+    private func captureNext() async {
+        if let pendingOutput {
+            await finishCapture(pendingOutput, revision: captureRevision)
+            return
         }
-    }
 
-    @discardableResult
-    private func processFrame(_ frame: PixelBufferRGBA, fromAutoScroll: Bool) -> LongshotStepResult {
-        guard let canvas else { return .still }
-        let step = canvas.push(frame)
-        switch step {
-        case .appended:
-            pixelHeight = canvas.totalHeight
-            segmentCount = canvas.segmentCount
-            canUndo = canvas.canUndo
-            reachedBottom = false
-            if !fromAutoScroll {
+        if needsAccessibilityAuth && viewport.hasAccessibilityPermission() {
+            needsAccessibilityAuth = false
+            if autoStartRequested && segmentCount == 0 && !isAutoScrolling {
+                beginAutoScrolling(initialDelayMs: 120)
+            } else if !isAutoScrolling {
                 statusHint = ""
             }
-            thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
-        case .still:
-            break
-        case .failed:
-            if !fromAutoScroll {
-                statusHint = L10n.tr("滚动过快", "Scrolling too fast", in: config.language)
-            }
-        case .limitReached:
-            if !fromAutoScroll {
-                statusHint = L10n.tr("已达上限", "Height limit reached", in: config.language)
-            }
         }
-        return step
+
+        let revision = captureRevision
+        if isAutoScrolling {
+            await autoScroll(revision: revision)
+            return
+        }
+
+        let delay = viewportPosition.isSettling ? max(115, scrollSpeed.settleMilliseconds) : 115
+        try? await Task.sleep(for: .milliseconds(delay))
+        guard isCurrent(revision), !heightLimitReached || segmentCount == 0 else { return }
+        await checkCurrentViewport(revision: revision, retryFailure: false)
     }
 
-    public func undoLastSegment() {
-        if isAutoScrolling {
-            isAutoScrolling = false
+    private func checkCurrentViewport(revision: Int, retryFailure: Bool) async {
+        let result = await captureAndMatch(
+            revision: revision, mode: viewportPosition.frameMode,
+            attempts: retryFailure || viewportPosition.isSettling ? 3 : 1,
+            retryStill: viewportPosition.isSettling
+        )
+        guard isCurrent(revision) else { return }
+        applyCaptureResult(result)
+    }
+
+    private func isCurrent(_ revision: Int) -> Bool {
+        !Task.isCancelled && captureRevision == revision
+    }
+
+    private func captureAndMatch(
+        revision: Int, mode: LongshotFrameMode, attempts: Int = 3, retryStill: Bool = false
+    ) async -> LongshotStepResult? {
+        var result: LongshotStepResult?
+        for attempt in 0..<attempts {
+            if attempt > 0 { try? await Task.sleep(for: .milliseconds(110)) }
+            guard isCurrent(revision) else { return nil }
+            let frame = await viewport.capture(currentOwnWindowIDs())
+            guard isCurrent(revision) else { return nil }
+
+            guard let frame else {
+                // A missed capture does not erase evidence that the last available frame did not match.
+                if result != .failed { result = nil }
+                continue
+            }
+            let step = canvas.push(frame, mode: mode)
+            if case .appended = step {
+                rewoundSinceLastSegment = false
+                refreshPreview()
+            } else if step == .refreshed {
+                refreshPreview()
+            }
+            result = step
+            if step != .failed && (!retryStill || !step.isStationary) { break }
         }
-        guard let canvas, canvas.undoLast() else { return }
-        reachedBottom = false
+        return result
+    }
+
+    private func autoScroll(revision: Int) async {
+        if let delay = autoScrollStartDelay {
+            autoScrollStartDelay = nil
+            try? await Task.sleep(for: .milliseconds(delay))
+            guard isCurrent(revision) else { return }
+            viewport.positionCursor(controlWindow?.frame)
+            try? await Task.sleep(for: .milliseconds(55))
+            let result = await captureAndMatch(revision: revision, mode: viewportPosition.frameMode)
+            guard isCurrent(revision) else { return }
+            applyCaptureResult(result)
+            if result == nil || result == .failed { isAutoScrolling = false }
+            return
+        }
+
+        let distance = autoScrollDistance()
+        guard distance > 0 else {
+            isAutoScrolling = false
+            statusHint = L10n.tr("请放大选区", "Enlarge the selection", in: config.language)
+            return
+        }
+
+        await scrollAndSettle(distance, revision: revision)
+        let result = await captureAndMatch(revision: revision, mode: .automatic, retryStill: true)
+        guard isCurrent(revision) else { return }
+
+        if result == .failed, !rewoundSinceLastSegment {
+            rewoundSinceLastSegment = true
+            await recoverAfterScroll(distance, revision: revision)
+            return
+        }
+        applyCaptureResult(result)
+        if result == nil || result == .failed {
+            isAutoScrolling = false
+        } else if result?.isStationary == true {
+            isAutoScrolling = false
+            statusHint = L10n.tr("未检测到新内容", "No new content", in: config.language)
+        }
+    }
+
+    private func recoverAfterScroll(_ distance: Int, revision: Int) async {
+        adaptiveScale = max(0.30, adaptiveScale * 0.60)
+        let rewindDistance = max(1, distance / 3)
+        for _ in 0..<4 {
+            await scrollAndSettle(-rewindDistance, revision: revision)
+            let result = await captureAndMatch(revision: revision, mode: .reconnecting, attempts: 2, retryStill: true)
+            guard isCurrent(revision) else { return }
+
+            if let result, result != .failed {
+                applyCaptureResult(result)
+                return
+            }
+            if result == nil { break }
+        }
+        isAutoScrolling = false
+        applyCaptureResult(.failed)
+    }
+
+    private func autoScrollDistance() -> Int {
+        let fixedHeight = Double(canvas.headerHeight + canvas.footerHeight) / backingScale
+        let bodyHeight = viewportTopDown.height - fixedHeight
+        let fraction = min(segmentCount == 0 ? 0.58 : 0.86, scrollSpeed.viewportStepFraction * adaptiveScale)
+        let overlap = max(8 / backingScale, bodyHeight * 0.14)
+        return Int(max(0, min(bodyHeight * fraction, bodyHeight - overlap)))
+    }
+
+    private func scrollAndSettle(_ distance: Int, revision: Int) async {
+        while isCurrent(revision), controlWindow?.frame.contains(NSEvent.mouseLocation) == true {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard isCurrent(revision) else { return }
+
+        viewportPosition = .settling(distance > 0 ? .automatic : .reconnecting)
+        let tickCount = max(3, Int(ceil(Double(abs(distance)) / 220.0)))
+        let pointsPerTick = abs(distance) / tickCount
+        let remainder = abs(distance) % tickCount
+        for tick in 0..<tickCount {
+            guard isCurrent(revision) else { return }
+            let points = pointsPerTick + (tick < remainder ? 1 : 0)
+            if points > 0 { viewport.scroll(distance > 0 ? points : -points) }
+            if tick + 1 < tickCount { try? await Task.sleep(for: .milliseconds(6)) }
+        }
+        try? await Task.sleep(for: .milliseconds(scrollSpeed.settleMilliseconds))
+    }
+
+    private func applyCaptureResult(_ result: LongshotStepResult?) {
+        switch result {
+        case .appended:
+            viewportPosition = .connected
+            statusHint = ""
+        case .still, .refreshed, .overlapping:
+            if viewportPosition != .connected { statusHint = "" }
+            viewportPosition = .connected
+        case .limitReached:
+            isAutoScrolling = false
+            viewportPosition = .heightLimit
+            statusHint = L10n.tr("已达上限", "Height limit reached", in: config.language)
+        case .failed, nil:
+            let mode: LongshotFrameMode = viewportPosition.frameMode == .manual ? .manual : .reconnecting
+            viewportPosition = .unmatched(mode)
+            statusHint = L10n.tr("拼接中断，请往回滚一点", "Scroll back to reconnect", in: config.language)
+        }
+    }
+
+    private func refreshPreview() {
         pixelHeight = canvas.totalHeight
         segmentCount = canvas.segmentCount
         canUndo = canvas.canUndo
         thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
+    }
+
+    public func undoLastSegment() {
+        guard pendingOutput == nil, canvas.undoLast() else { return }
+        captureRevision += 1
+        isAutoScrolling = false
+        if viewportPosition == .heightLimit { viewportPosition = .unmatched(.manual) }
+        refreshPreview()
         statusHint = ""
     }
 
@@ -604,61 +662,48 @@ public final class LongshotSessionController: ObservableObject {
         return ids
     }
 
-    private func exportCurrentCanvasCGImage() -> CGImage? {
-        if let cg = canvas?.exportBuffer()?.makeCGImage() {
-            return cg
-        }
-        return initialFallbackCrop.makeCGImage()
+    private func requestOutput(completion: @escaping (CGImage) -> Void) {
+        guard captureLoopTask != nil, pendingOutput == nil else { return }
+        isAutoScrolling = false
+        captureRevision += 1
+        pendingOutput = completion
     }
 
-    private func finalizeSessionAndExport(completion: @escaping (CGImage) -> Void) {
-        guard !isFinalizing else { return }
-        isFinalizing = true
-        let hadLiveWindows = (borderWindow != nil || controlWindow != nil)
-        let ownIDs = currentOwnWindowIDs()
-        let targetScreen = screen
-        let targetRect = viewportTopDown
+    private func finishCapture(_ completion: (CGImage) -> Void, revision: Int) async {
+        if !heightLimitReached {
+            if viewportPosition.isSettling {
+                try? await Task.sleep(for: .milliseconds(scrollSpeed.settleMilliseconds))
+            }
+            await checkCurrentViewport(revision: revision, retryFailure: true)
+            guard isCurrent(revision) else { return }
+        }
 
-        // Hide UI & unregister transient Carbon hotkeys in 0ms for instant user feedback
-        stopAndCleanup()
-
-        guard hadLiveWindows else {
-            if let cg = exportCurrentCanvasCGImage() {
-                completion(cg)
-            } else {
-                onCancel?()
+        pendingOutput = nil
+        guard segmentCount > 0 else {
+            if !heightLimitReached {
+                statusHint = L10n.tr("尚未拼成长截图", "No long screenshot yet", in: config.language)
             }
             return
         }
-
-        // Capture one final settled live frame so any content scrolled/loaded right before pressing Enter is included
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if let finalFrame = await ScreenCaptureService.captureDisplayRegion(
-                screen: targetScreen,
-                localTopDownRect: targetRect,
-                excludingWindowNumbers: ownIDs
-            ) {
-                _ = self.processFrame(finalFrame, fromAutoScroll: false)
-            }
-            if let cg = self.exportCurrentCanvasCGImage() {
-                completion(cg)
-            } else {
-                self.onCancel?()
-            }
+        guard viewportPosition == .connected || viewportPosition == .heightLimit else { return }
+        guard let image = canvas.exportBuffer()?.makeCGImage() else {
+            statusHint = L10n.tr("无法生成长截图", "Could not create the long screenshot", in: config.language)
+            return
         }
+        stopAndCleanup()
+        completion(image)
     }
 
     public func finishAndCopy() {
         let scale = backingScale
-        finalizeSessionAndExport { [weak self] cg in
+        requestOutput { [weak self] cg in
             self?.onFinishCopy?(cg, scale)
         }
     }
 
     public func finishAndSave(forceDialog: Bool = false) {
         let scale = backingScale
-        finalizeSessionAndExport { [weak self] cg in
+        requestOutput { [weak self] cg in
             self?.onFinishSave?(cg, scale, forceDialog)
         }
     }
@@ -666,20 +711,19 @@ public final class LongshotSessionController: ObservableObject {
     public func finishAndAnnotate() {
         let scale = backingScale
         let scr = screen
-        finalizeSessionAndExport { [weak self] cg in
+        requestOutput { [weak self] cg in
             self?.onFinishEdit?(cg, scale, scr)
         }
     }
 
     public func finishAndOCR() {
-        finalizeSessionAndExport { [weak self] cg in
+        requestOutput { [weak self] cg in
             self?.onFinishOCR?(cg)
         }
     }
 
     public func cancel() {
-        guard !isFinalizing else { return }
-        isFinalizing = true
+        guard captureLoopTask != nil else { return }
         stopAndCleanup()
         onCancel?()
     }
@@ -841,7 +885,7 @@ struct LongshotControlBarView: View {
         if controller.isAutoScrolling {
             return L10n.tr("暂停", "Pause", in: l)
         }
-        if controller.segmentCount > 0 && !controller.reachedBottom {
+        if controller.segmentCount > 0 {
             return L10n.tr("继续", "Resume", in: l)
         }
         return L10n.tr("自动翻页", "Auto-Scroll", in: l)
@@ -868,7 +912,7 @@ struct LongshotControlBarView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(p.inkSecondary)
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .help(controller.statusHint)
                 }
             }
 
@@ -894,6 +938,7 @@ struct LongshotControlBarView: View {
                 }
             }
             .buttonStyle(LongshotBarPillStyle(role: controller.isAutoScrolling ? .activeThumb : .secondary))
+            .disabled(controller.heightLimitReached)
             .fixedSize(horizontal: true, vertical: false)
             .help(L10n.tr("自动翻页 / 暂停 (Space)", "Auto-Scroll / Pause (Space)", in: l))
 

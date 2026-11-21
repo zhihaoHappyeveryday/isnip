@@ -297,6 +297,113 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(upCanvas.totalHeight, 10 + (40 + 14) + 10)
     }
 
+    func testLongshotKeepsLastAcceptedFrameWhenNextSegmentExceedsLimit() throws {
+        let page = longshotRecoveryPage()
+        let canvas = LongshotCanvas(width: page.width, frameHeight: 120, maxHeight: 185)
+        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 40)), .appended(offset: 40, rows: 40))
+        let accepted = try XCTUnwrap(canvas.exportBuffer())
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 80)), .limitReached)
+        XCTAssertTrue(canvas.exportBuffer() == accepted)
+
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 60)), .appended(offset: 20, rows: 20))
+        XCTAssertTrue(canvas.exportBuffer() == page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 180)))
+    }
+
+    func testLongshotRevisitingCapturedRowsDoesNotDuplicateThem() throws {
+        let page = longshotRecoveryPage()
+        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
+        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 40)), .appended(offset: 40, rows: 40))
+        let accepted = try XCTUnwrap(canvas.exportBuffer())
+
+        _ = canvas.push(try longshotRecoveryFrame(on: page, y: 20))
+        XCTAssertTrue(canvas.exportBuffer() == accepted)
+        XCTAssertEqual(canvas.segmentCount, 1)
+
+        _ = canvas.push(try longshotRecoveryFrame(on: page, y: 50))
+        XCTAssertEqual(canvas.segmentCount, 2)
+        XCTAssertTrue(canvas.exportBuffer() == page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 170)))
+    }
+
+    func testLongshotRejoinsTheRemainingCanvasAfterUndoingSeveralSegments() throws {
+        let page = longshotRecoveryPage()
+        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
+        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
+        for top in stride(from: 40, through: 200, by: 40) {
+            XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: top)), .appended(offset: 40, rows: 40))
+        }
+        for _ in 0..<3 {
+            XCTAssertTrue(canvas.undoLast())
+        }
+        XCTAssertEqual(canvas.totalHeight, 200)
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 200)), .failed)
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 100)), .appended(offset: 20, rows: 20))
+        XCTAssertTrue(canvas.exportBuffer() == page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 220)))
+    }
+
+    func testLongshotRejectsCompetingSeamsInRepeatingContent() throws {
+        let source = longshotRecoveryPage()
+        let pattern = try XCTUnwrap(source.cropped(to: PixelRect(x: 0, y: 0, width: source.width, height: 50)))
+        let page = PixelBufferRGBA(width: source.width, height: 200, rgba: pattern.rgba + pattern.rgba + pattern.rgba + pattern.rgba)
+        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
+        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
+
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 69), mode: .automatic), .failed)
+        XCTAssertEqual(canvas.totalHeight, 120)
+    }
+
+    func testLongshotDoesNotConfirmAnIdenticalFrameWhenThePageCanHaveMoved() throws {
+        let page = longshotRecoveryPage()
+        let prefix = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 69)))
+        let section = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: 69, width: page.width, height: 93)))
+        let repeatedPage = PixelBufferRGBA(
+            width: page.width, height: 348, rgba: prefix.rgba + section.rgba + section.rgba + section.rgba
+        )
+        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
+        canvas.seed(try longshotRecoveryFrame(on: repeatedPage, y: 0))
+        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: repeatedPage, y: 69), mode: .automatic),
+                       .appended(offset: 69, rows: 69))
+        let identicalFrameAfterScroll = try longshotRecoveryFrame(on: repeatedPage, y: 162)
+        XCTAssertEqual(canvas.push(identicalFrameAfterScroll, mode: .automatic), .failed)
+        XCTAssertEqual(canvas.push(identicalFrameAfterScroll, mode: .reconnecting), .failed)
+        XCTAssertEqual(canvas.totalHeight, 189)
+    }
+
+    func testLongshotCanStitchAShortViewportWithAFixedHeader() throws {
+        let page = longshotRecoveryPage()
+        let header = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: 200, width: page.width, height: 8)))
+        func frame(at top: Int) throws -> PixelBufferRGBA {
+            let body = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: top, width: page.width, height: 16)))
+            return PixelBufferRGBA(width: page.width, height: 24, rgba: header.rgba + body.rgba)
+        }
+
+        let canvas = LongshotCanvas(width: page.width, frameHeight: 24)
+        canvas.seed(try frame(at: 0))
+
+        XCTAssertEqual(canvas.push(try frame(at: 5), mode: .automatic), .appended(offset: 5, rows: 5))
+        XCTAssertEqual(canvas.totalHeight, 29)
+    }
+
+    private func longshotRecoveryPage() -> PixelBufferRGBA {
+        let width = 64
+        let height = 360
+        var document = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = (y * width + x) * 4
+                document[index] = UInt8((y * 19 + x * 3) & 255)
+                document[index + 1] = UInt8((y * 37 + x) & 255)
+                document[index + 2] = UInt8((y * 13 + x * 7) & 255)
+            }
+        }
+        return PixelBufferRGBA(width: width, height: height, rgba: document)
+    }
+
+    private func longshotRecoveryFrame(on page: PixelBufferRGBA, y: Int) throws -> PixelBufferRGBA {
+        try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: y, width: page.width, height: 120)))
+    }
+
     func testOCRLinesJoinerCJKAndOutOfOrderSorting() {
         XCTAssertEqual(
             OCRLinesJoiner.joinSegments([OCRTextSegment(left: 0, top: 0, bottom: 16, words: ["你", "好", "世界"])]),

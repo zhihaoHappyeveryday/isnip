@@ -400,15 +400,15 @@ public enum AccessibilityService {
 
     public static let syntheticScrollEventTag: Int64 = 0x4953_4E50
 
-    /// Posts a continuous pixel-accurate downward scroll tick without trackpad momentum tail.
-    public static func postPixelScrollDown(at globalCGPoint: CGPoint, deltaPointsDown: Int) {
-        guard deltaPointsDown > 0,
+    /// Posts a pixel scroll tick. Positive distances scroll down, negative distances scroll up.
+    public static func postPixelScroll(at globalCGPoint: CGPoint, downwardPoints: Int) {
+        guard downwardPoints != 0,
               let src = CGEventSource(stateID: .hidSystemState),
               let ev = CGEvent(
                   scrollWheelEvent2Source: src,
                   units: .pixel,
                   wheelCount: 1,
-                  wheel1: Int32(-deltaPointsDown),
+                  wheel1: Int32(-downwardPoints),
                   wheel2: 0,
                   wheel3: 0
               ) else {
