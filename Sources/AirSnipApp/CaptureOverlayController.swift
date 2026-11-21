@@ -160,8 +160,13 @@ public final class CaptureSessionCoordinator {
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
     public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, Bool) -> Void)?
+    var getShowCompletionToast: (() -> Bool)?
     var onUpdatePreferences: (((inout AirSnipConfig) -> Void) -> Void)?
     public var onSessionEnded: (() -> Void)?
+
+    fileprivate var showsCompletionToast: Bool {
+        getShowCompletionToast?() ?? config.showCompletionToast
+    }
 
     public init(config: AirSnipConfig, mode: SessionMode = .normalCapture) {
         self.config = config
@@ -3594,7 +3599,12 @@ final class OverlayCanvasView: NSView {
                     return
                 } else {
                     selection = nil
-                    ToastHUD.show(L10n.tr("选区过小，请框选页面滚动区域", "Selection too small — drag across the scrollable area"))
+                    ToastHUD.show(
+                        L10n.tr("选区过小", "Selection too small"),
+                        kind: .warning,
+                        detail: L10n.tr("请框选页面滚动区域", "Select the scrollable area of the page"),
+                        above: window
+                    )
                 }
             }
             needsDisplay = true
@@ -3780,7 +3790,9 @@ final class OverlayCanvasView: NSView {
             let col = snapshot.rawBuffer.pixel(x: pxX, y: pxY)
             let copied = shift ? col.rgbString : col.hexString
             OutputService.copyStringToClipboard(copied)
-            ToastHUD.show(L10n.tr("已复制 \(copied)", "Copied \(copied)"))
+            if coordinator?.showsCompletionToast ?? true {
+                ToastHUD.show(L10n.tr("已复制 \(copied)", "Copied \(copied)"), kind: .success, above: window)
+            }
             coordinator?.cancelSession()
             return
         }
@@ -4233,7 +4245,7 @@ final class OverlayCanvasView: NSView {
         activeTool = nil
         document.clearAll()
         colorPicker = nil
-        ToastHUD.show(L10n.tr("已重新抓屏", "Recaptured"))
+        ToastHUD.show(L10n.tr("已重新抓屏", "Recaptured"), kind: .information, symbol: "arrow.clockwise", above: window)
         needsDisplay = true
     }
 
@@ -4250,9 +4262,10 @@ final class OverlayCanvasView: NSView {
 
             guard let capturedCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) else {
                 ToastHUD.show(
-                    L10n.tr("窗口捕获失败，请重新点选；或拖动框选屏幕区域", "Window capture failed. Click again to retry, or drag to capture a screen region."),
-                    symbol: "exclamationmark.triangle.fill",
-                    tint: .systemOrange
+                    L10n.tr("窗口捕获失败", "Window capture failed"),
+                    kind: .warning,
+                    detail: L10n.tr("重新点选窗口，或拖动框选屏幕区域", "Click the window again, or drag to select a screen area"),
+                    above: window
                 )
                 return
             }
@@ -4404,7 +4417,12 @@ final class OverlayCanvasView: NSView {
     private func triggerLongshot(forceAutoScroll: Bool = false) {
         guard let snapshot = screenSnapshot else { return }
         guard let sel = selection, sel.width >= 24 && sel.height >= 24 else {
-            ToastHUD.show(L10n.tr("选区过小", "Selection too small"))
+            ToastHUD.show(
+                L10n.tr("选区过小", "Selection too small"),
+                kind: .warning,
+                detail: L10n.tr("放大选区后再试长截图", "Enlarge the selection, then try Longshot again"),
+                above: window
+            )
             return
         }
         let pxRect = PixelRect(

@@ -47,7 +47,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         self.config = loadedConfig
         super.init()
 
+        ToastHUD.getTheme = { [weak self] in self?.config.theme ?? .follow }
         self.ocrBubbleManager.appLanguage = loadedConfig.language
+        self.ocrBubbleManager.showCompletionToast = loadedConfig.showCompletionToast
         self.settingsController = SettingsWindowController(appController: self)
 
         pinManager.getConfig = { [weak self] in
@@ -138,6 +140,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 guard let self, let release = await self.automaticUpdate() else { return }
                 ToastHUD.show(
                     L10n.tr("发现新版本 v\(release.version)", "New version v\(release.version) available", in: self.config.language),
+                    kind: .information,
                     symbol: "arrow.down.circle",
                     duration: 3.0
                 )
@@ -191,6 +194,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         config = next
         activeCaptureSession?.refreshWindowedPinConfig(config)
         L10n.current = config.language
+        ocrBubbleManager.showCompletionToast = config.showCompletionToast
         if !pinHistoryLimitChanged {
             try? config.save(to: configURL)
         }
@@ -223,8 +227,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             try requested.save(to: configURL)
         } catch {
             ToastHUD.show(
-                L10n.tr("无法保存可恢复贴图数，请重试", "Could not save the recoverable pin limit. Please try again.", in: requested.language),
-                symbol: "exclamationmark.triangle", tint: .systemOrange
+                L10n.tr("无法保存可恢复贴图数", "Could not save the recoverable pin limit", in: requested.language),
+                kind: .warning,
+                detail: L10n.tr("请再试一次", "Please try again", in: requested.language)
             )
             return fallback
         }
@@ -516,9 +521,17 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             ocrBubbleManager.presentSelectedText(text, anchorScreenPoint: NSEvent.mouseLocation, config: config)
         } catch SelectedTextService.SelectionError.permissionRequired {
             SelectedTextService.requestAccess()
-            ToastHUD.show(L10n.tr("请开启 iSnip 的辅助功能权限", "Please grant Accessibility access to iSnip", in: config.language), symbol: "hand.raised", tint: .systemOrange, duration: 3)
+            ToastHUD.show(
+                L10n.tr("需要辅助功能权限", "Accessibility access required", in: config.language),
+                kind: .warning,
+                detail: L10n.tr("在系统设置中为 iSnip 开启辅助功能", "Enable Accessibility for iSnip in System Settings", in: config.language)
+            )
         } catch {
-            ToastHUD.show(L10n.tr("未读取到选中文字，可使用截图翻译", "No selected text found — try Capture & Translate", in: config.language), symbol: "text.viewfinder", tint: .systemOrange, duration: 3)
+            ToastHUD.show(
+                L10n.tr("未读取到选中文字", "No selected text found", in: config.language),
+                kind: .warning,
+                detail: L10n.tr("可以改用截图翻译", "Try Capture & Translate", in: config.language)
+            )
         }
     }
 
@@ -529,7 +542,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     private func translationAvailable() -> Bool {
         if #available(macOS 15.0, *) { return true }
-        ToastHUD.show(L10n.tr("系统翻译需要 macOS 15 或更新版本", "System Translation requires macOS 15 or later", in: config.language), symbol: "info.circle", tint: .systemOrange, duration: 3)
+        ToastHUD.show(
+            L10n.tr("系统翻译需要 macOS 15 或更新版本", "System Translation requires macOS 15 or later", in: config.language),
+            kind: .warning
+        )
         return false
     }
 
@@ -574,7 +590,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func triggerOCRFromClipboard() {
         guard let clip = OutputService.readImageFromClipboard() else {
-            ToastHUD.show(L10n.tr("剪贴板无图片", "No image in clipboard", in: config.language))
+            ToastHUD.show(
+                L10n.tr("剪贴板无图片", "No image in clipboard", in: config.language),
+                kind: .warning,
+                detail: L10n.tr("先复制一张图片，再进行识别", "Copy an image first, then try OCR again", in: config.language)
+            )
             return
         }
         ocrBubbleManager.recognizeAndPresent(
@@ -617,8 +637,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             rememberPinnedClipboardCopy(clip.copyID)
             if clip.isTextPreviewClipped {
                 ToastHUD.show(
-                    L10n.tr("仅显示部分文字，可复制原文", "Showing part of the text. Use Copy Original Text.", in: config.language),
-                    symbol: "exclamationmark.triangle", tint: .systemOrange
+                    L10n.tr("仅显示部分文字", "Showing part of the text", in: config.language),
+                    kind: .warning,
+                    detail: L10n.tr("右键贴图，选择「复制原文」", "Right-click the pin and choose Copy Original Text", in: config.language)
                 )
             }
         }
@@ -655,16 +676,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     ) -> CaptureSessionCoordinator {
         let coordinator = CaptureSessionCoordinator(config: config, mode: mode)
 
+        coordinator.getShowCompletionToast = { [weak self] in
+            self?.config.showCompletionToast ?? true
+        }
         coordinator.onUpdatePreferences = { [weak self] change in
             self?.updateConfig(change)
         }
         coordinator.onCompleteCopy = { [weak self] cgImg, scale in
-            let currentCfg = self?.config
-            let showToast = currentCfg?.showCompletionToast ?? true
-            OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { _ in
-                guard showToast else { return }
-                ToastHUD.show(L10n.tr("已复制", "Copied"))
-            }
+            self?.copyCapturedImage(cgImg, scale: scale)
         }
         coordinator.onSaveImage = { [weak self] image, scale, forceDialog, sessionConfig in
             self?.saveImage(
@@ -705,6 +724,13 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         return coordinator
     }
 
+    private func copyCapturedImage(_ image: CGImage, scale: Double) {
+        OutputService.copyImageToClipboard(image, backingScale: scale, config: config) { [weak self] _ in
+            guard self?.config.showCompletionToast ?? true else { return }
+            ToastHUD.show(L10n.tr("已复制", "Copied"), kind: .success)
+        }
+    }
+
     private func saveImage(
         _ image: CGImage,
         scale: Double,
@@ -722,8 +748,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if let updatePreferences = saved.updatePreferences {
             updateConfig(updatePreferences)
         }
-        if saveConfig.showCompletionToast {
-            ToastHUD.show(L10n.tr("已保存", "Saved"))
+        if config.showCompletionToast {
+            ToastHUD.show(L10n.tr("已保存", "Saved"), kind: .success)
         }
         return true
     }
@@ -745,13 +771,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             self?.updateConfig { $0.longshotScrollSpeed = newSpeed }
         }
         ls.onFinishCopy = { [weak self] cgImg, scale in
-            let currentCfg = self?.config
-            let showToast = currentCfg?.showCompletionToast ?? true
             self?.activeLongshotSession = nil
-            OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { _ in
-                guard showToast else { return }
-                ToastHUD.show(L10n.tr("已复制", "Copied"))
-            }
+            self?.copyCapturedImage(cgImg, scale: scale)
         }
         ls.onFinishSave = { [weak self] cgImg, scale, forceDialog in
             guard let self else { return }

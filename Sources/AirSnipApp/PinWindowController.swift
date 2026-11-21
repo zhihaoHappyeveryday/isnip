@@ -33,7 +33,7 @@ public final class PinManager: ObservableObject {
         self.historyRootURL = historyRootURL
         history = ClosedPinHistory(configURL: historyConfigURL)
         history.onWriteFailure = { [weak self] in
-            self?.showHistoryWarning("贴图历史写入失败，这些贴图无法恢复", "Some closed pins could not be saved for recovery")
+            self?.showHistoryWarning("部分贴图未存入历史，无法恢复", "Some pins were not saved to history and cannot be restored")
         }
         historyMountObserver = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
             .receive(on: DispatchQueue.main)
@@ -103,7 +103,12 @@ public final class PinManager: ObservableObject {
 
     func trimClosedHistory(to limit: Int) -> Bool {
         guard history.trim(to: limit) else {
-            showHistoryWarning("无法更新可恢复贴图数，请重试", "Could not update the recoverable pin limit. Please try again.")
+            let language = getConfig?().language
+            ToastHUD.show(
+                L10n.tr("无法更新可恢复贴图数", "Could not update the recoverable pin limit", in: language),
+                kind: .warning,
+                detail: L10n.tr("请再试一次", "Please try again", in: language)
+            )
             return false
         }
         return true
@@ -129,12 +134,17 @@ public final class PinManager: ObservableObject {
     }
 
     private func showHistoryWarning(_ zh: String, _ en: String) {
-        ToastHUD.show(L10n.tr(zh, en, in: getConfig?().language), symbol: "exclamationmark.triangle", tint: .systemOrange)
+        ToastHUD.show(L10n.tr(zh, en, in: getConfig?().language), kind: .warning)
     }
 
     private func canOpenPin(config: AirSnipConfig) -> Bool {
         guard count < config.pinMaxCount else {
-            ToastHUD.show(L10n.tr("已达上限（\(config.pinMaxCount) 张）", "Pin limit reached (\(config.pinMaxCount))", in: config.language))
+            ToastHUD.show(
+                L10n.tr("贴图已达上限", "Pin limit reached", in: config.language),
+                kind: .warning,
+                detail: L10n.tr("关闭贴图，腾出位置后再试", "Close pins to make room, then try again", in: config.language),
+                countText: "\(count) / \(config.pinMaxCount)"
+            )
             return false
         }
         return true
@@ -164,7 +174,7 @@ public final class PinManager: ObservableObject {
         for w in windows where w.isClickThrough {
             w.setClickThrough(false)
         }
-        ToastHUD.show(L10n.tr("已恢复贴图交互", "Click-through disabled"))
+        ToastHUD.show(L10n.tr("已恢复贴图交互", "Click-through disabled"), kind: .information, symbol: "cursorarrow")
     }
 
     public func toggleAllBorders() {
@@ -173,7 +183,11 @@ public final class PinManager: ObservableObject {
             w.setShowBorder(target)
         }
         updateConfig? { $0.pinBorder = target }
-        ToastHUD.show(target ? L10n.tr("边框已开启", "Pin borders shown") : L10n.tr("边框已隐藏", "Pin borders hidden"))
+        ToastHUD.show(
+            target ? L10n.tr("边框已开启", "Pin borders shown") : L10n.tr("边框已隐藏", "Pin borders hidden"),
+            kind: .information,
+            symbol: target ? "rectangle" : "rectangle.dashed"
+        )
     }
 }
 
@@ -322,7 +336,12 @@ public final class PinWindowController: NSObject {
         window.ignoresMouseEvents = on
         window.alphaValue = on ? min(opacity, 0.82) : opacity
         if on {
-            ToastHUD.show(L10n.tr("已开启穿透（菜单栏可恢复）", "Click-through enabled (restore from menu bar)"))
+            ToastHUD.show(
+                L10n.tr("已开启穿透", "Click-through enabled"),
+                kind: .information,
+                detail: L10n.tr("可从菜单栏恢复贴图交互", "Restore pin interaction from the menu bar"),
+                symbol: "cursorarrow"
+            )
         }
     }
 
@@ -384,15 +403,18 @@ public final class PinWindowController: NSObject {
         let cfg = manager?.getConfig?()
         OutputService.copyImageToClipboard(
             cgImage, backingScale: backingScale, config: cfg, to: manager?.pasteboard ?? .general
-        ) { _ in
-            ToastHUD.show(L10n.tr("已复制", "Copied"))
+        ) { [weak manager] _ in
+            guard manager?.getConfig?().showCompletionToast ?? true else { return }
+            ToastHUD.show(L10n.tr("已复制", "Copied"), kind: .success)
         }
     }
 
     func copyOriginalText() {
         guard let originalText else { return }
         OutputService.copyStringToClipboard(originalText, to: manager?.pasteboard ?? .general)
-        ToastHUD.show(L10n.tr("已复制原文", "Original Text Copied"))
+        if manager?.getConfig?().showCompletionToast ?? true {
+            ToastHUD.show(L10n.tr("已复制原文", "Original Text Copied"), kind: .success)
+        }
     }
 
     public func savePin(forceDialog: Bool = false) {
@@ -403,8 +425,8 @@ public final class PinWindowController: NSObject {
         if let updatePreferences = saved.updatePreferences {
             manager?.updateConfig?(updatePreferences)
         }
-        if config.showCompletionToast {
-            ToastHUD.show(L10n.tr("已保存", "Saved"))
+        if manager?.getConfig?().showCompletionToast ?? config.showCompletionToast {
+            ToastHUD.show(L10n.tr("已保存", "Saved"), kind: .success)
         }
     }
 

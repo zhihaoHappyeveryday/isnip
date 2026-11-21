@@ -143,6 +143,7 @@ final class SettingsUpdateState: ObservableObject {
                 if showToast {
                     ToastHUD.show(
                         L10n.tr("发现新版本 v\(info.version)", "New version v\(info.version) available", in: lang),
+                        kind: .information,
                         symbol: "arrow.down.circle"
                     )
                 }
@@ -151,20 +152,21 @@ final class SettingsUpdateState: ObservableObject {
                 if showToast {
                     ToastHUD.show(
                         L10n.tr("已是最新版本 v\(UpdateChecker.currentVersion)", "Up to date (v\(UpdateChecker.currentVersion))", in: lang),
-                        symbol: "checkmark"
+                        kind: .information,
+                        symbol: "checkmark.circle"
                     )
                 }
             case .success(.noPublishedRelease):
                 statusKind = .noPublishedRelease
                 if showToast {
-                    ToastHUD.show(statusText(in: lang), symbol: "info.circle")
+                    ToastHUD.show(statusText(in: lang), kind: .information)
                 }
             case .failure(let err):
                 statusKind = .failed(err.localizedDescription)
                 if showToast {
                     ToastHUD.show(
                         L10n.tr("检查更新失败", "Update check failed", in: lang),
-                        symbol: "exclamationmark.circle"
+                        kind: .warning
                     )
                 }
             }
@@ -518,8 +520,8 @@ private struct GeneralSettingsPane: View {
             MagpieSettingRow(
                 title: L10n.tr("操作完成提示", "Completion Toast", in: lang),
                 infoTip: L10n.tr(
-                    "截图复制或保存完成后，在屏幕顶部短暂展示轻量化确认卡片",
-                    "Briefly show a subtle confirmation toast at the top of the screen after copying or saving",
+                    "复制或保存完成后，在屏幕顶部短暂显示提示",
+                    "Briefly show a toast at the top of the screen after copying or saving",
                     in: lang
                 )
             ) {
@@ -1752,8 +1754,10 @@ private struct PinHistoryDirectoryRow: View {
                         try ClosedPinHistory.ensureHistoryRootExists(historyRoot)
                         NSWorkspace.shared.open(historyRoot)
                     } catch {
-                        ToastHUD.show(L10n.tr("无法打开贴图历史目录", "Could not open the pin history directory", in: lang),
-                                      symbol: "exclamationmark.triangle", tint: .systemOrange)
+                        ToastHUD.show(
+                            L10n.tr("无法打开贴图历史目录", "Could not open the pin history directory", in: lang),
+                            kind: .warning
+                        )
                     }
                 }
                 MagpieTextAction(L10n.tr("更改…", "Change…", in: lang)) {

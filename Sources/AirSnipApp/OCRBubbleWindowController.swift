@@ -104,6 +104,7 @@ public final class OCRBubbleManager: ObservableObject {
     private var panel: KeyableBubblePanel?
     private var recognitionTask: Task<Void, Never>?
     private var copyFeedbackTask: Task<Void, Never>?
+    var showCompletionToast = true
     public var onConfigChanged: ((_ language: String, _ autoCopy: Bool, _ mergeLineBreaks: Bool) -> Void)?
     public var onTranslationTargetChanged: ((String) -> Void)?
 
@@ -118,6 +119,7 @@ public final class OCRBubbleManager: ObservableObject {
         recognitionTask?.cancel()
         suppressCallback = true
         self.appLanguage = config.language
+        self.showCompletionToast = config.showCompletionToast
         self.autoCopy = config.ocr.autoCopy
         self.mergeLineBreaks = config.ocr.mergeLineBreaks
         self.selectedLanguage = config.ocr.language
@@ -141,6 +143,7 @@ public final class OCRBubbleManager: ObservableObject {
         recognitionTask?.cancel()
         suppressCallback = true
         appLanguage = config.language
+        showCompletionToast = config.showCompletionToast
         translationTargetLanguage = config.translation.targetLanguage
         translationSourceLanguage = "auto"
         suppressCallback = false
@@ -237,7 +240,9 @@ public final class OCRBubbleManager: ObservableObject {
 
     public func copyBarcode(_ payload: String) {
         OutputService.copyStringToClipboard(payload)
-        ToastHUD.show(L10n.tr("已复制", "Copied", in: appLanguage))
+        if showCompletionToast {
+            ToastHUD.show(L10n.tr("已复制", "Copied", in: appLanguage), kind: .success)
+        }
     }
 
     private func clearTranslation() {
