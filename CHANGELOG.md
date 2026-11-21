@@ -1,5 +1,13 @@
 # Changelog
 
+## macOS v1.0.6
+
+本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
+
+- **长截图**　修复起步失败后，反复点「自动翻页」仍提示回滚的问题。起步先自动补抓，仍无法确认起点时，预览当前画面即可从这里重新开始。滚动后最多尝试 3 小步回滚，接上后减速继续。
+- **贴图历史**　保存的文件以贴图关闭时间命名，方便在 Finder 里识别和排序。
+- **下载**　Apple 芯片 Mac 请选择 arm64，Intel Mac 请选择 amd64。两种架构均提供 DMG、ZIP 和 SHA-256 校验文件。
+
 ## macOS v1.0.5
 
 本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
