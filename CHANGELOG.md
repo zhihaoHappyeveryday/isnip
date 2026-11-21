@@ -1,5 +1,12 @@
 # Changelog
 
+## macOS v1.0.2
+
+本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
+
+- **贴图缩放**　修复贴图放大后缩小、无法回到原始大小的问题。滚轮从任一方向跨过 100% 时，会先恢复到原始大小，下一格继续缩放。
+- **下载**　Apple 芯片 Mac 请选择 arm64，Intel Mac 请选择 amd64。两种架构均提供 DMG、ZIP 和 SHA-256 校验文件。
+
 ## macOS v1.0.1
 
 本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
