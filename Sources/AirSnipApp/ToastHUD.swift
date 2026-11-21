@@ -24,11 +24,16 @@ enum ToastHUD {
         let countText: String?
     }
 
+    struct Presentation: Equatable {
+        private let id = UUID()
+    }
+
     static var getTheme: () -> ThemeSetting = { .follow }
 
-    private static var active: (content: Content, dark: Bool, panel: NSPanel)?
+    private static var active: (content: Content, dark: Bool, panel: NSPanel, presentation: Presentation)?
     private static var dismissTask: Task<Void, Never>?
 
+    @discardableResult
     static func show(
         _ title: String,
         kind: Kind,
@@ -37,7 +42,8 @@ enum ToastHUD {
         symbol: String? = nil,
         duration: TimeInterval? = nil,
         above window: NSWindow? = nil
-    ) {
+    ) -> Presentation {
+        let presentation = Presentation()
         let content = Content(title: title, kind: kind, detail: detail, countText: countText)
         let lifetime = duration ?? (kind == .warning || detail != nil ? 3 : 1.5)
         let screen = window?.screen ?? NSScreen.main ?? NSScreen.screens.first
@@ -56,14 +62,15 @@ enum ToastHUD {
         dismissTask?.cancel()
         if let active, active.content == content, active.dark == dark, active.panel.frame.width <= maxWidth {
             let panel = active.panel
+            Self.active?.presentation = presentation
             position(panel, on: screenFrame)
             panel.level = level
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0
                 panel.animator().alphaValue = 1
             }
-            dismiss(panel, after: lifetime)
-            return
+            scheduleDismissal(of: presentation, panel: panel, after: lifetime)
+            return presentation
         }
 
         active?.panel.orderOut(nil)
@@ -91,8 +98,17 @@ enum ToastHUD {
             context.duration = 0.16
             panel.animator().alphaValue = 1
         }
-        active = (content, dark, panel)
-        dismiss(panel, after: lifetime)
+        active = (content, dark, panel, presentation)
+        scheduleDismissal(of: presentation, panel: panel, after: lifetime)
+        return presentation
+    }
+
+    static func dismiss(_ presentation: Presentation) {
+        guard let active, active.presentation == presentation else { return }
+        dismissTask?.cancel()
+        dismissTask = nil
+        active.panel.orderOut(nil)
+        Self.active = nil
     }
 
     private static func position(_ panel: NSPanel, on screen: NSRect) {
@@ -105,7 +121,7 @@ enum ToastHUD {
         }
     }
 
-    private static func dismiss(_ panel: NSPanel, after duration: TimeInterval) {
+    private static func scheduleDismissal(of presentation: Presentation, panel: NSPanel, after duration: TimeInterval) {
         guard duration.isFinite else { return }
         dismissTask = Task {
             try? await Task.sleep(for: .seconds(duration))
@@ -115,9 +131,7 @@ enum ToastHUD {
                 panel.animator().alphaValue = 0
             }
             guard !Task.isCancelled else { return }
-            panel.orderOut(nil)
-            active = nil
-            dismissTask = nil
+            dismiss(presentation)
         }
     }
 

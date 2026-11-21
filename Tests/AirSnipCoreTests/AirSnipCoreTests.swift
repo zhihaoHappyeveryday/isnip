@@ -358,6 +358,25 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertTrue(decodedCfg.nameStyle.formatBaseName().hasPrefix("isnip-"))
     }
 
+    func testOCRCopyCloseDefaultsOnAndPersistsAnExplicitOffSetting() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("config.json")
+
+        func savedCloseAfterCopy(_ config: AirSnipConfig) throws -> Bool? {
+            try config.save(to: url)
+            let contents = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+            let ocr = try XCTUnwrap(contents["ocr"] as? [String: Any])
+            return ocr["closeAfterCopy"] as? Bool
+        }
+
+        XCTAssertEqual(try savedCloseAfterCopy(AirSnipConfig()), true)
+        try Data(#"{"ocr":{"language":"en-US"}}"#.utf8).write(to: url)
+        XCTAssertEqual(try savedCloseAfterCopy(AirSnipConfig.load(from: url)), true)
+        try Data(#"{"ocr":{"closeAfterCopy":false}}"#.utf8).write(to: url)
+        XCTAssertEqual(try savedCloseAfterCopy(AirSnipConfig.load(from: url)), false)
+    }
+
     func testPngSmartCompressorPipelineShrinksAndPreservesValidImage() throws {
         XCTAssertTrue(PngSmartCompressor.hasBundledOrSystemTools)
         let w = 520

@@ -846,29 +846,33 @@ public enum UiScaleSetting: String, Codable, CaseIterable, Sendable {
 
 public struct OcrConfig: Codable, Equatable, Sendable {
     public var autoCopy: Bool
+    public var closeAfterCopy: Bool
     public var language: String // "auto", "zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"
     public var mergeLineBreaks: Bool
     public var detectBarcodes: Bool
 
     public init(
         autoCopy: Bool = false,
+        closeAfterCopy: Bool = true,
         language: String = "auto",
         mergeLineBreaks: Bool = false,
         detectBarcodes: Bool = true
     ) {
         self.autoCopy = autoCopy
+        self.closeAfterCopy = closeAfterCopy
         self.language = language
         self.mergeLineBreaks = mergeLineBreaks
         self.detectBarcodes = detectBarcodes
     }
 
     private enum CodingKeys: String, CodingKey {
-        case autoCopy, language, mergeLineBreaks, detectBarcodes
+        case autoCopy, closeAfterCopy, language, mergeLineBreaks, detectBarcodes
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.autoCopy = try c.decodeIfPresent(Bool.self, forKey: .autoCopy) ?? false
+        self.closeAfterCopy = try c.decodeIfPresent(Bool.self, forKey: .closeAfterCopy) ?? true
         self.language = try c.decodeIfPresent(String.self, forKey: .language) ?? "auto"
         self.mergeLineBreaks = try c.decodeIfPresent(Bool.self, forKey: .mergeLineBreaks) ?? false
         self.detectBarcodes = try c.decodeIfPresent(Bool.self, forKey: .detectBarcodes) ?? true

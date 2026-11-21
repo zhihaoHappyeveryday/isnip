@@ -52,6 +52,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         ToastHUD.getTheme = { [weak self] in self?.config.theme ?? .follow }
         self.ocrBubbleManager.appLanguage = loadedConfig.language
         self.ocrBubbleManager.showCompletionToast = loadedConfig.showCompletionToast
+        self.ocrBubbleManager.closeAfterCopy = loadedConfig.ocr.closeAfterCopy
         self.settingsController = SettingsWindowController(appController: self)
 
         pinManager.getConfig = { [weak self] in
@@ -216,6 +217,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         activeCaptureSession?.refreshWindowedPinConfig(config)
         L10n.current = config.language
         ocrBubbleManager.showCompletionToast = config.showCompletionToast
+        ocrBubbleManager.closeAfterCopy = config.ocr.closeAfterCopy
         if save {
             try? config.save(to: configURL)
         }

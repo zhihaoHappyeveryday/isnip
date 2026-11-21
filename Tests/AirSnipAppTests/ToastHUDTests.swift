@@ -5,6 +5,19 @@ import XCTest
 
 final class ToastHUDTests: XCTestCase {
     @MainActor
+    func testAnOlderDismissRequestCannotHideARefreshedToast() async throws {
+        _ = NSApplication.shared
+        let original = ToastHUD.show("Recognizing Text", kind: .information, duration: .infinity)
+        let panel = try XCTUnwrap(visibleToast)
+        let refreshed = ToastHUD.show("Recognizing Text", kind: .information, duration: .infinity)
+        defer { ToastHUD.dismiss(refreshed) }
+
+        XCTAssertTrue(visibleToast === panel)
+        ToastHUD.dismiss(original)
+        XCTAssertTrue(visibleToast === panel)
+    }
+
+    @MainActor
     func testRepeatedToastKeepsItsWindowAndRestartsItsTimer() async throws {
         _ = NSApplication.shared
         ToastHUD.show("贴图已达上限", kind: .warning, detail: "关闭贴图，腾出位置后再试",

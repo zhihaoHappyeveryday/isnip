@@ -101,17 +101,34 @@ public final class OCRBubbleManager: ObservableObject {
     private var detectBarcodesEnabled: Bool = true
     private var suppressCallback: Bool = false
     private var translateAfterRecognition = false
+    private let recognizeImage: @MainActor (CGImage, String, Bool) async throws -> OCRRecognitionResult
+    private let writeText: (String) -> Bool
 
     private var panel: KeyableBubblePanel?
     private static let timing = OSSignposter(subsystem: "io.zzusec.airsnip", category: "OCR")
     private var prewarmTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
+    private var recognitionProgressTask: Task<Void, Never>?
+    private var recognitionProgressToast: ToastHUD.Presentation?
     private var copyFeedbackTask: Task<Void, Never>?
     var showCompletionToast = true
+    var closeAfterCopy = true
     public var onConfigChanged: ((_ language: String, _ autoCopy: Bool, _ mergeLineBreaks: Bool) -> Void)?
     public var onTranslationTargetChanged: ((String) -> Void)?
 
-    public init() {}
+    public convenience init() {
+        self.init(recognizeImage: LocalVisionOCR.recognizeInBackground, writeText: {
+            OutputService.copyStringToClipboard($0)
+        })
+    }
+
+    init(
+        recognizeImage: @escaping @MainActor (CGImage, String, Bool) async throws -> OCRRecognitionResult,
+        writeText: @escaping (String) -> Bool
+    ) {
+        self.recognizeImage = recognizeImage
+        self.writeText = writeText
+    }
 
     func prewarm(languagePreference: String) {
         Self.timing.emitEvent("OCR startup")
@@ -128,6 +145,7 @@ public final class OCRBubbleManager: ObservableObject {
         self.appLanguage = config.language
         self.showCompletionToast = config.showCompletionToast
         self.autoCopy = config.ocr.autoCopy
+        self.closeAfterCopy = config.ocr.closeAfterCopy
         self.mergeLineBreaks = config.ocr.mergeLineBreaks
         self.selectedLanguage = config.ocr.language
         self.detectBarcodesEnabled = config.ocr.detectBarcodes
@@ -142,12 +160,20 @@ public final class OCRBubbleManager: ObservableObject {
         self.text = ""
         self.copiedFeedback = false
         self.copiedTranslationFeedback = false
-        ensurePanel(near: anchorScreenPoint, theme: config.theme)
-        startRecognition(on: rawSelectionImage)
+        let showPanel: () -> Void = { [weak self, theme = config.theme] in
+            self?.ensurePanel(near: anchorScreenPoint, theme: theme)
+        }
+        if autoCopy && shouldCloseAfterCopy {
+            panel?.orderOut(nil)
+            startRecognition(on: rawSelectionImage, showFallbackPanel: showPanel)
+        } else {
+            showPanel()
+            startRecognition(on: rawSelectionImage)
+        }
     }
 
     public func presentSelectedText(_ selectedText: String, anchorScreenPoint: NSPoint?, config: AirSnipConfig) {
-        recognitionTask?.cancel()
+        cancelRecognition()
         suppressCallback = true
         appLanguage = config.language
         showCompletionToast = config.showCompletionToast
@@ -171,11 +197,11 @@ public final class OCRBubbleManager: ObservableObject {
         startRecognition(on: img)
     }
 
-    private func startRecognition(on image: CGImage) {
+    private func startRecognition(on image: CGImage, showFallbackPanel: (() -> Void)? = nil) {
         let interval = Self.timing.beginInterval("OCR request to result", id: Self.timing.makeSignpostID())
         prewarmTask?.cancel()
         prewarmTask = nil
-        recognitionTask?.cancel()
+        cancelRecognition()
         self.isRecognizing = true
         self.errorMessage = nil
         self.text = ""
@@ -185,42 +211,72 @@ public final class OCRBubbleManager: ObservableObject {
 
         let lang = selectedLanguage
         let wantBarcodes = detectBarcodesEnabled
+        let recognizeImage = recognizeImage
+
+        if showFallbackPanel != nil {
+            recognitionProgressTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                self.recognitionProgressToast = ToastHUD.show(
+                    L10n.tr("正在识别", "Recognizing Text", in: self.appLanguage),
+                    kind: .information, duration: .infinity
+                )
+            }
+        }
 
         recognitionTask = Task { [weak self] in
             defer { Self.timing.endInterval("OCR request to result", interval) }
             do {
-                let result = try await LocalVisionOCR.recognizeInBackground(
-                    cgImage: image, languagePreference: lang, detectBarcodes: wantBarcodes
-                )
+                let result = try await recognizeImage(image, lang, wantBarcodes)
                 guard !Task.isCancelled, let self else { return }
+                self.stopRecognitionProgress()
                 self.isRecognizing = false
                 self.barcodes = result.barcodes
                 self.rawRecognizedText = result.rawText
                 self.paragraphRecognizedText = result.paragraphText
 
-                if result.isEmpty {
+                guard !result.isEmpty else {
                     self.errorMessage = L10n.tr("未识别到文字", "No text detected", in: self.appLanguage)
-                } else {
-                    let chosen: String
-                    if result.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        chosen = result.barcodes.joined(separator: "\n")
-                        self.rawRecognizedText = chosen
-                        self.paragraphRecognizedText = chosen
-                    } else {
-                        chosen = self.mergeLineBreaks ? result.paragraphText : result.rawText
-                    }
-                    self.text = chosen
-                    if self.autoCopy {
-                        OutputService.copyStringToClipboard(chosen)
-                        self.triggerCopiedFeedback()
-                    }
-                    if self.translateAfterRecognition { self.requestTranslation() }
+                    showFallbackPanel?()
+                    return
                 }
+
+                let chosen: String
+                if result.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    chosen = result.barcodes.joined(separator: "\n")
+                    self.rawRecognizedText = chosen
+                    self.paragraphRecognizedText = chosen
+                } else {
+                    chosen = self.mergeLineBreaks ? result.paragraphText : result.rawText
+                }
+                self.text = chosen
+                let closePanel = showFallbackPanel != nil || self.shouldCloseAfterCopy
+                let copied = self.autoCopy && self.copyOriginalText(chosen, closePanel: closePanel)
+                if copied && closePanel { return }
+                showFallbackPanel?()
+                if self.translateAfterRecognition { self.requestTranslation() }
             } catch {
                 guard !Task.isCancelled, let self else { return }
+                self.stopRecognitionProgress()
                 self.isRecognizing = false
                 self.errorMessage = L10n.tr("识别失败：\(error.localizedDescription)", "OCR failed: \(error.localizedDescription)", in: self.appLanguage)
+                showFallbackPanel?()
             }
+        }
+    }
+
+    private func cancelRecognition() {
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        stopRecognitionProgress()
+    }
+
+    private func stopRecognitionProgress() {
+        recognitionProgressTask?.cancel()
+        recognitionProgressTask = nil
+        if let recognitionProgressToast {
+            ToastHUD.dismiss(recognitionProgressToast)
+            self.recognitionProgressToast = nil
         }
     }
 
@@ -241,8 +297,28 @@ public final class OCRBubbleManager: ObservableObject {
 
     public func copyCurrentText() {
         guard !text.isEmpty else { return }
-        OutputService.copyStringToClipboard(text)
-        triggerCopiedFeedback()
+        copyOriginalText(text, closePanel: shouldCloseAfterCopy)
+    }
+
+    private var shouldCloseAfterCopy: Bool {
+        closeAfterCopy && !isTranslationVisible
+    }
+
+    @discardableResult
+    private func copyOriginalText(_ text: String, closePanel: Bool) -> Bool {
+        guard writeText(text) else {
+            ToastHUD.show(L10n.tr("无法复制识别结果", "Could Not Copy OCR Result", in: appLanguage), kind: .warning)
+            return false
+        }
+        if closePanel {
+            dismiss()
+            if showCompletionToast {
+                ToastHUD.show(L10n.tr("已复制", "Copied", in: appLanguage), kind: .success)
+            }
+        } else {
+            triggerCopiedFeedback()
+        }
+        return true
     }
 
     public func copyBarcode(_ payload: String) {
@@ -348,14 +424,14 @@ public final class OCRBubbleManager: ObservableObject {
     }
 
     public func dismiss() {
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        cancelRecognition()
         isRecognizing = false
         copyFeedbackTask?.cancel()
         copiedFeedback = false
         copiedTranslationFeedback = false
         clearTranslation()
         panel?.orderOut(nil)
+        sourceImage = nil
     }
 
     var preferredPanelHeight: CGFloat {

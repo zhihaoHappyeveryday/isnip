@@ -1566,6 +1566,24 @@ private struct EditorDefaultsPane: View {
 
 // MARK: - 6. OCR & Translation (OCR 与翻译 / OCR & Translate)
 
+private struct OCRCopyCloseSettingRow: View {
+    @Environment(\.appLanguage) private var lang
+    @ObservedObject var app: AirSnipAppController
+    var subtitle: String? = nil
+
+    var body: some View {
+        MagpieSettingRow(
+            title: L10n.tr("复制后关闭识别框", "Close OCR Window After Copying", in: lang),
+            subtitle: subtitle
+        ) {
+            MagpieBooleanSwitch(isOn: Binding(
+                get: { app.config.ocr.closeAfterCopy },
+                set: { enabled in app.updateConfig { $0.ocr.closeAfterCopy = enabled } }
+            ))
+        }
+    }
+}
+
 private struct OCRSettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appLanguage) private var lang
@@ -1604,6 +1622,10 @@ private struct OCRSettingsPane: View {
                     )
                 )
             }
+
+            MagpieRowDivider()
+
+            OCRCopyCloseSettingRow(app: app)
 
             MagpieRowDivider()
 
@@ -2161,6 +2183,9 @@ private struct SettingsSearchResultsPane: View {
                         )
                     )
                 })
+            },
+            SearchEntry(id: "ocr.copy-close", keywords: "OCR 与翻译 复制后关闭识别框 复制原文 关闭识别框 close ocr window after copying") {
+                AnyView(OCRCopyCloseSettingRow(app: app, subtitle: SettingsTab.ocr.title(in: lang)))
             },
             SearchEntry(id: "ocr.qr", keywords: "OCR 与翻译 二维码 条码 自动复制 合并换行 qr barcode") {
                 AnyView(MagpieSettingRow(title: L10n.tr("识别二维码与条码", "Detect QR & Barcodes", in: lang), subtitle: SettingsTab.ocr.title(in: lang)) {
