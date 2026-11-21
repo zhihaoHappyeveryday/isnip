@@ -19,12 +19,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private var activeLongshotSession: LongshotSessionController?
     private let lastPinnedClipboardCopyURL: URL
     private var lastPinnedClipboardCopy: OutputService.ClipboardCopyID?
+    private var preparedClipboardPin: OutputService.ClipboardPin?
     private var isCapturingSnapshots = false
     private let selectionTranslation = SelectionTranslationController()
     private var selectionSourceApplication: NSRunningApplication?
     public let configURL: URL
-    private var configUpdates: [(mutate: (inout AirSnipConfig) -> Void, completion: () -> Void)] = []
-    private var isUpdatingHistoryLimit = false
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
@@ -183,38 +182,29 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     }
 
     public func updateConfig(_ mutate: @escaping (inout AirSnipConfig) -> Void, completion: @escaping () -> Void = {}) {
-        configUpdates.append((mutate, completion))
-        applyConfigUpdates()
-    }
-
-    private func applyConfigUpdates() {
-        guard !isUpdatingHistoryLimit else { return }
-        while !configUpdates.isEmpty {
-            let update = configUpdates.removeFirst()
-            var next = config
-            update.mutate(&next)
-            guard next.pinHistoryLimit != config.pinHistoryLimit else {
-                applyConfig(next, save: true)
-                update.completion()
-                continue
+        pinManager.performHistoryAction { [weak self] in
+            guard let self else {
+                completion()
+                return
             }
-
-            isUpdatingHistoryLimit = true
+            var next = self.config
+            mutate(&next)
+            guard next.pinHistoryLimit != self.config.pinHistoryLimit else {
+                self.applyConfig(next, save: true)
+                completion()
+                return
+            }
             let requested = next
-            pinManager.updateHistoryLimit(to: requested.pinHistoryLimit, savingConfig: { [configURL] limit in
+            self.pinManager.updateHistoryLimit(to: requested.pinHistoryLimit, savingConfig: { [configURL = self.configURL] limit in
                 var saved = requested
                 saved.pinHistoryLimit = limit
                 try saved.save(to: configURL)
             }, completion: { [weak self] limit in
-                guard let self else { return }
                 var applied = requested
                 applied.pinHistoryLimit = limit
-                self.applyConfig(applied, save: false)
-                update.completion()
-                self.isUpdatingHistoryLimit = false
-                self.applyConfigUpdates()
+                self?.applyConfig(applied, save: false)
+                completion()
             })
-            return
         }
     }
 
@@ -623,10 +613,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             return
         }
         let clip = OutputService.readPinFromClipboard(
-            from: pasteboard ?? pinManager.pasteboard, excluding: lastPinnedClipboardCopy
+            from: pasteboard ?? pinManager.pasteboard, excluding: lastPinnedClipboardCopy, reusing: preparedClipboardPin
         )
-        pinManager.restoreLastClosedPin(config: config, unlessHandled: { [weak self] in
+        preparedClipboardPin = clip
+        pinManager.restoreLastClosedPin(config: config, handleClipboard: { [weak self] in
             guard let self, let clip, clip.copyID != self.lastPinnedClipboardCopy else { return false }
+            if self.preparedClipboardPin?.copyID == clip.copyID { self.preparedClipboardPin = nil }
             self.pinFromClipboard(clip)
             return true
         }, completion: completion)
@@ -850,20 +842,30 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
         isSavingOnQuit = true
         controller.ocrBubbleManager.dismiss()
 
-        let progress = Timer(timeInterval: 1, repeats: false) { _ in
-            MainActor.assumeIsolated {
-                ToastHUD.show(
-                    L10n.tr("正在保存贴图历史", "Saving pin history", in: controller.config.language),
-                    kind: .information, duration: .infinity
-                )
+        let progress = scheduleQuitTimer(after: 1) {
+            ToastHUD.show(
+                L10n.tr("正在保存贴图历史", "Saving pin history", in: controller.config.language),
+                kind: .information, duration: .infinity
+            )
+        }
+        controller.pinManager.saveOpenPinsOnQuit { [self] in
+            progress.invalidate()
+            if controller.pinManager.showQuitHistoryFailure() {
+                scheduleQuitTimer(after: 1.5) {
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+            } else {
+                sender.reply(toApplicationShouldTerminate: true)
             }
         }
-        RunLoop.main.add(progress, forMode: .common)
-        controller.pinManager.saveOpenPinsOnQuit {
-            progress.invalidate()
-            sender.reply(toApplicationShouldTerminate: true)
-        }
         return .terminateLater
+    }
+
+    @discardableResult
+    private func scheduleQuitTimer(after delay: TimeInterval, _ action: @escaping @MainActor () -> Void) -> Timer {
+        let timer = Timer(timeInterval: delay, repeats: false) { _ in MainActor.assumeIsolated(action) }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

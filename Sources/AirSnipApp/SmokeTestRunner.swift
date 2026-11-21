@@ -916,7 +916,8 @@ public enum SmokeTestRunner {
             fputs("FAIL: Pin or Restore should handle plain text through the status menu\n", stderr)
             return false
         }
-        guard let textPin = pins.windows.last, pins.count == 1, textPin !== older, textPin !== newer,
+        guard waitForPinHistoryWork({ pins.count == 1 }),
+              let textPin = pins.windows.last, textPin !== older, textPin !== newer,
               textPin.window.isVisible, textPin.originalText == text, pasteboard.string(forType: .string) == text else {
             fputs("FAIL: New clipboard text should be pinned before restoring closed images\n", stderr)
             return false
@@ -1320,7 +1321,7 @@ public enum SmokeTestRunner {
     private static func restoreHistoryAndWait(_ history: ClosedPinHistory) -> PinSnapshot? {
         var snapshot: PinSnapshot?
         waitForPinOperation { done in
-            history.restoreLast(if: { _ in true }, present: { restored in
+            history.restoreLast(if: { _ in true }, accept: { restored in
                 snapshot = restored
                 return true
             }, completion: { restored, _ in
@@ -1425,6 +1426,7 @@ public enum SmokeTestRunner {
 
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        waitForPinOperation(app.pinManager.finishHistoryWrites)
         guard (try? Data(contentsOf: currentImage)) == replacementData else {
             fputs("FAIL: Deferred cleanup should leave files in a replacement history directory intact\n", stderr)
             return false
@@ -1486,6 +1488,7 @@ public enum SmokeTestRunner {
             app.settingsController = nil
             pasteboard.releaseGlobally()
         }
+        waitForPinOperation(pins.finishHistoryWrites)
         guard !files.fileExists(atPath: oldSession.path), files.fileExists(atPath: otherDirectory.path) else {
             fputs("FAIL: Legacy cleanup should remove only the registered session directories\n", stderr)
             return false
@@ -1757,21 +1760,26 @@ public enum SmokeTestRunner {
             return false
         }
         second.closeSelf()
-        // Capture the cleanup registration before the main-actor completion publishes the second pin.
-        let interruptedManifest = try Data(contentsOf: manifest)
         waitForPinOperation(app.pinManager.finishHistoryWrites)
         let files = FileManager.default
         let items = files.enumerator(at: root, includingPropertiesForKeys: nil)
         guard pinHistoryPNGCount(at: root) == 2,
+              var interrupted = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any],
+              var records = interrupted["records"] as? [[String: Any]], records.count == 2,
+              let pendingFiles = records.removeLast()["files"],
               let textFile = items?.allObjects.compactMap({ $0 as? URL }).first(where: { $0.pathExtension == "txt" }) else {
             fputs("FAIL: Could not prepare the interrupted pin's PNG and text files\n", stderr)
             return false
         }
+        // Recreate the manifest and partial files left by an interruption before the second pin was published.
+        interrupted["records"] = records
+        interrupted["filesToRemove"] = [pendingFiles]
         try files.removeItem(at: textFile)
-        try interruptedManifest.write(to: manifest, options: .atomic)
+        try JSONSerialization.data(withJSONObject: interrupted).write(to: manifest, options: .atomic)
 
         app.settingsController = nil
         app = AirSnipAppController(configURL: configURL, pinPasteboard: pasteboard)
+        waitForPinOperation(app.pinManager.finishHistoryWrites)
         guard pinHistoryPNGCount(at: root) == 1 else {
             fputs("FAIL: Reopening should clean up the interrupted pin and preserve the fully saved pin\n", stderr)
             return false

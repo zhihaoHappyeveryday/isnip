@@ -11,6 +11,10 @@ public final class PinManager: ObservableObject {
     private let historyCloseTime: () -> Date
     private let historyRootURL: (AirSnipConfig) -> URL
     private var historyMountObserver: AnyCancellable?
+    private var historyActions: [() -> Void] = []
+    private var isSubmittingHistoryActions = false
+    private var isUpdatingHistoryLimit = false
+    private var quitHistoryFailure: ClosedPinHistory.Failure?
     private(set) var isQuitting = false
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
     public var onRequestOCRPin: ((PinWindowController) -> Void)?
@@ -35,7 +39,12 @@ public final class PinManager: ObservableObject {
         self.historyRootURL = historyRootURL
         history = ClosedPinHistory(configURL: historyConfigURL, limit: historyLimit)
         history.onFailure = { [weak self] failure in
-            self?.showHistoryFailure(failure)
+            guard let self else { return }
+            if self.isQuitting {
+                self.quitHistoryFailure = failure
+            } else {
+                self.showHistoryFailure(failure)
+            }
         }
         historyMountObserver = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
             .receive(on: DispatchQueue.main)
@@ -96,31 +105,71 @@ public final class PinManager: ObservableObject {
     }
 
     private func rememberClosedPins(_ pins: [PinWindowController], closedAt: Date) {
-        let config = getConfig?() ?? AirSnipConfig()
-        history.remember(
-            pins.map { $0.snapshot() }, historyRoot: historyRootURL(config), closedAt: closedAt
-        )
+        let snapshots = pins.map { $0.snapshot() }
+        performHistoryAction { [weak self] in
+            guard let self else { return }
+            let config = self.getConfig?() ?? AirSnipConfig()
+            self.history.remember(snapshots, historyRoot: self.historyRootURL(config), closedAt: closedAt)
+        }
+    }
+
+    // A settings change must be applied before submitting any later close or restore.
+    func performHistoryAction(_ action: @escaping () -> Void) {
+        historyActions.append(action)
+        submitHistoryActions()
+    }
+
+    private func submitHistoryActions() {
+        guard !isSubmittingHistoryActions else { return }
+        isSubmittingHistoryActions = true
+        defer { isSubmittingHistoryActions = false }
+        while !isUpdatingHistoryLimit, !historyActions.isEmpty {
+            historyActions.removeFirst()()
+        }
     }
 
     func updateHistoryLimit(to limit: Int, savingConfig: @escaping (Int) throws -> Void, completion: @escaping (Int) -> Void) {
-        history.updateLimit(to: limit, savingConfig: savingConfig, completion: completion)
+        isUpdatingHistoryLimit = true
+        history.updateLimit(to: limit, savingConfig: savingConfig) { [weak self] applied in
+            completion(applied)
+            self?.isUpdatingHistoryLimit = false
+            self?.submitHistoryActions()
+        }
     }
 
     func finishHistoryWrites(completion: @escaping () -> Void) {
-        history.finishPendingWrites(completion: completion)
+        performHistoryAction { [history] in
+            history.finishPendingWrites(completion: completion)
+        }
     }
 
     public func restoreLastClosedPin(
         config: AirSnipConfig,
-        unlessHandled: @escaping () -> Bool = { false },
+        handleClipboard: @escaping () -> Bool = { false },
         completion: @escaping () -> Void = {}
+    ) {
+        performHistoryAction { [weak self] in
+            guard let self else {
+                completion()
+                return
+            }
+            self.restoreAfterSettings(config: config, handleClipboard: handleClipboard, completion: completion)
+        }
+    }
+
+    private func restoreAfterSettings(
+        config: AirSnipConfig,
+        handleClipboard: @escaping () -> Bool,
+        completion: @escaping () -> Void
     ) {
         var openedPin: PinWindowController?
         history.restoreLast(if: { [weak self] hasHistory in
-            guard let self, !self.isQuitting, !unlessHandled() else { return false }
+            guard let self, !self.isQuitting, !handleClipboard() else { return false }
             return !hasHistory || self.canOpenPin(config: self.getConfig?() ?? config)
-        }, present: { [weak self] snapshot in
-            guard let self, !self.isQuitting, self.canOpenPin(config: self.getConfig?() ?? config) else { return false }
+        }, accept: { [weak self] snapshot in
+            guard let self, !self.isQuitting else { return false }
+            guard let snapshot else { return true }
+            guard self.canOpenPin(config: self.getConfig?() ?? config) else { return false }
             let pin = PinWindowController(restoring: snapshot, manager: self)
             openedPin = pin
             self.windows.append(pin)
@@ -190,7 +239,15 @@ public final class PinManager: ObservableObject {
     func saveOpenPinsOnQuit(completion: @escaping () -> Void) {
         isQuitting = true
         closeAll()
-        history.finishPendingWrites(enforcingLimit: true, completion: completion)
+        performHistoryAction { [history] in
+            history.finishPendingWrites(enforcingLimit: true, completion: completion)
+        }
+    }
+
+    func showQuitHistoryFailure() -> Bool {
+        guard let quitHistoryFailure else { return false }
+        showHistoryFailure(quitHistoryFailure)
+        return true
     }
 
     public func restoreAllClickThrough() {

@@ -230,18 +230,18 @@ final class ClosedPinHistory: @unchecked Sendable {
 
     func restoreLast(
         if shouldRestore: @escaping @MainActor (_ hasHistory: Bool) -> Bool,
-        present: @escaping @MainActor (PinSnapshot) -> Bool,
+        accept: @escaping @MainActor (PinSnapshot?) -> Bool,
         completion: @escaping @MainActor (_ restored: Bool, _ skippedUnreadable: Bool) -> Void
     ) {
         queue.async {
-            let result = self.restoreOnQueue(if: shouldRestore, present: present)
+            let result = self.restoreOnQueue(if: shouldRestore, accept: accept)
             Self.onMain { completion(result.restored, result.skippedUnreadable) }
         }
     }
 
     private func restoreOnQueue(
         if shouldRestore: @escaping @MainActor (Bool) -> Bool,
-        present: @escaping @MainActor (PinSnapshot) -> Bool
+        accept: @escaping @MainActor (PinSnapshot?) -> Bool
     ) -> (restored: Bool, skippedUnreadable: Bool) {
         let hasHistory = limit > 0 && !entries.isEmpty
         guard Self.askMain({ shouldRestore(hasHistory) }) else { return (false, false) }
@@ -250,17 +250,17 @@ final class ClosedPinHistory: @unchecked Sendable {
 
         var skippedUnreadable = false
         for index in entries.indices.reversed() {
+            let read = Self.readSnapshot(entries[index])
             let snapshot: PinSnapshot?
-            switch Self.readSnapshot(entries[index]) {
+            switch read {
             case .loaded(let restored):
-                guard Self.askMain({ present(restored) }) else { return (false, skippedUnreadable) }
                 snapshot = restored
-            case .rootUnavailable:
-                continue
-            case .unreadable:
+            case .rootUnavailable, .unreadable:
                 snapshot = nil
             }
 
+            guard Self.askMain({ accept(snapshot) }) else { return (false, skippedUnreadable) }
+            if case .rootUnavailable = read { continue }
             var next = entries
             next.remove(at: index)
             guard discard(entries[index...index], keeping: next) else {
@@ -328,6 +328,7 @@ final class ClosedPinHistory: @unchecked Sendable {
             }
             return
         }
+        guard !writeCompletions.isEmpty else { return }
         let completions = writeCompletions
         writeCompletions.removeAll()
         Self.onMain { completions.forEach { $0() } }

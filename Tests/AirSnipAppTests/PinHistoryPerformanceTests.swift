@@ -43,6 +43,20 @@ final class PinHistoryPerformanceTests: XCTestCase {
     }
 
     @MainActor
+    func testClosingAfterReenablingHistoryUsesTheNewLimit() async throws {
+        try await withHistory([]) { app, _ in
+            app.updateConfig { $0.pinHistoryLimit = 0 }
+            app.updateConfig { $0.pinHistoryLimit = 5 }
+            try self.openPin(width: 64, in: app)
+            app.pinManager.closeAll()
+            await withCheckedContinuation { done in
+                app.triggerPinOrRestore(completion: { done.resume() })
+            }
+            XCTAssertEqual(app.pinManager.windows.map { $0.cgImage.width }, [64])
+        }
+    }
+
+    @MainActor
     private func withHistory(
         _ widths: [Int],
         _ test: (AirSnipAppController, NSPasteboard) async throws -> Void

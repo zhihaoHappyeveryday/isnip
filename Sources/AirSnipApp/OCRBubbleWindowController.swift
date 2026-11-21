@@ -3,6 +3,7 @@ import SwiftUI
 import NaturalLanguage
 import Translation
 import AirSnipCore
+import os
 
 struct TextTranslationRequest: Equatable {
     let id = UUID()
@@ -102,6 +103,7 @@ public final class OCRBubbleManager: ObservableObject {
     private var translateAfterRecognition = false
 
     private var panel: KeyableBubblePanel?
+    private static let timing = OSSignposter(subsystem: "io.zzusec.airsnip", category: "OCR")
     private var prewarmTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
     private var copyFeedbackTask: Task<Void, Never>?
@@ -112,6 +114,7 @@ public final class OCRBubbleManager: ObservableObject {
     public init() {}
 
     func prewarm(languagePreference: String) {
+        Self.timing.emitEvent("OCR startup")
         prewarmTask = LocalVisionOCR.prewarm(languagePreference: languagePreference)
     }
 
@@ -169,6 +172,7 @@ public final class OCRBubbleManager: ObservableObject {
     }
 
     private func startRecognition(on image: CGImage) {
+        let interval = Self.timing.beginInterval("OCR request to result", id: Self.timing.makeSignpostID())
         prewarmTask?.cancel()
         prewarmTask = nil
         recognitionTask?.cancel()
@@ -183,6 +187,7 @@ public final class OCRBubbleManager: ObservableObject {
         let wantBarcodes = detectBarcodesEnabled
 
         recognitionTask = Task { [weak self] in
+            defer { Self.timing.endInterval("OCR request to result", interval) }
             do {
                 let result = try await LocalVisionOCR.recognizeInBackground(
                     cgImage: image, languagePreference: lang, detectBarcodes: wantBarcodes

@@ -578,11 +578,13 @@ public enum OutputService {
 
     static func readPinFromClipboard(
         from pasteboard: NSPasteboard,
-        excluding previousCopy: ClipboardCopyID?
+        excluding previousCopy: ClipboardCopyID?,
+        reusing prepared: ClipboardPin? = nil
     ) -> ClipboardPin? {
         let currentRevision = pasteboard.changeCount
         let copyID = clipboardCopyID(for: pasteboard, currentRevision: currentRevision)
         guard copyID != previousCopy else { return nil }
+        if let prepared, prepared.copyID == copyID, pasteboard.changeCount == currentRevision { return prepared }
         if let image = readPasteboardImage(pasteboard) {
             guard pasteboard.changeCount == currentRevision else { return nil }
             return (image.cgImage, image.pointSize, copyID, nil, false)
@@ -1085,12 +1087,12 @@ public final class GlobalHotkeyManager {
             if status == noErr {
                 if hkID.signature == GlobalHotkeyManager.transientSignature {
                     let id = hkID.id
-                    Task { @MainActor in
+                    DispatchQueue.main.async {
                         GlobalHotkeyManager.sharedInstance?.transientHandler?(id)
                     }
                 } else if hkID.signature == GlobalHotkeyManager.globalSignature,
                           let action = Action(rawValue: hkID.id) {
-                    Task { @MainActor in
+                    DispatchQueue.main.async {
                         GlobalHotkeyManager.sharedInstance?.onTrigger?(action)
                     }
                 }

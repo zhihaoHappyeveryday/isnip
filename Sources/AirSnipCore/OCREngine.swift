@@ -387,7 +387,7 @@ public enum LocalVisionOCR {
         Task(priority: .utility) {
             _ = try? await runInBackground(priority: .utility) { work in
                 try Task.checkCancellation()
-                let interval = timing.beginInterval("OCR prewarm")
+                let interval = timing.beginInterval("OCR prewarm", id: timing.makeSignpostID())
                 defer { timing.endInterval("OCR prewarm", interval) }
                 guard let image = makeWarmupImage() else { return }
                 let handler = VNImageRequestHandler(cgImage: image, options: [:])
@@ -445,7 +445,7 @@ public enum LocalVisionOCR {
         detectBarcodes: Bool
     ) async throws -> OCRRecognitionResult {
         try await runInBackground(priority: .userInitiated) { work in
-            let interval = timing.beginInterval("OCR recognition")
+            let interval = timing.beginInterval("OCR recognition", id: timing.makeSignpostID())
             defer { timing.endInterval("OCR recognition", interval) }
             return try recognizeDetailed(
                 cgImage: cgImage, languagePreference: languagePreference, detectBarcodes: detectBarcodes
@@ -486,8 +486,13 @@ public enum LocalVisionOCR {
                 }
 
                 let handler = VNImageRequestHandler(cgImage: image, options: [:])
-                let observations = try performTextRecognition(languagePreference: languagePreference) {
-                    try perform($0, handler)
+                let observations: [VNRecognizedTextObservation]
+                do {
+                    let interval = timing.beginInterval("OCR text", id: timing.makeSignpostID())
+                    defer { timing.endInterval("OCR text", interval) }
+                    observations = try performTextRecognition(languagePreference: languagePreference) {
+                        try perform($0, handler)
+                    }
                 }
 
                 for observation in observations {
@@ -525,6 +530,8 @@ public enum LocalVisionOCR {
 
                 if detectBarcodes {
                     try Task.checkCancellation()
+                    let interval = timing.beginInterval("OCR barcodes", id: timing.makeSignpostID())
+                    defer { timing.endInterval("OCR barcodes", interval) }
                     // Barcode detection is optional: a failure must not discard successfully recognized text.
                     let barcodeRequest = VNDetectBarcodesRequest()
                     let barcodes: [VNBarcodeObservation]
