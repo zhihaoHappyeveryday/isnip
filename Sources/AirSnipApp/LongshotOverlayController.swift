@@ -504,7 +504,27 @@ public final class LongshotSessionController: ObservableObject {
                 guard source.postScroll(points) else { throw LongshotCaptureSource.Failure.targetChanged }
                 pendingScroll = points
             }
-            let observation = try await observeScroll(source, delays: [scrollSpeed.settleMilliseconds, 75, 150, 260])
+            var observation = try await observeScroll(source, delays: [scrollSpeed.settleMilliseconds, 75, 150, 260])
+            if isAutoScrolling, observation.result == .failed, source.isAtEnd(observation.position) {
+                pendingScroll = nil
+                if source.isAtEnd(confirmedPosition), canvas?.isAtCapturedEnd == true, observation.offset == 0 {
+                    stopWhenStill(atEnd: true)
+                    return
+                }
+                if tailRecovery == nil {
+                    // Keep the same tail recovery active if the next frame needs a rollback.
+                    rememberIncompleteTail(observation)
+                    let tail = try await observeScroll(source, delays: [150])
+                    let capturedEnd = source.isAtEnd(tail.position) && canvas?.isAtCapturedEnd == true
+                    if tail.result != .failed, tail.result != .still || capturedEnd || tailRecovery == nil {
+                        observation = tail
+                        if isAutoScrolling, tail.result != .limitReached, capturedEnd {
+                            stopWhenStill(atEnd: true)
+                            return
+                        }
+                    }
+                }
+            }
             if !isAutoScrolling {
                 pendingScroll = nil
                 captureLoopTask = nil
@@ -548,13 +568,6 @@ public final class LongshotSessionController: ObservableObject {
                 return
             case .failed:
                 pendingScroll = nil
-                if measuredEnd {
-                    if source.isAtEnd(confirmedPosition), canvas?.isAtCapturedEnd == true, observation.offset == 0 {
-                        stopWhenStill(atEnd: true)
-                        return
-                    }
-                    rememberIncompleteTail(observation)
-                }
                 var recovered = false
                 if recoveredAtHeight != pixelHeight {
                     recoveredAtHeight = pixelHeight
