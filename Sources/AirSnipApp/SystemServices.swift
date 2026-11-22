@@ -105,7 +105,6 @@ public enum ScreenCaptureService {
 
     public struct GlobalWindowDescriptor: Sendable {
         public let windowID: UInt32
-        public let processID: pid_t
         public let ownerName: String
         public let title: String
         public let globalRectTopDown: ASRect
@@ -143,7 +142,6 @@ public enum ScreenCaptureService {
             let title = (entry[kCGWindowName as String] as? String) ?? ""
             descriptors.append(GlobalWindowDescriptor(
                 windowID: winID,
-                processID: entry[kCGWindowOwnerPID as String] as? pid_t ?? 0,
                 ownerName: ownerName,
                 title: title,
                 globalRectTopDown: ASRect(x: cgRect.origin.x, y: cgRect.origin.y, width: cgRect.width, height: cgRect.height)
@@ -260,37 +258,6 @@ public enum ScreenCaptureService {
         }
         return results
     }
-
-    /// Captures a specific sub-region of a single display for live Longshot scrolling, excluding AirSnip's own windows.
-    public static func captureDisplayRegion(
-        screen: NSScreen,
-        localTopDownRect: ASRect,
-        excludingWindowNumbers: Set<Int>
-    ) async -> PixelBufferRGBA? {
-        guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
-            return nil
-        }
-        do {
-            let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let scDisplay = shareable.displays.first(where: { $0.displayID == screenNumber }) else {
-                return nil
-            }
-            let excluded = shareable.windows.filter { excludingWindowNumbers.contains(Int($0.windowID)) }
-            let filter = SCContentFilter(display: scDisplay, excludingWindows: excluded)
-            let scale = Double(screen.backingScaleFactor)
-            let cfg = SCStreamConfiguration()
-            cfg.sourceRect = localTopDownRect.cgRect
-            cfg.width = max(1, Int((localTopDownRect.width * scale).rounded()))
-            cfg.height = max(1, Int((localTopDownRect.height * scale).rounded()))
-            cfg.showsCursor = false
-            cfg.capturesAudio = false
-
-            let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
-            return PixelBufferRGBA(cgImage: img)
-        } catch {
-            return nil
-        }
-    }
 }
 
 @MainActor
@@ -367,42 +334,9 @@ public enum AccessibilityService {
         )
     }
 
-    /// Ensures the cursor sits inside the target viewport before emitting synthetic wheel events so WindowServer routes scrolling to the target view.
-    public static func moveCursorIntoViewportIfNeeded(
-        screen: NSScreen,
-        viewportTopDown: ASRect,
-        avoidAppKitRect: NSRect? = nil
-    ) {
-        let sFrame = screen.frame
-        let mouseAppKit = NSEvent.mouseLocation
-        let localX = Double(mouseAppKit.x - sFrame.minX)
-        let localY = Double(sFrame.maxY - mouseAppKit.y)
-
-        let insetX = min(28.0, viewportTopDown.width * 0.18)
-        let insetY = min(28.0, viewportTopDown.height * 0.18)
-        let inner = ASRect(
-            x: viewportTopDown.minX + insetX,
-            y: viewportTopDown.minY + insetY,
-            width: max(4.0, viewportTopDown.width - insetX * 2.0),
-            height: max(4.0, viewportTopDown.height - insetY * 2.0)
-        )
-        let overlapsAvoid = avoidAppKitRect?.contains(mouseAppKit) ?? false
-        if !overlapsAvoid && sFrame.contains(mouseAppKit) && inner.contains(ASPoint(localX, localY)) {
-            return
-        }
-
-        let targetLocal = ASPoint(
-            viewportTopDown.midX,
-            viewportTopDown.minY + viewportTopDown.height * 0.46
-        )
-        let cgPt = globalCGPoint(on: screen, localTopDownPoint: targetLocal)
-        CGWarpMouseCursorPosition(cgPt)
-        CGAssociateMouseAndMouseCursorPosition(1)
-    }
-
     public static let syntheticScrollEventTag: Int64 = 0x4953_4E50
 
-    /// Posts a pixel scroll tick. Positive distances scroll down, negative distances scroll up.
+    /// Posts a continuous pixel-accurate downward scroll tick without trackpad momentum tail.
     public static func postPixelScroll(at globalCGPoint: CGPoint, downwardPoints: Int) {
         guard downwardPoints != 0,
               let src = CGEventSource(stateID: .hidSystemState),

@@ -396,15 +396,14 @@ public enum LongshotStitcher {
         prevSig: RowSignatures,
         nextSig: RowSignatures,
         firstRGBA: [UInt8],
-        params: LongshotParams,
-        searchFullEdges: Bool = false
+        params: LongshotParams
     ) -> (top: Int, bottom: Int) {
         let height = prevSig.height
         let width = prevSig.width
         let allBins = Array(0..<prevSig.binCount)
         guard height > 0, !allBins.isEmpty else { return (0, 0) }
 
-        let maxTop = searchFullEdges ? height : max(params.minFixedRows, (height * 42) / 100)
+        let maxTop = max(params.minFixedRows, (height * 42) / 100)
         var top = 0
         while top < min(height, maxTop) && prevSig.rowDiff(rowA: top, other: nextSig, rowB: top, bins: allBins) <= 3.2 {
             top += 1
@@ -414,7 +413,7 @@ public enum LongshotStitcher {
             top = 0
         }
 
-        let maxBottom = searchFullEdges ? height : max(params.minFixedRows, (height * 35) / 100)
+        let maxBottom = max(params.minFixedRows, (height * 35) / 100)
         var bottom = 0
         while bottom < min(height, maxBottom)
             && prevSig.rowDiff(rowA: height - 1 - bottom, other: nextSig, rowB: height - 1 - bottom, bins: allBins) <= 3.2 {
@@ -605,7 +604,7 @@ public enum LongshotStitcher {
         firstRGBA: [UInt8],
         nextRGBA: [UInt8],
         params: LongshotParams,
-        searchFullEdges: Bool = false
+        includesWindowCorners: Bool = true
     ) -> (headerHeight: Int, footerHeight: Int, activeBins: [Int], match: LongshotMatch)? {
         let height = firstSig.height
         let width = firstSig.width
@@ -622,8 +621,7 @@ public enum LongshotStitcher {
             prevSig: firstSig,
             nextSig: nextSig,
             firstRGBA: firstRGBA,
-            params: params,
-            searchFullEdges: searchFullEdges
+            params: params
         )
 
         // Probe interior vertical bands so unstripped sticky headers (or tab bars with changing favicons) never poison shift discovery
@@ -640,7 +638,7 @@ public enum LongshotStitcher {
 
         var bestProbe: (match: LongshotMatch, score: Double, probeTop: Int, probeBottom: Int)?
         for band in probeBands {
-            if height - band.top - band.bottom <= 8 { continue }
+            if height - band.top - band.bottom < 20 { continue }
             let candidate = locateWithSignaturesScored(
                 prev: firstSig,
                 next: nextSig,
@@ -649,7 +647,6 @@ public enum LongshotStitcher {
                 activeBins: activeBins,
                 params: params
             )
-            if candidate.isAmbiguous { return nil }
             guard candidate.match.confident, candidate.match.offset != 0 else { continue }
             if let existing = bestProbe {
                 if candidate.score > existing.score + 0.012 {
@@ -756,14 +753,16 @@ public enum LongshotStitcher {
             }
         }
 
-        refinedBottom = detectBottomCornerCapRows(
-            firstRGBA: firstRGBA,
-            nextRGBA: nextRGBA,
-            width: width,
-            height: height,
-            headerHeight: refinedTop,
-            currentFooter: refinedBottom
-        )
+        if includesWindowCorners {
+            refinedBottom = detectBottomCornerCapRows(
+                firstRGBA: firstRGBA,
+                nextRGBA: nextRGBA,
+                width: width,
+                height: height,
+                headerHeight: refinedTop,
+                currentFooter: refinedBottom
+            )
+        }
 
         let finalResult = locateWithSignaturesScored(
             prev: firstSig,
@@ -773,7 +772,6 @@ public enum LongshotStitcher {
             activeBins: activeBins,
             params: params
         )
-        if finalResult.isAmbiguous { return nil }
         if finalResult.match.confident && finalResult.match.offset != 0 {
             return (refinedTop, refinedBottom, activeBins, finalResult.match)
         }
@@ -820,84 +818,22 @@ public enum LongshotStitcher {
         ).match
     }
 
-    struct ScoredMatch {
-        let match: LongshotMatch
-        let score: Double
-        var isAmbiguous = false
-    }
-
-    private struct ShiftCandidate {
-        let offset: Int
-        let score: Double
-        let quality: Double
-        var refreshRows = 0
-    }
-
-    private struct ShiftSearch {
-        private(set) var best: ShiftCandidate?
-        private var alternativeQuality = -Double.infinity
-
-        var isAmbiguous: Bool {
-            guard let best else { return false }
-            // Overlap length can break a ranking tie, but it cannot prove which repeat was visible.
-            return alternativeQuality >= best.quality - 0.008
-        }
-
-        mutating func consider(_ candidate: ShiftCandidate, minimumImprovement: Double) {
-            if let best {
-                if candidate.score <= best.score + minimumImprovement {
-                    alternativeQuality = max(alternativeQuality, candidate.quality)
-                    return
-                }
-                alternativeQuality = max(alternativeQuality, best.quality)
-            }
-            best = candidate
-        }
-
-        mutating func merge(_ other: ShiftSearch) {
-            if let candidate = other.best { consider(candidate, minimumImprovement: 0) }
-            alternativeQuality = max(alternativeQuality, other.alternativeQuality)
-        }
-    }
-
     static func locateWithSignaturesScored(
         prev: RowSignatures,
         next: RowSignatures,
         fixedTop: Int,
         fixedBottom: Int,
         activeBins: [Int],
-        params: LongshotParams,
-        verifyStationary: Bool = false
-    ) -> ScoredMatch {
+        params: LongshotParams
+    ) -> (match: LongshotMatch, score: Double) {
         let height = prev.height
         let ct = fixedTop
         let contentH = max(0, height - fixedTop - fixedBottom)
-        let noMatch = LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false)
-        guard contentH >= 8, prev.binCount > 0, next.binCount == prev.binCount else {
-            return ScoredMatch(match: noMatch, score: 0)
+        let allBins = Array(0..<prev.binCount)
+        if contentH < 8 || prev.binCount == 0 || next.binCount != prev.binCount {
+            return (LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false), 0)
         }
-        let bins = activeBins.isEmpty ? Array(0..<prev.binCount) : activeBins
-
-        func stationary(quality: Double, refreshRows: Int = 0) -> ScoredMatch {
-            let end = ct + contentH
-            return ScoredMatch(
-                match: LongshotMatch(offset: 0, startRow: end, endRow: end, confident: true, overlapRefreshRows: refreshRows),
-                score: quality
-            )
-        }
-
-        func resolve(_ search: ShiftSearch) -> ScoredMatch? {
-            guard let best = search.best else { return nil }
-            if search.isAmbiguous { return ScoredMatch(match: noMatch, score: 0, isAmbiguous: true) }
-            let below = best.offset > 0
-            let match = LongshotMatch(
-                offset: best.offset,
-                startRow: below ? ct + contentH - best.offset : ct,
-                endRow: below ? ct + contentH : ct - best.offset,
-                confident: true, overlapRefreshRows: best.refreshRows
-            )
-            return ScoredMatch(match: match, score: best.score)
-        }
+        let bins = activeBins.isEmpty ? allBins : activeBins
 
         // 1. Check stationary (`offset == 0`) across `bins`
         var sameTotal = 0
@@ -916,14 +852,15 @@ public enum LongshotStitcher {
         let minZeroRatio = max(0.90, params.minRatio)
         let minZeroFeatureRatio = max(0.82, params.minRatio - 0.04)
         let zeroFeaturesAgree = (featureCount == 0) || (Double(featureSame) / Double(featureCount) >= minZeroFeatureRatio)
-        let isStationary = totalZeroRatio >= minZeroRatio && zeroFeaturesAgree
-        if isStationary, !verifyStationary { return stationary(quality: totalZeroRatio) }
+        if totalZeroRatio >= minZeroRatio && zeroFeaturesAgree {
+            return (LongshotMatch(offset: 0, startRow: height, endRow: height, confident: true), totalZeroRatio)
+        }
 
         // 2. Search downward (`offset > 0`) and upward (`offset < 0`) scroll shifts up to 92% of `contentH`
         let minOverlap = max(8, min(40, contentH / 12))
         let maxShift = max(1, min((contentH * 92) / 100, contentH - minOverlap))
 
-        var shifts = bestConsistentShift(
+        let down = bestConsistentShift(
             prev: prev,
             next: next,
             ct: ct,
@@ -934,7 +871,7 @@ public enum LongshotStitcher {
             frameHasFeatures: featureCount > 0,
             up: false
         )
-        let upward = bestConsistentShift(
+        let up = bestConsistentShift(
             prev: prev,
             next: next,
             ct: ct,
@@ -946,43 +883,84 @@ public enum LongshotStitcher {
             up: true
         )
 
-        shifts.merge(upward)
-        if isStationary {
-            // After a scroll event, a repeating pattern can look identical at a different position.
-            if let shifted = shifts.best, shifted.quality >= totalZeroRatio - 0.012 {
-                return ScoredMatch(match: noMatch, score: 0, isAmbiguous: true)
+        switch (down, up) {
+        case (nil, nil):
+            // 3. Infinite-scroll / lazy-load fallback: lock onto upper overlap anchor when bottom skeletons turn into real content
+            if let anchored = bestAnchoredUpperBandShift(
+                prev: prev,
+                next: next,
+                ct: ct,
+                ch: contentH,
+                maxShift: maxShift,
+                minRatio: params.minRatio,
+                bins: bins
+            ) {
+                return (
+                    LongshotMatch(
+                        offset: anchored.shift,
+                        startRow: ct + contentH - anchored.shift,
+                        endRow: ct + contentH,
+                        confident: true,
+                        overlapRefreshRows: anchored.refreshRows
+                    ),
+                    anchored.score
+                )
             }
-            return stationary(quality: totalZeroRatio)
-        }
-        if let result = resolve(shifts) { return result }
-
-        // The upper part of the overlap can still align when lazy-loaded rows finish painting.
-        let anchored = bestAnchoredUpperBandShift(
-            prev: prev, next: next, ct: ct, ch: contentH,
-            maxShift: maxShift, minRatio: params.minRatio, bins: bins
-        )
-        if let result = resolve(anchored) { return result }
-
-        if contentH >= 80 {
-            let anchorLength = (contentH * 60) / 100
-            var same = 0
-            var features = 0
-            var sameFeatures = 0
-            for i in 0..<anchorLength {
-                let idx = ct + i
-                let equal = prev.rowsMatch(rowA: idx, other: next, rowB: idx, bins: bins)
-                if equal { same += 1 }
-                if i > 0 && (prev.isVerticalFeature(row: idx, bins: bins) || next.isVerticalFeature(row: idx, bins: bins)) {
-                    features += 1
-                    if equal { sameFeatures += 1 }
+            // Stationary frame where bottom lazy-loaded content expanded in-place (`offset == 0`, upper 60% identical)
+            if contentH >= 80 {
+                let anchorZeroLen = (contentH * 60) / 100
+                var zeroAnchorSame = 0
+                var zeroAnchorFeat = 0
+                var zeroAnchorFeatSame = 0
+                for i in 0..<anchorZeroLen {
+                    let idx = ct + i
+                    let eq = prev.rowsMatch(rowA: idx, other: next, rowB: idx, bins: bins)
+                    if eq { zeroAnchorSame += 1 }
+                    if i > 0 && (prev.isVerticalFeature(row: idx, bins: bins) || next.isVerticalFeature(row: idx, bins: bins)) {
+                        zeroAnchorFeat += 1
+                        if eq { zeroAnchorFeatSame += 1 }
+                    }
+                }
+                if Double(zeroAnchorSame) / Double(anchorZeroLen) >= 0.94
+                    && zeroAnchorFeat >= 4
+                    && Double(zeroAnchorFeatSame) / Double(zeroAnchorFeat) >= 0.90 {
+                    return (
+                        LongshotMatch(
+                            offset: 0,
+                            startRow: ct + contentH,
+                            endRow: ct + contentH,
+                            confident: true,
+                            overlapRefreshRows: contentH - anchorZeroLen
+                        ),
+                        0.94
+                    )
                 }
             }
-            if Double(same) / Double(anchorLength) >= 0.94, features >= 4,
-               Double(sameFeatures) / Double(features) >= 0.90 {
-                return stationary(quality: 0.94, refreshRows: contentH - anchorLength)
+            return (LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false), 0)
+
+        case (let d?, nil):
+            return (
+                LongshotMatch(offset: d.shift, startRow: ct + contentH - d.shift, endRow: ct + contentH, confident: true),
+                d.score
+            )
+        case (nil, let u?):
+            return (
+                LongshotMatch(offset: -u.shift, startRow: ct, endRow: ct + u.shift, confident: true),
+                u.score
+            )
+        case (let d?, let u?):
+            if d.score > u.score + 0.02 || (abs(d.score - u.score) <= 0.02 && d.shift <= u.shift) {
+                return (
+                    LongshotMatch(offset: d.shift, startRow: ct + contentH - d.shift, endRow: ct + contentH, confident: true),
+                    d.score
+                )
+            } else {
+                return (
+                    LongshotMatch(offset: -u.shift, startRow: ct, endRow: ct + u.shift, confident: true),
+                    u.score
+                )
             }
         }
-        return ScoredMatch(match: noMatch, score: 0)
     }
 
     private static func bestAnchoredUpperBandShift(
@@ -993,11 +971,11 @@ public enum LongshotStitcher {
         maxShift: Int,
         minRatio: Double,
         bins: [Int]
-    ) -> ShiftSearch {
-        var search = ShiftSearch()
-        guard ch >= 80 else { return search }
+    ) -> (shift: Int, refreshRows: Int, score: Double)? {
+        guard ch >= 80 else { return nil }
         let strictTotal = max(0.90, min(0.96, minRatio + 0.04))
         let strictFeat = max(0.84, min(0.94, minRatio))
+        var best: (shift: Int, refreshRows: Int, score: Double)?
 
         for s in 1...maxShift {
             let overlap = ch - s
@@ -1040,12 +1018,16 @@ public enum LongshotStitcher {
             let avgDiff = diffSum / Double(anchorLen)
             let fidelityBonus = max(0.0, (4.0 - min(4.0, avgDiff)) / 4.0) * 0.04
             let score = featRatio * 0.70 + totalRatio * 0.26 + fidelityBonus
-            search.consider(
-                ShiftCandidate(offset: s, score: score, quality: score, refreshRows: overlap - anchorLen),
-                minimumImprovement: 0.008
-            )
+            let refreshRows = overlap - anchorLen
+            if let current = best {
+                if score > current.score + 0.008 {
+                    best = (s, refreshRows, score)
+                }
+            } else {
+                best = (s, refreshRows, score)
+            }
         }
-        return search
+        return best
     }
 
     private static func bestConsistentShift(
@@ -1058,9 +1040,9 @@ public enum LongshotStitcher {
         bins: [Int],
         frameHasFeatures: Bool,
         up: Bool
-    ) -> ShiftSearch {
+    ) -> (shift: Int, score: Double)? {
         let minFeatureRatio = max(0.70, minRatio - 0.14)
-        var search = ShiftSearch()
+        var best: (shift: Int, score: Double)?
 
         for s in 1...maxShift {
             let overlap = ch - s
@@ -1116,70 +1098,76 @@ public enum LongshotStitcher {
             let avgDiff = diffSum / Double(overlap)
             let fidelityBonus = max(0.0, (4.0 - min(4.0, avgDiff)) / 4.0) * 0.035
             let overlapBonus = min(0.014, (Double(overlap) / Double(max(1, ch))) * 0.020)
-            let quality = rawScore + fidelityBonus
-            search.consider(
-                ShiftCandidate(offset: up ? -s : s, score: quality + overlapBonus, quality: quality),
-                minimumImprovement: 0.006
-            )
-        }
-        return search
-    }
-}
+            let score = rawScore + fidelityBonus + overlapBonus
 
-public enum LongshotFrameMode: Equatable, Sendable {
-    case manual, automatic, reconnecting
+            if let current = best {
+                if score > current.score + 0.006 {
+                    best = (s, score)
+                }
+            } else {
+                best = (s, score)
+            }
+        }
+        return best
+    }
 }
 
 public enum LongshotStepResult: Equatable, Sendable {
     case appended(offset: Int, rows: Int)
+    case revisited(offset: Int)
     case still
-    case refreshed
-    case overlapping  // The viewport moved within the captured range.
     case failed
     case limitReached
 }
 
-/// Visible pixels from the same scroll area, sampled at the same rectangle for consecutive frames.
-public struct LongshotReference: Sendable {
-    let image: PixelBufferRGBA
-    let bodyRows: Range<Int>
-    let selectionTopInReference: Int?
+/// Pixels from the same window and instant as the output crop. Both rectangles use image pixels.
+public struct LongshotContext: Sendable {
+    public let image: PixelBufferRGBA
+    public let selection: PixelRect
+    public let scrollRegion: PixelRect?
 
-    /// `bodyRows` is measured in the selected frame. Pass the selection's top row relative to
-    /// the sample's top row to map any fixed bars found inside the sample back to the selection.
-    public init(image: PixelBufferRGBA, bodyRows: Range<Int>, selectionTopInReference: Int? = nil) {
+    public init(image: PixelBufferRGBA, selection: PixelRect, scrollRegion: PixelRect? = nil) {
         self.image = image
-        self.bodyRows = bodyRows
-        self.selectionTopInReference = selectionTopInReference
+        self.selection = selection
+        self.scrollRegion = scrollRegion
+    }
+}
+
+/// Independent movement in backing pixels, with the visible vertical range of the moving content when available.
+public struct LongshotScrollMeasurement: Equatable, Sendable {
+    public let offset: Int
+    public let viewportRows: Range<Int>?
+
+    public init(offset: Int, viewportRows: Range<Int>? = nil) {
+        self.offset = offset
+        self.viewportRows = viewportRows
     }
 }
 
 public final class LongshotCanvas {
+    private struct Checkpoint {
+        let offset: Int
+        let signatures: RowSignatures
+    }
+
     public let width: Int
     public let frameHeight: Int
     public let params: LongshotParams
     public let maxHeight: Int
 
-    private struct ReferenceSample {
-        let capture: LongshotReference
-        let signatures: RowSignatures
-        var movingRows: Range<Int>?
-        var viewportTop = 0
-
-        init(_ capture: LongshotReference) {
-            self.capture = capture
-            let image = capture.image
-            signatures = RowSignatures(rgba: image.rgba, width: image.width, height: image.height)
-        }
-    }
-
     private var firstFrame: [UInt8]?
-    private var previousRGBA: [UInt8] = []
-    private var previousSignatures: RowSignatures?
-    private var previousReference: ReferenceSample?
-    private var previousViewportTop = 0
+    private var firstSignatures: RowSignatures?
+    private var prevFrame: [UInt8] = []
+    private var prevSignatures: RowSignatures?
+    private var previousContext: LongshotContext?
+    private var contextBody: Range<Int>?
+    private var checkpoints: [Checkpoint] = []
+    private var currentOffset = 0
+    private var earliestOffset = 0
+    private var furthestOffset = 0
     private var lockedActiveBins: [Int]?
     private var leftSidebarFill: (endX: Int, rowBytes: [UInt8])?
+    private var contextSidebarFills: [(columns: Range<Int>, rowBytes: [UInt8])] = []
 
     private var headerBytes: [UInt8] = []
     public private(set) var headerHeight: Int = 0
@@ -1191,6 +1179,7 @@ public final class LongshotCanvas {
     private var topRowCount: Int = 0
     private var bottomRowsData: [UInt8] = []
     private var bottomRowCount: Int = 0
+    private var visibleTailRows: Int = 0
 
     private var segments: [(prepended: Bool, rows: Int, prevFooter: [UInt8]?)] = []
 
@@ -1204,97 +1193,51 @@ public final class LongshotCanvas {
     public var contentHeight: Int { topRowCount + bottomRowCount }
 
     public var totalHeight: Int {
-        if firstFrame != nil && contentHeight == 0 {
-            return frameHeight
+        if firstFrame != nil {
+            return min(frameHeight, maxHeight) + visibleTailRows
         }
         return headerHeight + contentHeight + footerHeight
     }
 
-    public var canUndo: Bool { !segments.isEmpty }
+    public var canUndo: Bool { visibleTailRows > 0 || !segments.isEmpty }
     public var segmentCount: Int { segments.count }
+    public private(set) var unstitchedOffset: Int?
 
-    /// Selected body height in pixels. Uses the full selection when its moving rows are unknown.
-    public var scrollingBodyHeight: Int {
-        if firstFrame != nil, let previousReference {
-            return previousReference.capture.bodyRows.count
-        }
-        return frameHeight - headerHeight - footerHeight
-    }
-
-    public func seed(_ frame: PixelBufferRGBA, reference: LongshotReference? = nil) {
+    public func seed(_ frame: PixelBufferRGBA) {
         precondition(frame.width == width && frame.height == frameHeight)
+        discardVisibleTail()
+        let sig = RowSignatures(rgba: frame.rgba, width: width, height: frameHeight)
         firstFrame = frame.rgba
-        previousRGBA = frame.rgba
-        previousSignatures = RowSignatures(rgba: frame.rgba, width: width, height: frameHeight)
-        previousReference = reference.map(ReferenceSample.init)
-        previousViewportTop = 0
+        firstSignatures = sig
+        prevFrame = frame.rgba
+        prevSignatures = sig
         lockedActiveBins = nil
         leftSidebarFill = nil
+        contextSidebarFills = []
+        previousContext = nil
+        contextBody = nil
+        checkpoints = []
+        currentOffset = 0
+        earliestOffset = 0
+        furthestOffset = 0
     }
 
-    /// Match the viewport against the last confirmed frame and add only rows outside the captured range.
-    /// Set `requireMovement` when the caller has independently observed a change in scroll position.
-    public func push(
-        _ frame: PixelBufferRGBA, mode: LongshotFrameMode = .manual, reference: LongshotReference? = nil,
-        requireMovement: Bool = false
-    ) -> LongshotStepResult {
-        push(frame, mode: mode, reference: reference, verifyUnambiguousPosition: mode != .manual || requireMovement,
-             requireMovement: requireMovement)
-    }
-
-    /// Match the first live capture without assuming identical pixels imply the original scroll position.
-    /// A verified scroll position allows a repaint if the visible content still matches at that position.
-    public func confirmStart(
-        with frame: PixelBufferRGBA, mode: LongshotFrameMode,
-        reference: LongshotReference? = nil, samePosition: Bool = false, requireMovement: Bool = false
-    ) -> LongshotStepResult {
-        if samePosition, !requireMovement, firstFrame != nil {
-            guard frame.width == width, frame.height == frameHeight, let before = previousSignatures else { return .failed }
-            let after = RowSignatures(rgba: frame.rgba, width: width, height: frameHeight)
-            let rows = previousReference?.capture.bodyRows ?? 0..<frameHeight
-            let overlap = LongshotStitcher.locateWithSignaturesScored(
-                prev: before, next: after, fixedTop: rows.lowerBound, fixedBottom: frameHeight - rows.upperBound,
-                activeBins: [], params: params
-            ).match
-            guard overlap.confident, overlap.offset == 0, overlap.overlapRefreshRows == 0 else { return .failed }
-            seed(frame, reference: reference)
-            return .still
+    public func seed(_ frame: PixelBufferRGBA, context: LongshotContext) {
+        seed(frame)
+        previousContext = context
+        if let signatures = checkpointSignatures(for: context) {
+            checkpoints = [Checkpoint(offset: 0, signatures: signatures)]
         }
-        return push(frame, mode: mode, reference: reference, verifyUnambiguousPosition: true, requireMovement: requireMovement)
     }
 
-    public func confirmPreview(with frame: PixelBufferRGBA, reference: LongshotReference? = nil) -> LongshotStepResult {
-        guard firstFrame != nil, frame.width == width, frame.height == frameHeight,
-              selectionOverlapAgrees(frame.rgba, bodyRows: 0..<frameHeight, offset: 0) else { return .failed }
-        if let previousReference, let reference, previousReference.capture.image != reference.image {
-            let match = matchReference(
-                previous: previousReference, next: ReferenceSample(reference), rgba: frame.rgba,
-                selectionRows: previousReference.capture.bodyRows, requireMovement: false
-            )
-            guard match?.offset == 0 else { return .failed }
-        }
-        seed(frame, reference: reference)
-        return .still
-    }
-
-    private func push(
-        _ frame: PixelBufferRGBA, mode: LongshotFrameMode, reference: LongshotReference?,
-        verifyUnambiguousPosition: Bool, requireMovement: Bool
-    ) -> LongshotStepResult {
-        guard frame.width == width, frame.height == frameHeight,
-              let previousSignatures else { return .failed }
+    public func push(_ frame: PixelBufferRGBA) -> LongshotStepResult {
+        guard frame.width == width && frame.height == frameHeight else { return .failed }
+        if totalHeight >= maxHeight { return .limitReached }
         let rgba = frame.rgba
         let nextSig = RowSignatures(rgba: rgba, width: width, height: frameHeight)
-        if let bodyRows = reference?.bodyRows ?? previousReference?.capture.bodyRows {
-            return pushWithReference(
-                rgba: rgba, previousSig: previousSignatures, nextSig: nextSig,
-                reference: reference.map(ReferenceSample.init), bodyRows: bodyRows, mode: mode,
-                requireMovement: requireMovement
-            )
-        }
 
         if let first = firstFrame {
-            let fSig = previousSignatures
+            let fSig = firstSignatures ?? RowSignatures(rgba: first, width: width, height: frameHeight)
             let allBins = Array(0..<fSig.binCount)
             let initCheck = LongshotStitcher.locateWithSignaturesScored(
                 prev: fSig,
@@ -1302,15 +1245,15 @@ public final class LongshotCanvas {
                 fixedTop: 0,
                 fixedBottom: 0,
                 activeBins: allBins,
-                params: params,
-                verifyStationary: verifyUnambiguousPosition
-            )
-            if initCheck.isAmbiguous { return .failed }
-            if initCheck.match.confident, initCheck.match.offset == 0, !requireMovement {
-                if verifyUnambiguousPosition, !selectionOverlapAgrees(rgba, bodyRows: 0..<frameHeight, offset: 0) {
-                    return .failed
-                }
-                return refreshFirstFrame(rgba, signatures: nextSig, mode: mode)
+                params: params
+            ).match
+            if initCheck.confident && initCheck.offset == 0 {
+                // Keep `firstFrame` alive until actual page movement occurs; refresh stationary pixels (e.g. settled lazy images)
+                firstFrame = rgba
+                firstSignatures = nextSig
+                prevFrame = rgba
+                prevSignatures = nextSig
+                return .still
             }
 
             // Atomically lock fixed/sticky header + footer and first scroll shift; if unconfident (mid-paint), keep `firstFrame` intact!
@@ -1324,302 +1267,432 @@ public final class LongshotCanvas {
                 return .failed
             }
 
-            guard mode != .automatic || discovered.match.offset > 0 else { return .failed }
-            let top = discovered.headerHeight >= params.minFixedRows ? discovered.headerHeight : 0
-            let bottom = discovered.footerHeight >= params.minFixedRows ? frameHeight - discovered.footerHeight : frameHeight
-            if verifyUnambiguousPosition, !selectionOverlapAgrees(
-                rgba, bodyRows: top..<bottom, offset: discovered.match.offset,
-                columns: selectedColumns(previousSignatures, bins: discovered.activeBins)
-            ) {
-                return .failed
-            }
-            let rows = discovered.match.offset < 0 && mode != .manual ? 0 : abs(discovered.match.offset)
-            guard frameHeight + rows <= maxHeight else { return .limitReached }
-
-            lockedActiveBins = discovered.activeBins
-            leftSidebarFill = LongshotStitcher.detectLeftSidebarExtrusionRow(
-                firstRGBA: first,
-                nextRGBA: rgba,
-                width: width,
-                height: frameHeight,
-                bodyTop: top,
-                bodyBottom: bottom
-            )
-            beginCanvas(first, bodyRows: top..<bottom)
-            return applyMatch(discovered.match, rgba: rgba, nextSig: nextSig, mode: mode)
+            startContent(first, next: rgba, header: discovered.headerHeight,
+                         footer: discovered.footerHeight, activeBins: discovered.activeBins)
+            return applyMatch(discovered.match, rgba: rgba, nextSig: nextSig, prepend: discovered.match.offset < 0)
         }
 
-        let movingBins = RowSignatures.detectScrollingBins(
-            prev: previousSignatures,
+        return pushInner(rgba, nextSig: nextSig)
+    }
+
+    public func push(
+        _ frame: PixelBufferRGBA, context: LongshotContext, downwardOnly: Bool = false,
+        refreshStationaryFrame: Bool = true, measurement: LongshotScrollMeasurement? = nil
+    ) -> LongshotStepResult {
+        push(frame, context: context, allowBacktracking: !downwardOnly, allowPrepending: !downwardOnly,
+             refreshStationaryFrame: refreshStationaryFrame, measurement: measurement)
+    }
+
+    /// Locate a viewport in the already captured content before resuming automatic scrolling.
+    public func reconnect(
+        _ frame: PixelBufferRGBA, context: LongshotContext, positionIsUnchanged: Bool = false
+    ) -> LongshotStepResult {
+        guard frame.width == width, frame.height == frameHeight,
+              let previousContext, sameViewport(previousContext, context) else { return .failed }
+        if context.image == previousContext.image {
+            return push(frame, context: context, downwardOnly: true, refreshStationaryFrame: false,
+                        measurement: positionIsUnchanged ? LongshotScrollMeasurement(offset: 0) : nil)
+        }
+        if firstFrame != nil {
+            return push(frame, context: context, allowBacktracking: false, allowPrepending: false,
+                        refreshStationaryFrame: false)
+        }
+        if let offset = capturedOffset(of: frame) {
+            return revisit(frame, context: context, at: offset)
+        }
+        guard let live = checkpointSignatures(for: context) else { return .failed }
+        let regionTop = context.scrollRegion?.y ?? 0
+        let body = contextBody.map { ($0.lowerBound - regionTop)..<($0.upperBound - regionTop) } ?? 0..<live.height
+        guard body.count >= 8, body.lowerBound >= 0, body.upperBound <= live.height else { return .failed }
+        let bins = Array(0..<live.binCount)
+        let signatureStride = live.binCount * 4
+        let signatureRows = (body.lowerBound * signatureStride)..<(body.upperBound * signatureStride)
+        guard body.filter({ live.isVerticalFeature(row: $0, bins: bins) }).count >= 4 else { return .failed }
+        let matching = checkpoints.filter { checkpoint in
+            (earliestOffset...furthestOffset).contains(checkpoint.offset)
+                && checkpoint.signatures.data[signatureRows] == live.data[signatureRows]
+        }
+        guard matching.count == 1, let checkpoint = matching.first else { return .failed }
+        return revisit(frame, context: context, at: checkpoint.offset)
+    }
+
+    private func revisit(_ frame: PixelBufferRGBA, context: LongshotContext, at offset: Int) -> LongshotStepResult {
+        let movement = offset - currentOffset
+        currentOffset = offset
+        previousContext = context
+        prevFrame = frame.rgba
+        prevSignatures = RowSignatures(rgba: frame.rgba, width: width, height: frameHeight)
+        unstitchedOffset = nil
+        return .revisited(offset: movement)
+    }
+
+    private func capturedOffset(of frame: PixelBufferRGBA) -> Int? {
+        let body = headerHeight..<(frameHeight - footerHeight)
+        let capturedHeight = contentHeight - visibleTailRows
+        let lastStart = min(capturedHeight - body.count, furthestOffset - earliestOffset)
+        guard body.count >= 8, lastStart >= 0 else { return nil }
+
+        let live = RowSignatures(rgba: frame.rgba, width: width, height: frameHeight)
+        let bins = lockedActiveBins ?? Array(0..<live.binCount)
+        let features = body.filter { live.isVerticalFeature(row: $0, bins: bins) }
+        guard features.count >= 4 else { return nil }
+        let probes = [features[0], features[features.count / 3],
+                      features[features.count * 2 / 3], features[features.count - 1]]
+        let bytes = topRowsData.isEmpty ? bottomRowsData : topRowsData + bottomRowsData
+        let captured = RowSignatures(rgba: bytes, width: width, height: capturedHeight)
+        let left = contextSidebarFills.first { $0.columns.lowerBound == 0 }?.columns.upperBound ?? live.startX
+        let right = contextSidebarFills.first { $0.columns.upperBound == width }?.columns.lowerBound ?? live.endX
+        guard left < right else { return nil }
+        let stride = width * 4
+        let columnBytes = (left * 4)..<(right * 4)
+        var likely: Int?
+        var exact: Int?
+        var ambiguous = false
+        for start in 0...lastStart {
+            let shift = start - body.lowerBound
+            let probeHits = probes.filter { captured.rowsMatch(rowA: $0 + shift, other: live, rowB: $0, bins: bins) }
+            guard probeHits.count >= 3 else { continue }
+            let matches = body.filter { captured.rowsMatch(rowA: $0 + shift, other: live, rowB: $0, bins: bins) }
+            guard matches.count * 100 >= body.count * 98 else { continue }
+            let offset = earliestOffset + start
+            if body.allSatisfy({ row in
+                let previous = (row + shift) * stride
+                let visible = row * stride
+                return bytes[(previous + columnBytes.lowerBound)..<(previous + columnBytes.upperBound)]
+                    == frame.rgba[(visible + columnBytes.lowerBound)..<(visible + columnBytes.upperBound)]
+            }) {
+                guard exact == nil else { return nil }
+                exact = offset
+            }
+            ambiguous = likely != nil
+            likely = offset
+        }
+        return exact ?? (ambiguous ? nil : likely)
+    }
+
+    private func sameViewport(_ before: LongshotContext, _ after: LongshotContext) -> Bool {
+        before.selection == after.selection && before.scrollRegion == after.scrollRegion
+            && before.image.width == after.image.width && before.image.height == after.image.height
+    }
+
+    private func checkpointSignatures(for context: LongshotContext) -> RowSignatures? {
+        let sample: PixelBufferRGBA
+        if let bounds = context.scrollRegion {
+            guard let cropped = context.image.cropped(to: bounds) else { return nil }
+            sample = cropped
+        } else {
+            sample = context.image
+        }
+        return RowSignatures(rgba: sample.rgba, width: sample.width, height: sample.height)
+    }
+
+    private func push(
+        _ frame: PixelBufferRGBA, context: LongshotContext, allowBacktracking: Bool, allowPrepending: Bool,
+        refreshStationaryFrame: Bool, measurement: LongshotScrollMeasurement? = nil
+    ) -> LongshotStepResult {
+        unstitchedOffset = nil
+        guard frame.width == width, frame.height == frameHeight,
+              let previousContext, sameViewport(previousContext, context) else { return .failed }
+        if totalHeight >= maxHeight { return .limitReached }
+
+        let region = context.scrollRegion ?? PixelRect(
+            x: 0, y: 0, width: context.image.width, height: context.image.height
+        )
+        let viewport = region.y..<region.maxY
+        let measuredViewport = measurement?.viewportRows?.clamped(to: viewport)
+        let searchBody = contextBody ?? measuredViewport ?? viewport
+        var estimate = estimateMotion(from: previousContext.image, to: context.image, columns: region, rows: searchBody,
+                                      measuredOffset: measurement?.offset, includesWindowCorners: measuredViewport == nil)
+        if contextBody == nil, estimate?.ambiguous != true,
+           estimate?.match.confident != true || estimate?.match.offset == 0 {
+            // A parent scroll area may surround a much smaller nested scroller. Try the original rows too.
+            let start = max(region.y, context.selection.y)
+            let end = min(region.maxY, context.selection.maxY)
+            if end - start >= 20, start..<end != searchBody,
+               let selected = estimateMotion(from: previousContext.image, to: context.image,
+                                             columns: region, rows: start..<end, measuredOffset: measurement?.offset,
+                                             includesWindowCorners: measuredViewport == nil),
+               selected.match.confident, selected.match.offset != 0 {
+                estimate = selected
+            }
+        }
+        guard let estimate, !estimate.ambiguous else { return .failed }
+        let motion = estimate.match
+        guard motion.confident, allowBacktracking || motion.offset >= 0 else { return .failed }
+
+        let firstBodyRow = estimate.body.lowerBound
+        let bodyEnd = estimate.body.upperBound
+        let top = max(0, firstBodyRow - context.selection.y)
+        let bottom = min(frameHeight, bodyEnd - context.selection.y)
+        let refreshStart = max(top, bodyEnd - max(0, motion.offset)
+                               - motion.overlapRefreshRows - context.selection.y)
+        if motion.offset == 0 {
+            guard refreshStationaryFrame, top < bottom else { return .still }
+            if frame.rgba == prevFrame {
+                self.previousContext = context
+                return .still
+            }
+            if firstFrame != nil {
+                seed(frame, context: context)
+            } else if currentOffset == furthestOffset, visibleTailRows == 0 {
+                let start = motion.overlapRefreshRows > 0 ? min(bottom, refreshStart) : top
+                let refresh = LongshotMatch(offset: 0, startRow: bottom, endRow: bottom, confident: true,
+                                            overlapRefreshRows: bottom - start)
+                self.previousContext = context
+                return applyMatch(refresh, rgba: frame.rgba,
+                                  nextSig: RowSignatures(rgba: frame.rgba, width: width, height: frameHeight),
+                                  prepend: false)
+            }
+            return .still
+        }
+        unstitchedOffset = motion.offset
+
+        let nextOffset = currentOffset + motion.offset
+        guard allowPrepending || nextOffset >= earliestOffset else { return .failed }
+        let added = nextOffset > furthestOffset ? nextOffset - furthestOffset : min(0, nextOffset - earliestOffset)
+        let overlap = bottom - top - max(abs(motion.offset), abs(added))
+        guard overlap >= max(4, min(40, (bottom - top) / 4)) else { return .failed }
+
+        // A larger sample can identify motion. Only rows present in the original selection can establish its seam.
+        let beforeSelection = prevSignatures ?? RowSignatures(rgba: prevFrame, width: width, height: frameHeight)
+        let afterSelection = RowSignatures(rgba: frame.rgba, width: width, height: frameHeight)
+        let selectedBins = RowSignatures.detectScrollingBins(
+            prev: beforeSelection, next: afterSelection, bandTop: top, bandBottom: bottom
+        )
+        let seamBins = selectedBins.isEmpty ? Array(0..<afterSelection.binCount) : selectedBins
+        let beforeStart = top + max(0, motion.offset)
+        let afterStart = top + max(0, -motion.offset)
+        let matchingRows = (0..<overlap).filter {
+            beforeSelection.rowsMatch(rowA: beforeStart + $0,
+                                      other: afterSelection, rowB: afterStart + $0, bins: seamBins)
+        }.count
+        guard Double(matchingRows) >= params.minRatio * Double(overlap) else { return .failed }
+
+        if let first = firstFrame {
+            discardVisibleTail()
+            contextBody = firstBodyRow..<bodyEnd
+            startContent(first, next: frame.rgba, header: top, footer: frameHeight - bottom,
+                         activeBins: seamBins, preserveFirstFrame: true)
+            let left = min(width, max(0, region.x - context.selection.x))
+            let right = max(left, min(width, region.maxX - context.selection.x))
+            let body = top..<bottom
+            let fixedLeft = left > 0 ? 0..<left :
+                fixedColumns(in: first, next: frame.rgba, body: body, offset: motion.offset, fromRight: false)
+            let fixedRight = right < width ? right..<width :
+                fixedColumns(in: first, next: frame.rgba, body: body, offset: motion.offset, fromRight: true)
+            contextSidebarFills = [fixedLeft, fixedRight].compactMap { $0 }.map {
+                sidebarFill(columns: $0, body: body, in: first)
+            }
+        }
+        currentOffset = nextOffset
+        self.previousContext = context
+        unstitchedOffset = nil
+        if added == 0 {
+            prevFrame = frame.rgba
+            prevSignatures = afterSelection
+            return .revisited(offset: motion.offset)
+        }
+        discardVisibleTail()
+        let startRow = added > 0 ? bottom - added : top
+        let match = LongshotMatch(offset: motion.offset, startRow: startRow,
+                                  endRow: startRow + abs(added), confident: true,
+                                  overlapRefreshRows: added > 0 && motion.overlapRefreshRows > 0
+                                      ? max(0, startRow - refreshStart) : 0)
+        let previousHeight = totalHeight
+        let result = applyMatch(match, rgba: frame.rgba, nextSig: afterSelection, prepend: added < 0)
+        let growth = totalHeight - previousHeight
+        if added > 0 { furthestOffset += growth } else { earliestOffset -= growth }
+        if case .appended = result,
+           abs(currentOffset - (checkpoints.last?.offset ?? 0)) >= max(8, region.height / 2),
+           let signatures = checkpointSignatures(for: context) {
+            checkpoints.append(Checkpoint(offset: currentOffset, signatures: signatures))
+            if checkpoints.count > 8 { checkpoints.remove(at: 1) }
+        }
+        return result
+    }
+
+    private func estimateMotion(
+        from before: PixelBufferRGBA, to after: PixelBufferRGBA, columns: PixelRect, rows: Range<Int>,
+        measuredOffset: Int?, includesWindowCorners: Bool
+    ) -> (match: LongshotMatch, body: Range<Int>, ambiguous: Bool)? {
+        let sample = PixelRect(x: columns.x, y: rows.lowerBound, width: columns.width, height: rows.count)
+        guard let old = before.cropped(to: sample), let new = after.cropped(to: sample) else { return nil }
+        let identical = old == new
+        let still = LongshotMatch(offset: 0, startRow: 0, endRow: 0, confident: true)
+        if identical && measuredOffset == 0 {
+            return (still, rows, false)
+        }
+        let oldRows = RowSignatures(rgba: old.rgba, width: old.width, height: old.height)
+        let newRows = identical ? oldRows : RowSignatures(rgba: new.rgba, width: new.width, height: new.height)
+        func validate(_ match: LongshotMatch, body: Range<Int>, bins: [Int]) -> (LongshotMatch, Range<Int>, Bool) {
+            let bounds = (rows.lowerBound + body.lowerBound)..<(rows.lowerBound + body.upperBound)
+            guard match.offset != 0 || measuredOffset != 0 else { return (match, bounds, false) }
+            let verified = verifyOverlap(before: oldRows, after: newRows, body: body, match: match,
+                                         bins: bins, measuredOffset: measuredOffset)
+            return (verified ?? match, bounds, verified == nil)
+        }
+        if identical {
+            return validate(still, body: 0..<old.height, bins: Array(0..<oldRows.binCount))
+        }
+        if contextBody == nil, let initial = LongshotStitcher.discoverInitialStep(
+            firstSig: oldRows, nextSig: newRows, firstRGBA: old.rgba, nextRGBA: new.rgba, params: params,
+            includesWindowCorners: includesWindowCorners
+        ) {
+            return validate(initial.match, body: initial.headerHeight..<(old.height - initial.footerHeight),
+                            bins: initial.activeBins)
+        }
+        let bins = RowSignatures.detectScrollingBins(
+            prev: oldRows, next: newRows, bandTop: old.height / 5, bandBottom: old.height * 4 / 5
+        )
+        let motion = LongshotStitcher.locateWithSignaturesScored(
+            prev: oldRows, next: newRows, fixedTop: 0, fixedBottom: 0, activeBins: bins, params: params
+        ).match
+        return validate(motion, body: 0..<old.height, bins: bins)
+    }
+
+    private func verifyOverlap(
+        before: RowSignatures, after: RowSignatures, body: Range<Int>, match: LongshotMatch,
+        bins: [Int], measuredOffset: Int?
+    ) -> LongshotMatch? {
+        let minimumOverlap = max(8, min(40, body.count / 4))
+        let maxOffset = body.count - minimumOverlap
+        guard maxOffset > 0, abs(match.offset) <= maxOffset else { return match }
+        let stride = before.binCount * 4
+        let activeBins = bins.isEmpty ? Array(0..<before.binCount) : bins
+        var features = [0]
+        for row in body {
+            features.append(features[features.count - 1] + (before.isVerticalFeature(row: row, bins: activeBins) ? 1 : 0))
+        }
+        guard features[features.count - 1] >= 4 else { return match }
+
+        func matches(_ movement: Int) -> Bool {
+            let count = body.count - abs(movement)
+            let start = max(0, movement)
+            // Blank margins alone cannot establish another viable displacement.
+            guard features[start + count] - features[start + 1] >= 4 else { return false }
+            let oldStart = body.lowerBound + max(0, movement)
+            let newStart = body.lowerBound + max(0, -movement)
+            let oldIndices = (oldStart * stride)..<((oldStart + count) * stride)
+            let newIndices = (newStart * stride)..<((newStart + count) * stride)
+            return before.data[oldIndices] == after.data[newIndices]
+        }
+
+        let candidates = -maxOffset...maxOffset
+        if let measuredOffset, measuredOffset != match.offset, candidates.contains(measuredOffset),
+           matches(measuredOffset) {
+            return LongshotMatch(offset: measuredOffset, startRow: 0, endRow: 0, confident: true)
+        }
+        guard candidates.contains(where: { $0 != match.offset && matches($0) }) else { return match }
+        // Repeated rows can support several offsets. Resolve them only with a second measurement and matching pixels.
+        guard let measuredOffset, candidates.contains(measuredOffset), matches(measuredOffset) else { return nil }
+        if match.offset == measuredOffset { return match }
+        return LongshotMatch(offset: measuredOffset, startRow: 0, endRow: 0, confident: true)
+    }
+
+    private func startContent(
+        _ first: [UInt8], next rgba: [UInt8], header t: Int, footer b: Int, activeBins: [Int],
+        preserveFirstFrame: Bool = false
+    ) {
+        let stride = width * 4
+        firstFrame = nil
+        firstSignatures = nil
+        lockedActiveBins = activeBins
+
+        if t > 0 {
+            headerBytes = Array(first[0..<(t * stride)])
+            headerHeight = t
+        }
+        if b > 0 {
+            footerBytes = Array(first[(first.count - b * stride)..<first.count])
+            footerHeight = b
+        }
+        if !preserveFirstFrame {
+            leftSidebarFill = LongshotStitcher.detectLeftSidebarExtrusionRow(
+                firstRGBA: first, nextRGBA: rgba, width: width, height: frameHeight,
+                bodyTop: headerHeight, bodyBottom: frameHeight - footerHeight
+            )
+        }
+        let bodyStart = headerHeight * stride
+        let bodyEnd = (frameHeight - footerHeight) * stride
+        if bodyEnd > bodyStart {
+            var seedBody = Array(first[bodyStart..<bodyEnd])
+            let seedRows = frameHeight - headerHeight - footerHeight
+            if let sb = leftSidebarFill, sb.endX > 0, seedRows > 80 {
+                // Prevent horizontally slicing through a bottom-pinned sidebar icon/text row right at `bodyEnd`
+                let copyLen = sb.endX * 4
+                func rowMatchesTemplate(_ r: Int) -> Bool {
+                    let base = r * stride
+                    var diffPixels = 0
+                    for x in 0..<sb.endX {
+                        let o = base + x * 4
+                        let t = x * 4
+                        let d = abs(Int(seedBody[o]) - Int(sb.rowBytes[t]))
+                            + abs(Int(seedBody[o + 1]) - Int(sb.rowBytes[t + 1]))
+                            + abs(Int(seedBody[o + 2]) - Int(sb.rowBytes[t + 2]))
+                        if d > 24 {
+                            diffPixels += 1
+                            if diffPixels > 6 { return false }
+                        }
+                    }
+                    return true
+                }
+                if !rowMatchesTemplate(seedRows - 1) {
+                    let searchLimit = min(64, seedRows / 6)
+                    var cleanBreakRow: Int?
+                    for back in 1...searchLimit {
+                        let r = seedRows - 1 - back
+                        if rowMatchesTemplate(r) {
+                            cleanBreakRow = r + 1
+                            break
+                        }
+                    }
+                    if let cut = cleanBreakRow, cut < seedRows {
+                        seedBody.withUnsafeMutableBytes { dstRaw in
+                            sb.rowBytes.withUnsafeBytes { srcRaw in
+                                guard let dstBase = dstRaw.baseAddress, let srcBase = srcRaw.baseAddress else { return }
+                                for r in cut..<seedRows {
+                                    memcpy(dstBase.advanced(by: r * stride), srcBase, copyLen)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            bottomRowsData.append(contentsOf: seedBody)
+            bottomRowCount += seedRows
+        }
+    }
+
+    private func pushInner(_ rgba: [UInt8], nextSig: RowSignatures) -> LongshotStepResult {
+        let pSig = prevSignatures ?? RowSignatures(rgba: prevFrame, width: width, height: frameHeight)
+        let activeBins = lockedActiveBins ?? RowSignatures.detectScrollingBins(
+            prev: pSig,
             next: nextSig,
             bandTop: max(headerHeight, (frameHeight * 24) / 100),
             bandBottom: min(frameHeight - footerHeight, (frameHeight * 82) / 100)
         )
-        let activeBins = lockedActiveBins ?? movingBins
         let match = LongshotStitcher.locateWithSignaturesScored(
-            prev: previousSignatures,
+            prev: pSig,
             next: nextSig,
             fixedTop: headerHeight,
             fixedBottom: footerHeight,
             activeBins: activeBins,
-            params: params,
-            verifyStationary: verifyUnambiguousPosition
+            params: params
         ).match
 
-        guard match.confident, mode != .automatic || match.offset >= 0,
-              !requireMovement || match.offset != 0 else { return .failed }
-        if verifyUnambiguousPosition, !selectionOverlapAgrees(
-            rgba, bodyRows: headerHeight..<(frameHeight - footerHeight), offset: match.offset,
-            columns: selectedColumns(previousSignatures, bins: Array(Set(activeBins + movingBins)))
-        ) {
+        // Never append unaligned full frames on failure! Preserve `prevFrame` so the settled next frame aligns cleanly.
+        guard match.confident else {
             return .failed
         }
-        return applyMatch(match, rgba: rgba, nextSig: nextSig, mode: mode)
-    }
-
-    private func pushWithReference(
-        rgba: [UInt8], previousSig: RowSignatures, nextSig: RowSignatures,
-        reference: ReferenceSample?, bodyRows: Range<Int>, mode: LongshotFrameMode, requireMovement: Bool
-    ) -> LongshotStepResult {
-        guard bodyRows.lowerBound >= 0, bodyRows.upperBound <= frameHeight else { return .failed }
-        var selectionRows = firstFrame == nil ? headerHeight..<(frameHeight - footerHeight) : bodyRows
-        guard bodyRows.lowerBound <= selectionRows.lowerBound, selectionRows.upperBound <= bodyRows.upperBound else {
-            return .failed
-        }
-
-        var acceptedReference = reference
-        let offset: Int
-        if let previousReference, let reference {
-            guard let verified = matchReference(
-                previous: previousReference, next: reference, rgba: rgba, selectionRows: selectionRows,
-                requireMovement: requireMovement
-            ) else { return .failed }
-            offset = verified.offset
-            selectionRows = verified.selectionRows
-            acceptedReference?.movingRows = verified.referenceRows
-        } else {
-            let match = locateInBody(selectionRows, previous: previousSig, next: nextSig).match
-            guard match.confident, !requireMovement || match.offset != 0,
-                  selectionOverlapAgrees(rgba, bodyRows: selectionRows, offset: match.offset) else {
-                return .failed
-            }
-            offset = match.offset
-        }
-        guard mode != .automatic || offset >= 0 else { return .failed }
-
-        if let first = firstFrame {
-            if offset == 0 {
-                return refreshFirstFrame(rgba, signatures: nextSig, mode: mode, reference: acceptedReference)
-            }
-            let rows = offset < 0 && mode != .manual ? 0 : abs(offset)
-            guard frameHeight + rows <= maxHeight else { return .limitReached }
-            beginCanvas(first, bodyRows: selectionRows)
-        }
-
-        let projectedMatch = LongshotMatch(
-            offset: offset,
-            startRow: offset < 0 ? selectionRows.lowerBound : selectionRows.upperBound - offset,
-            endRow: offset < 0 ? selectionRows.lowerBound - offset : selectionRows.upperBound,
-            confident: true
-        )
-        return applyMatch(projectedMatch, rgba: rgba, nextSig: nextSig, mode: mode, reference: acceptedReference)
-    }
-
-    private func refreshFirstFrame(
-        _ rgba: [UInt8], signatures: RowSignatures, mode: LongshotFrameMode, reference: ReferenceSample? = nil
-    ) -> LongshotStepResult {
-        if mode != .reconnecting {
-            firstFrame = rgba
-            previousRGBA = rgba
-            previousSignatures = signatures
-            previousReference = reference
-        }
-        return .still
-    }
-
-    private func matchReference(
-        previous: ReferenceSample, next: ReferenceSample, rgba: [UInt8], selectionRows: Range<Int>, requireMovement: Bool
-    ) -> (offset: Int, selectionRows: Range<Int>, referenceRows: Range<Int>?)? {
-        let before = previous.capture
-        let after = next.capture
-        let height = before.image.height
-        guard before.image.width == after.image.width, height == after.image.height,
-              before.bodyRows == after.bodyRows, before.selectionTopInReference == after.selectionTopInReference else {
-            return nil
-        }
-
-        let knownRows = previous.movingRows ?? 0..<height
-        let direct = locateInBody(knownRows, previous: previous.signatures, next: next.signatures)
-        guard !direct.isAmbiguous else { return nil }
-        // After undo, the wider observation still anchors the scroll position and the selection
-        // overlap must agree with the nearest viewport retained in the canvas.
-        let anchorShift = previous.viewportTop - previousViewportTop
-        let directOffset = direct.match.offset + anchorShift
-        if direct.match.confident, !requireMovement || direct.match.offset != 0,
-           selectionOverlapAgrees(rgba, bodyRows: selectionRows, offset: directOffset) {
-            return (directOffset, selectionRows, previous.movingRows)
-        }
-
-        // An accessibility scroll area can include sticky bars drawn by the page itself.
-        guard previous.movingRows == nil,
-              let discovered = LongshotStitcher.discoverInitialStep(
-                firstSig: previous.signatures, nextSig: next.signatures,
-                firstRGBA: before.image.rgba, nextRGBA: after.image.rgba, params: params,
-                searchFullEdges: true
-              ),
-              discovered.headerHeight > 0 || discovered.footerHeight > 0 else { return nil }
-        let movingRows = discovered.headerHeight..<(height - discovered.footerHeight)
-        var projectedRows = selectionRows
-        if let top = before.selectionTopInReference {
-            let lower = discovered.headerHeight == 0 ? selectionRows.lowerBound : max(selectionRows.lowerBound, movingRows.lowerBound - top)
-            let upper = discovered.footerHeight == 0 ? selectionRows.upperBound : min(selectionRows.upperBound, movingRows.upperBound - top)
-            guard lower < upper else { return nil }
-            projectedRows = lower..<upper
-        }
-        guard firstFrame != nil || projectedRows == selectionRows else { return nil }
-
-        let trimmed = locateInBody(movingRows, previous: previous.signatures, next: next.signatures).match
-        let trimmedOffset = trimmed.offset + anchorShift
-        guard trimmed.confident, trimmed.offset == discovered.match.offset,
-              selectionOverlapAgrees(rgba, bodyRows: projectedRows, offset: trimmedOffset) else { return nil }
-        return (trimmedOffset, projectedRows, movingRows)
-    }
-
-    private func locateInBody(
-        _ rows: Range<Int>, previous: RowSignatures, next: RowSignatures
-    ) -> LongshotStitcher.ScoredMatch {
-        let bins = RowSignatures.detectScrollingBins(
-            prev: previous, next: next,
-            bandTop: rows.lowerBound + (rows.count * 22) / 100,
-            bandBottom: rows.lowerBound + (rows.count * 82) / 100
-        )
-        return LongshotStitcher.locateWithSignaturesScored(
-            prev: previous, next: next, fixedTop: rows.lowerBound, fixedBottom: previous.height - rows.upperBound,
-            activeBins: bins, params: params, verifyStationary: true
-        )
-    }
-
-    private func selectedColumns(_ signatures: RowSignatures, bins: [Int]) -> [Range<Int>] {
-        let span = signatures.endX - signatures.startX
-        return bins.map { bin in
-            let start = signatures.startX + bin * span / signatures.binCount
-            let end = signatures.startX + (bin + 1) * span / signatures.binCount
-            return (start * 4)..<(end * 4)
-        }
-    }
-
-    private func selectionOverlapAgrees(
-        _ next: [UInt8], bodyRows: Range<Int>, offset: Int, columns: [Range<Int>]? = nil
-    ) -> Bool {
-        let overlap = bodyRows.count - abs(offset)
-        guard overlap >= max(4, min(40, (bodyRows.count + 2) / 3)) else { return false }
-        let stride = width * 4
-        let previousStart = (bodyRows.lowerBound + max(0, offset)) * stride
-        let nextStart = (bodyRows.lowerBound + max(0, -offset)) * stride
-        let comparedColumns = columns ?? [0..<stride]
-
-        // Repeated live captures of the same content differed by up to four color levels.
-        let colorTolerance = 4
-        return previousRGBA.withUnsafeBufferPointer { previousBytes in
-            next.withUnsafeBufferPointer { nextBytes in
-                for row in 0..<overlap {
-                    let before = previousStart + row * stride
-                    let after = nextStart + row * stride
-                    for columnRange in comparedColumns {
-                        for column in columnRange {
-                            if abs(Int(previousBytes[before + column]) - Int(nextBytes[after + column])) > colorTolerance {
-                                return false
-                            }
-                        }
-                    }
-                }
-                return true
-            }
-        }
-    }
-
-    private func beginCanvas(_ first: [UInt8], bodyRows: Range<Int>) {
-        firstFrame = nil
-        let stride = width * 4
-        let bodyStart = bodyRows.lowerBound * stride
-        let bodyEnd = bodyRows.upperBound * stride
-        headerHeight = bodyRows.lowerBound
-        headerBytes = Array(first[..<bodyStart])
-        footerHeight = frameHeight - bodyRows.upperBound
-        footerBytes = Array(first[bodyEnd...])
-
-        var seedBody = Array(first[bodyStart..<bodyEnd])
-        let seedRows = bodyRows.count
-        if let sb = leftSidebarFill, sb.endX > 0, seedRows > 80 {
-            // Avoid slicing a bottom-pinned sidebar icon or text row at the bottom of the selection.
-            let copyLen = sb.endX * 4
-            func rowMatchesTemplate(_ row: Int) -> Bool {
-                let base = row * stride
-                var diffPixels = 0
-                for x in 0..<sb.endX {
-                    let offset = base + x * 4
-                    let template = x * 4
-                    let difference = abs(Int(seedBody[offset]) - Int(sb.rowBytes[template]))
-                        + abs(Int(seedBody[offset + 1]) - Int(sb.rowBytes[template + 1]))
-                        + abs(Int(seedBody[offset + 2]) - Int(sb.rowBytes[template + 2]))
-                    if difference > 24 {
-                        diffPixels += 1
-                        if diffPixels > 6 { return false }
-                    }
-                }
-                return true
-            }
-            if !rowMatchesTemplate(seedRows - 1) {
-                let searchLimit = min(64, seedRows / 6)
-                var cleanBreakRow: Int?
-                for back in 1...searchLimit {
-                    let row = seedRows - 1 - back
-                    if rowMatchesTemplate(row) {
-                        cleanBreakRow = row + 1
-                        break
-                    }
-                }
-                if let cut = cleanBreakRow, cut < seedRows {
-                    seedBody.withUnsafeMutableBytes { dstRaw in
-                        sb.rowBytes.withUnsafeBytes { srcRaw in
-                            guard let dstBase = dstRaw.baseAddress, let srcBase = srcRaw.baseAddress else { return }
-                            for row in cut..<seedRows {
-                                memcpy(dstBase.advanced(by: row * stride), srcBase, copyLen)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        bottomRowsData.append(contentsOf: seedBody)
-        bottomRowCount += seedRows
+        return applyMatch(match, rgba: rgba, nextSig: nextSig, prepend: match.offset < 0)
     }
 
     private func applyMatch(
-        _ match: LongshotMatch, rgba: [UInt8], nextSig: RowSignatures, mode: LongshotFrameMode,
-        reference: ReferenceSample? = nil
+        _ match: LongshotMatch, rgba: [UInt8], nextSig: RowSignatures, prepend: Bool
     ) -> LongshotStepResult {
         let stride = width * 4
-        let bodyHeight = frameHeight - headerHeight - footerHeight
-        let viewportTop = previousViewportTop + match.offset
-        let viewportBottom = viewportTop + bodyHeight
-        guard viewportTop < bottomRowCount, viewportBottom > -topRowCount else { return .failed }
 
-        // Compare against the full canvas so moving back and forth cannot duplicate captured rows.
-        let prepended = match.offset < 0
-        let rows: Int
-        if match.offset > 0 {
-            rows = max(0, viewportBottom - bottomRowCount)
-        } else if prepended, mode == .manual {
-            rows = max(0, -topRowCount - viewportTop)
-        } else {
-            rows = 0
-        }
-        if rows > 0, totalHeight + rows > maxHeight { return .limitReached }
-
-        var didRefresh = false
-        let overlapEnd = viewportTop + match.startRow - headerHeight
-        if mode != .reconnecting, match.overlapRefreshRows > 0, match.offset >= 0, overlapEnd == bottomRowCount {
+        if match.overlapRefreshRows > 0 && match.offset >= 0 {
             let refreshRows = min(match.overlapRefreshRows, bottomRowCount)
             let refreshSrcEnd = match.startRow
             let refreshSrcStart = refreshSrcEnd - refreshRows
@@ -1632,23 +1705,30 @@ public final class LongshotCanvas {
                         (bottomRowsData.count - byteLen)..<bottomRowsData.count,
                         with: refreshed
                     )
-                    didRefresh = true
                 }
             }
         }
 
-        previousViewportTop = viewportTop
-        previousRGBA = rgba
-        previousSignatures = nextSig
-        previousReference = reference
-        previousReference?.viewportTop = viewportTop
-        if match.offset == 0 { return didRefresh ? .refreshed : .still }
-        guard rows > 0 else { return .overlapping }
-
-        let sliceStart = prepended ? headerHeight : frameHeight - footerHeight - rows
-        var sliceBytes = Array(rgba[(sliceStart * stride)..<((sliceStart + rows) * stride)])
+        if match.offset == 0 {
+            prevFrame = rgba
+            prevSignatures = nextSig
+            return .still
+        }
+        let requestedRows = match.endRow - match.startRow
+        let rows = min(requestedRows, max(0, maxHeight - totalHeight))
+        guard rows > 0 || requestedRows == 0 else { return .limitReached }
+        if rows <= 0 {
+            prevFrame = rgba
+            prevSignatures = nextSig
+            return .still
+        }
+        let start = prepend ? match.endRow - rows : match.startRow
+        var sliceBytes = Array(rgba[(start * stride)..<((start + rows) * stride)])
         var savedPrevFooter: [UInt8]? = nil
-        if prepended {
+        if prepend {
+            if !contextSidebarFills.isEmpty {
+                applySidebarExtrusionIfNeeded(to: &sliceBytes, rowCount: rows)
+            }
             sliceBytes.append(contentsOf: topRowsData)
             topRowsData = sliceBytes
             topRowCount += rows
@@ -1674,13 +1754,26 @@ public final class LongshotCanvas {
                 footerBytes = newFooter
             }
         }
-        segments.append((prepended: prepended, rows: rows, prevFooter: savedPrevFooter))
-        return .appended(offset: match.offset, rows: rows)
+        segments.append((prepended: prepend, rows: rows, prevFooter: savedPrevFooter))
+        prevFrame = rgba
+        prevSignatures = nextSig
+        return totalHeight >= maxHeight ? .limitReached : .appended(offset: match.offset, rows: rows)
     }
 
     private func applySidebarExtrusionIfNeeded(to buffer: inout [UInt8], rowCount: Int) {
-        guard let sb = leftSidebarFill, sb.endX > 0, rowCount > 0 else { return }
         let stride = width * 4
+        for fill in contextSidebarFills {
+            buffer.withUnsafeMutableBytes { output in
+                fill.rowBytes.withUnsafeBytes { row in
+                    guard let outputStart = output.baseAddress, let rowStart = row.baseAddress else { return }
+                    for y in 0..<rowCount {
+                        memcpy(outputStart.advanced(by: y * stride + fill.columns.lowerBound * 4),
+                               rowStart, row.count)
+                    }
+                }
+            }
+        }
+        guard let sb = leftSidebarFill, sb.endX > 0, rowCount > 0 else { return }
         let copyLen = sb.endX * 4
         guard sb.rowBytes.count == copyLen, buffer.count >= rowCount * stride else { return }
         buffer.withUnsafeMutableBytes { dstRaw in
@@ -1693,56 +1786,118 @@ public final class LongshotCanvas {
         }
     }
 
+    private func sidebarFill(
+        columns: Range<Int>, body: Range<Int>, in rgba: [UInt8]
+    ) -> (columns: Range<Int>, rowBytes: [UInt8]) {
+        let stride = width * 4
+        let start = columns.lowerBound * 4
+        let end = columns.upperBound * 4
+        // Extend a quiet background row under the first screen, without repeating fixed buttons or text.
+        func changes(in row: Int) -> Int {
+            let offset = row * stride
+            return Swift.stride(from: start + 4, to: end, by: 4).reduce(into: 0) { count, x in
+                let a = offset + x - 4
+                let b = offset + x
+                let difference = abs(Int(rgba[a]) - Int(rgba[b]))
+                    + abs(Int(rgba[a + 1]) - Int(rgba[b + 1])) + abs(Int(rgba[a + 2]) - Int(rgba[b + 2]))
+                if difference > 18 { count += 1 }
+            }
+        }
+        var quietRow = body.lowerBound
+        var fewest = changes(in: quietRow)
+        for row in body.dropFirst() where fewest > 0 {
+            let count = changes(in: row)
+            if count < fewest { quietRow = row; fewest = count }
+        }
+        let offset = quietRow * stride
+        return (columns, Array(rgba[(offset + start)..<(offset + end)]))
+    }
+
+    private func fixedColumns(
+        in first: [UInt8], next: [UInt8], body: Range<Int>, offset: Int, fromRight: Bool
+    ) -> Range<Int>? {
+        let firstRow = body.lowerBound + max(0, -offset)
+        let endRow = body.upperBound - max(0, offset)
+        let rows = Swift.stride(from: firstRow, to: endRow, by: 2)
+        let sampleCount = (endRow - firstRow + 1) / 2
+        var columns = 0
+        var hasFixedDetail = false
+        for distance in 0..<(width / 3) {
+            let x = fromRight ? width - 1 - distance : distance
+            var samePositionChange = 0
+            var shiftedChange = 0
+            for y in rows {
+                let index = (y * width + x) * 4
+                let shifted = index + offset * width * 4
+                for channel in 0..<3 {
+                    samePositionChange += abs(Int(first[index + channel]) - Int(next[index + channel]))
+                    shiftedChange += abs(Int(first[shifted + channel]) - Int(next[index + channel]))
+                }
+            }
+            if samePositionChange > sampleCount * 6 { break }
+            if shiftedChange > sampleCount * 18 { hasFixedDetail = true }
+            columns += 1
+        }
+        guard columns >= 8, hasFixedDetail else { return nil }
+        return fromRight ? (width - columns)..<width : 0..<columns
+    }
+
+    /// Include the final visible body below the original crop after forward scrolling has ended.
+    public func includeVisibleTail(positionAtRegionEnd: Bool = false) {
+        guard visibleTailRows == 0, currentOffset == furthestOffset,
+              let context = previousContext,
+              let bodyEnd = contextBody?.upperBound ?? (positionAtRegionEnd ? context.scrollRegion?.maxY : nil)
+        else { return }
+        let start = context.selection.maxY
+        let rows = min(bodyEnd - start, maxHeight - totalHeight)
+        guard rows > 0 else { return }
+        let rect = PixelRect(x: context.selection.x, y: start, width: width, height: rows)
+        guard let tail = context.image.cropped(to: rect), tail.width == width else { return }
+        var bytes = tail.rgba
+        applySidebarExtrusionIfNeeded(to: &bytes, rowCount: tail.height)
+        bottomRowsData.append(contentsOf: bytes)
+        bottomRowCount += tail.height
+        visibleTailRows = tail.height
+    }
+
+    private func discardVisibleTail() {
+        guard visibleTailRows > 0 else { return }
+        bottomRowsData.removeLast(visibleTailRows * width * 4)
+        bottomRowCount -= visibleTailRows
+        visibleTailRows = 0
+    }
+
     @discardableResult
     public func undoLast() -> Bool {
+        if visibleTailRows > 0 {
+            discardVisibleTail()
+            return true
+        }
         guard let last = segments.popLast() else { return false }
         let byteCount = last.rows * width * 4
         if last.prepended {
             guard topRowsData.count >= byteCount else { return false }
             topRowsData.removeFirst(byteCount)
             topRowCount -= last.rows
+            if previousContext != nil { earliestOffset += last.rows }
         } else {
             guard bottomRowsData.count >= byteCount else { return false }
             bottomRowsData.removeLast(byteCount)
             bottomRowCount -= last.rows
+            if previousContext != nil { furthestOffset -= last.rows }
             if let oldFooter = last.prevFooter {
                 footerBytes = oldFooter
             }
         }
-        restoreReferenceIfNeeded()
         return true
     }
 
-    private func restoreReferenceIfNeeded() {
-        let bodyHeight = frameHeight - headerHeight - footerHeight
-        let capturedTop = -topRowCount
-        let hasRestoredSelection = previousReference.map { $0.viewportTop != previousViewportTop } ?? false
-        if !hasRestoredSelection, previousViewportTop < bottomRowCount,
-           previousViewportTop + bodyHeight > capturedTop { return }
-
-        // Undo can leave the current reference outside the canvas. Keep its selected rows on the nearest retained viewport.
-        let top = max(capturedTop, min(previousViewportTop, bottomRowCount - bodyHeight))
-        guard top != previousViewportTop else { return }
-        let bottom = top + bodyHeight
-        let stride = width * 4
-        var rgba = headerBytes
-        if top < 0 {
-            let start = (top - capturedTop) * stride
-            let end = (min(bottom, 0) - capturedTop) * stride
-            rgba.append(contentsOf: topRowsData[start..<end])
-        }
-        if bottom > 0 {
-            rgba.append(contentsOf: bottomRowsData[(max(top, 0) * stride)..<(bottom * stride)])
-        }
-        rgba.append(contentsOf: footerBytes)
-        previousRGBA = rgba
-        previousSignatures = RowSignatures(rgba: rgba, width: width, height: frameHeight)
-        previousViewportTop = top
-    }
-
     public func exportBuffer() -> PixelBufferRGBA? {
-        if let first = firstFrame, contentHeight == 0 {
-            return PixelBufferRGBA(width: width, height: frameHeight, rgba: first)
+        if let first = firstFrame {
+            let rows = min(frameHeight, maxHeight)
+            var bytes = rows == frameHeight ? first : Array(first.prefix(rows * width * 4))
+            bytes.append(contentsOf: bottomRowsData)
+            return PixelBufferRGBA(width: width, height: totalHeight, rgba: bytes)
         }
         let totalH = headerHeight + contentHeight + footerHeight
         guard totalH > 0 else { return nil }
@@ -1757,8 +1912,8 @@ public final class LongshotCanvas {
 
     public func makeThumbnail(maxWidth: Int, maxHeight: Int) -> CGImage? {
         guard width > 0, maxWidth > 0, maxHeight > 0 else { return nil }
-        if let first = firstFrame, contentHeight == 0 {
-            return PixelBufferRGBA(width: width, height: frameHeight, rgba: first).makeCGImage()
+        if firstFrame != nil {
+            return exportBuffer()?.makeCGImage()
         }
         let totalH = headerHeight + contentHeight + footerHeight
         guard totalH > 0 else { return nil }

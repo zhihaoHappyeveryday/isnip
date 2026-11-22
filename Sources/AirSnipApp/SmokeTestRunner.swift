@@ -41,7 +41,7 @@ public enum SmokeTestRunner {
             var output: CGImage?
             coordinator.onCompleteCopy = { image, _ in output = image }
             coordinator.onStartOCR = { image, _ in output = image }
-            coordinator.onStartLongshot = { _, _, buffer, _ in output = buffer.makeCGImage() }
+            coordinator.onStartLongshot = { _, _, buffer, _, _ in output = buffer.makeCGImage() }
             let snapshot = CapturedScreenSnapshot(
                 screen: screen, frameInGlobalAppKit: canvasFrame,
                 frameTopDown: ASRect(x: 0, y: 0, width: 640, height: 480),
@@ -2816,9 +2816,18 @@ public enum SmokeTestRunner {
                 let tallBytes = [UInt8](repeating: 248, count: tallW * tallH * 4)
                 let tallBuf = PixelBufferRGBA(width: tallW, height: tallH, rgba: tallBytes)
                 if let tallCG = tallBuf.makeCGImage() {
-                    let lsSaved = OutputService.saveImage(for: tallCG, config: defaultCfg).flatMap { saved in
-                        CGImageSourceCreateWithURL(saved.url as CFURL, nil)
-                    }.flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+                    var lsSavedDims: (Int, Int)?
+                    let lsSession = LongshotSessionController(
+                        screen: screen,
+                        viewportTopDown: ASRect(x: 40, y: 40, width: 400, height: 300),
+                        initialCrop: tallBuf,
+                        config: defaultCfg,
+                        autoStartScroll: false
+                    )
+                    lsSession.onFinishSave = { cg, _, _ in
+                        lsSavedDims = (cg.width, cg.height)
+                    }
+                    lsSession.finishAndSave()
 
                     let tallEditCoord = CaptureSessionCoordinator(
                         config: reorderedCfg,
@@ -2836,8 +2845,8 @@ public enum SmokeTestRunner {
                         return false
                     }
                     if let tallBaked = tallEditCoord.renderStandaloneAnnotatedOutputSample() {
-                        longshotSaveAndEditOK = (lsSaved?.width == tallW)
-                            && (lsSaved?.height == tallH)
+                        longshotSaveAndEditOK = (lsSavedDims?.0 == tallW)
+                            && (lsSavedDims?.1 == tallH)
                             && (tallBaked.width == tallW)
                             && (tallBaked.height == tallH)
                     }

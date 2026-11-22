@@ -159,7 +159,7 @@ public final class CaptureSessionCoordinator {
     var onSaveImage: ((CGImage, Double, Bool, AirSnipConfig) -> Bool)?
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
-    public var onStartLongshot: ((CapturedScreenSnapshot, ASRect, PixelBufferRGBA, Bool) -> Void)?
+    public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, WindowSnapCandidate?, Bool) -> Void)?
     var getShowCompletionToast: (() -> Bool)?
     var onUpdatePreferences: ((@escaping (inout AirSnipConfig) -> Void) -> Void)?
     public var onSessionEnded: (() -> Void)?
@@ -517,13 +517,14 @@ public final class CaptureSessionCoordinator {
     }
 
     func finishIntoLongshot(
-        snapshot: CapturedScreenSnapshot,
+        screen: NSScreen,
         viewportTopDown: ASRect,
         initialCrop: PixelBufferRGBA,
+        targetWindow: WindowSnapCandidate?,
         forceAutoScroll: Bool = false
     ) {
         closeAllWindows()
-        onStartLongshot?(snapshot, viewportTopDown, initialCrop, forceAutoScroll)
+        onStartLongshot?(screen, viewportTopDown, initialCrop, targetWindow, forceAutoScroll)
         onSessionEnded?()
     }
 
@@ -4425,22 +4426,20 @@ final class OverlayCanvasView: NSView {
             )
             return
         }
-        let scale = snapshot.backingScale
         let pxRect = PixelRect(
-            x: Int((sel.minX * scale).rounded()),
-            y: Int((sel.minY * scale).rounded()),
-            width: max(1, Int((sel.width * scale).rounded())),
-            height: max(1, Int((sel.height * scale).rounded()))
-        ).clamped(toWidth: snapshot.rawBuffer.width, height: snapshot.rawBuffer.height)
-        guard let initialCrop = snapshot.rawBuffer.cropped(to: pxRect) else { return }
-        let viewport = ASRect(
-            x: Double(pxRect.x) / scale, y: Double(pxRect.y) / scale,
-            width: Double(pxRect.width) / scale, height: Double(pxRect.height) / scale
+            x: Int((sel.minX * snapshot.backingScale).rounded()),
+            y: Int((sel.minY * snapshot.backingScale).rounded()),
+            width: max(1, Int((sel.width * snapshot.backingScale).rounded())),
+            height: max(1, Int((sel.height * snapshot.backingScale).rounded()))
         )
+        guard let initialCrop = snapshot.rawBuffer.cropped(to: pxRect) else { return }
+        let center = ASPoint(sel.midX, sel.midY)
+        let window = snapshot.windowsLocalTopDown.first { $0.rect.contains(center) }
         coordinator?.finishIntoLongshot(
-            snapshot: snapshot,
-            viewportTopDown: viewport,
+            screen: snapshot.screen,
+            viewportTopDown: sel,
             initialCrop: initialCrop,
+            targetWindow: window,
             forceAutoScroll: forceAutoScroll
         )
     }

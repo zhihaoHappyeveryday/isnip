@@ -241,6 +241,285 @@ final class AirSnipCoreTests: XCTestCase {
         }
     }
 
+    func testLongshotUsesSurroundingContentToStitchSmallSelection() throws {
+        let width = 96
+        let selection = PixelRect(x: 0, y: 0, width: width, height: 60)
+        let scrollRegion = PixelRect(x: 0, y: 36, width: width, height: 144)
+        let headerPixel: [UInt8] = [12, 34, 56, 255]
+        let header = Array(repeating: headerPixel, count: width * 36).flatMap { $0 }
+        let page: [UInt8] = (0..<220).flatMap { row in
+            (0..<width).flatMap { column in
+                let red = UInt8((row * 37 + column * 19) % 251)
+                let green = UInt8((row * 53 + column * 13) % 253)
+                let blue = UInt8((row * 17 + column * 31) % 247)
+                return [red, green, blue, UInt8(255)]
+            }
+        }
+        let stride = width * 4
+
+        func frame(at offset: Int) throws -> (PixelBufferRGBA, LongshotContext) {
+            let window = PixelBufferRGBA(
+                width: width, height: 180,
+                rgba: header + page[(offset * stride)..<((offset + 144) * stride)]
+            )
+            return (try XCTUnwrap(window.cropped(to: selection)),
+                    LongshotContext(image: window, selection: selection, scrollRegion: scrollRegion))
+        }
+
+        let canvas = LongshotCanvas(width: width, frameHeight: selection.height)
+        let (first, firstContext) = try frame(at: 0)
+        canvas.seed(first, context: firstContext)
+        for offset in [12, 24, 36] {
+            let (image, context) = try frame(at: offset)
+            XCTAssertEqual(canvas.push(image, context: context), .appended(offset: 12, rows: 12))
+        }
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 36) * stride)])
+
+        let (beyondOverlap, distantContext) = try frame(at: 66)
+        XCTAssertEqual(canvas.push(beyondOverlap, context: distantContext, downwardOnly: true), .failed)
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 36) * stride)])
+
+        let (next, nextContext) = try frame(at: 48)
+        XCTAssertEqual(canvas.push(next, context: nextContext, downwardOnly: true), .appended(offset: 12, rows: 12))
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 48) * stride)])
+
+        for offset in [36, 48] {
+            let (image, context) = try frame(at: offset)
+            _ = canvas.push(image, context: context)
+        }
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 48) * stride)])
+
+        XCTAssertEqual(canvas.reconnect(first, context: firstContext), .revisited(offset: -48))
+        for offset in [12, 24, 36, 48] {
+            let (image, context) = try frame(at: offset)
+            XCTAssertEqual(canvas.push(image, context: context, downwardOnly: true), .revisited(offset: 12))
+        }
+        let (unseen, unseenContext) = try frame(at: 60)
+        XCTAssertEqual(canvas.push(unseen, context: unseenContext, downwardOnly: true), .appended(offset: 12, rows: 12))
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 60) * stride)])
+
+        XCTAssertTrue(canvas.undoLast())
+        let (partiallyUndone, undoContext) = try frame(at: 54)
+        XCTAssertEqual(canvas.push(partiallyUndone, context: undoContext), .appended(offset: -6, rows: 6))
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 54) * stride)])
+
+        for offset in [66, 76] {
+            let (image, context) = try frame(at: offset)
+            _ = canvas.push(image, context: context, downwardOnly: true)
+        }
+        canvas.includeVisibleTail()
+        canvas.includeVisibleTail()
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba, header + page)
+
+        XCTAssertTrue(canvas.undoLast())
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 76) * stride)])
+
+        // The view can return between two previously observed positions.
+        let (alreadyCaptured, earlierContext) = try frame(at: 13)
+        XCTAssertEqual(canvas.reconnect(alreadyCaptured, context: earlierContext), .revisited(offset: -63))
+        XCTAssertEqual(try XCTUnwrap(canvas.exportBuffer()).rgba,
+                       header + page[..<((24 + 76) * stride)])
+    }
+
+    func testLongshotKeepsFixedSidebarOnceAndUsesLastFooter() throws {
+        let width = 80
+        let height = 100
+        let viewport = PixelRect(x: 0, y: 0, width: width, height: height)
+        let body = PixelRect(x: 0, y: 20, width: 60, height: 64)
+        let stride = width * 4
+
+        func frame(at offset: Int) -> PixelBufferRGBA {
+            var bytes = [UInt8](repeating: 255, count: width * height * 4)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let index = y * stride + x * 4
+                    if y < body.y {
+                        bytes[index] = 22
+                    } else if y >= body.maxY {
+                        bytes[index] = UInt8(25 + offset)
+                    } else if x < body.maxX {
+                        let row = y - body.y + offset
+                        bytes[index] = UInt8((row * 31 + x * 7) % 253)
+                        bytes[index + 1] = UInt8((row * 53 + x * 17) % 251)
+                    } else if (body.maxY - 11..<(body.maxY - 7)).contains(y), x < body.maxX + 6 {
+                        bytes[index] = 0
+                        bytes[index + 1] = 0
+                        bytes[index + 2] = 0
+                    }
+                }
+            }
+            return PixelBufferRGBA(width: width, height: height, rgba: bytes)
+        }
+
+        let canvas = LongshotCanvas(width: width, frameHeight: height, maxHeight: 105)
+        let first = frame(at: 0)
+        canvas.seed(first, context: LongshotContext(image: first, selection: viewport, scrollRegion: body))
+        let next = frame(at: 12)
+        XCTAssertEqual(canvas.push(next, context: LongshotContext(image: next, selection: viewport, scrollRegion: body)),
+                       .limitReached)
+        let output = try XCTUnwrap(canvas.exportBuffer())
+        XCTAssertEqual(output.height, 105)
+        XCTAssertEqual(output.pixel(x: 61, y: body.maxY - 9).r, 0)
+        XCTAssertEqual(output.pixel(x: 61, y: body.maxY + 2).r, 255)
+        XCTAssertEqual(output.pixel(x: 13, y: output.height - 1).r, 37)
+
+        let clippedFirstFrame = LongshotCanvas(width: width, frameHeight: height, maxHeight: 72)
+        clippedFirstFrame.seed(first)
+        XCTAssertEqual(clippedFirstFrame.totalHeight, 72)
+        XCTAssertEqual(try XCTUnwrap(clippedFirstFrame.exportBuffer()).rgba, Array(first.rgba.prefix(72 * stride)))
+    }
+
+    func testLongshotPreservesVerifiedContentWhenRepeatedRowsMakeMotionAmbiguous() throws {
+        let width = 96
+        let height = 124
+        let selection = PixelRect(x: 0, y: 0, width: width, height: height)
+        let stride = width * 4
+        let page: [UInt8] = (0..<320).flatMap { row in
+            // The first few rows identify the starting position. The remaining rows repeat exactly.
+            let stripe = row < 20 ? row + 60 : row % 60
+            return (0..<width).flatMap { column in
+                let red = UInt8((stripe * 17 + column * 11) % 251)
+                let green = UInt8((stripe * 23 + column * 9) % 253)
+                let blue = UInt8((stripe * 41 + column * 31) % 247)
+                return [red, green, blue, UInt8(255)]
+            }
+        }
+
+        func frame(at offset: Int) -> PixelBufferRGBA {
+            PixelBufferRGBA(width: width, height: height,
+                            rgba: Array(page[(offset * stride)..<((offset + height) * stride)]))
+        }
+
+        let canvas = LongshotCanvas(width: width, frameHeight: height, params: LongshotParams(minRatio: 0.84))
+        let first = frame(at: 0)
+        canvas.seed(first, context: LongshotContext(image: first, selection: selection))
+        let verified = frame(at: 16)
+        XCTAssertEqual(canvas.push(verified, context: LongshotContext(image: verified, selection: selection)),
+                       .appended(offset: 16, rows: 16))
+        let expected = Array(page[..<((height + 16) * stride)])
+
+        for offset in [88, 76, 28] {
+            let ambiguous = frame(at: offset)
+            XCTAssertEqual(canvas.push(ambiguous, context: LongshotContext(image: ambiguous, selection: selection),
+                                       downwardOnly: true), .failed)
+            XCTAssertNil(canvas.unstitchedOffset)
+            XCTAssertTrue(try XCTUnwrap(canvas.exportBuffer()).rgba == expected)
+        }
+
+        let jumped = frame(at: 88)
+        let jumpedContext = LongshotContext(image: jumped, selection: selection)
+        XCTAssertEqual(canvas.push(jumped, context: jumpedContext, downwardOnly: true,
+                                   measurement: LongshotScrollMeasurement(offset: -48)), .failed)
+        XCTAssertEqual(canvas.push(jumped, context: jumpedContext, downwardOnly: true,
+                                   measurement: LongshotScrollMeasurement(offset: 72)),
+                       .appended(offset: 72, rows: 72))
+        XCTAssertTrue(try XCTUnwrap(canvas.exportBuffer()).rgba == Array(page[..<((height + 88) * stride)]))
+
+        let periodic = frame(at: 120)
+        let repeated = LongshotContext(image: periodic, selection: selection)
+        let atRest = LongshotCanvas(width: width, frameHeight: height)
+        atRest.seed(periodic, context: repeated)
+        XCTAssertEqual(atRest.push(periodic, context: repeated), .failed)
+        XCTAssertEqual(atRest.reconnect(periodic, context: repeated), .failed)
+        XCTAssertEqual(atRest.reconnect(periodic, context: repeated, positionIsUnchanged: true), .still)
+        XCTAssertEqual(atRest.push(periodic, context: repeated, downwardOnly: true,
+                                   measurement: LongshotScrollMeasurement(offset: 60)),
+                       .appended(offset: 60, rows: 60))
+
+        // The window may surround the moving viewport with large, empty margins.
+        let viewport = 60..<(60 + height)
+        let innerSelection = PixelRect(x: 0, y: viewport.lowerBound + 1, width: width, height: 100)
+        let nested = LongshotCanvas(width: width, frameHeight: innerSelection.height)
+        let margin = [UInt8](repeating: 255, count: 60 * stride)
+        func nestedFrame(at offset: Int) throws -> (PixelBufferRGBA, LongshotContext) {
+            let capture = PixelBufferRGBA(width: width, height: height + 180,
+                                          rgba: margin + frame(at: offset).rgba + margin + margin)
+            return (try XCTUnwrap(capture.cropped(to: innerSelection)),
+                    LongshotContext(image: capture, selection: innerSelection))
+        }
+        let (nestedFirst, nestedContext) = try nestedFrame(at: 0)
+        nested.seed(nestedFirst, context: nestedContext)
+        for (position, movement) in [(16, 16), (88, 72)] {
+            let (visible, context) = try nestedFrame(at: position)
+            XCTAssertEqual(nested.push(visible, context: context, downwardOnly: true,
+                                       measurement: LongshotScrollMeasurement(offset: movement, viewportRows: viewport)),
+                           .appended(offset: movement, rows: movement))
+        }
+        nested.includeVisibleTail()
+        XCTAssertTrue(try XCTUnwrap(nested.exportBuffer()).rgba == Array(page[stride..<((height + 88) * stride)]))
+    }
+
+    func testLongshotUsesVisibleBodyAtConfirmedEndWithoutScrolling() throws {
+        let width = 24
+        let selection = PixelRect(x: 0, y: 3, width: width, height: 24)
+        let body = PixelRect(x: 0, y: 0, width: width, height: 90)
+        let window = PixelBufferRGBA(width: width, height: 100,
+                                     rgba: (0..<(width * 100 * 4)).map { UInt8($0 % 251) })
+        let crop = try XCTUnwrap(window.cropped(to: selection))
+        let canvas = LongshotCanvas(width: width, frameHeight: selection.height)
+        canvas.seed(crop, context: LongshotContext(image: window, selection: selection, scrollRegion: body))
+
+        canvas.includeVisibleTail()
+        XCTAssertEqual(canvas.exportBuffer(), crop)
+        var loadedPixels = window.rgba
+        loadedPixels[width * 40 * 4] = 255
+        let loaded = PixelBufferRGBA(width: width, height: 100, rgba: loadedPixels)
+        XCTAssertEqual(canvas.push(crop, context: LongshotContext(image: loaded, selection: selection, scrollRegion: body),
+                                   measurement: LongshotScrollMeasurement(offset: 0)), .still)
+        canvas.includeVisibleTail(positionAtRegionEnd: true)
+        canvas.includeVisibleTail(positionAtRegionEnd: true)
+        XCTAssertEqual(canvas.totalHeight, 87)
+        XCTAssertEqual(canvas.exportBuffer(),
+                       loaded.cropped(to: PixelRect(x: 0, y: 3, width: width, height: 87)))
+        XCTAssertTrue(canvas.undoLast())
+        XCTAssertEqual(canvas.exportBuffer(), crop)
+    }
+
+    func testLongshotKeepsMovingRowsAtTheBottomOfAnInnerViewport() throws {
+        let width = 480
+        let viewportHeight = 480
+        let movement = 16
+        let stride = width * 4
+        let selection = PixelRect(x: 0, y: 0, width: width, height: 220)
+        let colors: [UInt8] = (0..<(viewportHeight + movement)).flatMap { row in
+            (0..<width).flatMap { column in
+                let value: UInt8
+                if column < 10 || column >= width - 10 {
+                    value = row >= 416 ? 230 : 30
+                } else {
+                    value = UInt8((row * 29 + column * 13) % 251)
+                }
+                return [value, value, value, UInt8(255)]
+            }
+        }
+        func context(at offset: Int) -> LongshotContext {
+            let rows = (offset * stride)..<((offset + viewportHeight) * stride)
+            return LongshotContext(
+                image: PixelBufferRGBA(width: width, height: viewportHeight, rgba: Array(colors[rows])),
+                selection: selection
+            )
+        }
+
+        let canvas = LongshotCanvas(width: width, frameHeight: selection.height)
+        let start = context(at: 0)
+        canvas.seed(try XCTUnwrap(start.image.cropped(to: selection)), context: start)
+        let end = context(at: movement)
+        let measurement = LongshotScrollMeasurement(offset: movement, viewportRows: 0..<viewportHeight)
+        XCTAssertEqual(canvas.push(try XCTUnwrap(end.image.cropped(to: selection)), context: end,
+                                   downwardOnly: true, measurement: measurement),
+                       .appended(offset: movement, rows: movement))
+        canvas.includeVisibleTail()
+        XCTAssertEqual(canvas.totalHeight, viewportHeight + movement)
+        XCTAssertTrue(try XCTUnwrap(canvas.exportBuffer()).rgba == colors)
+    }
+
     func testLongshotDownwardUpwardFixedHeaderFooterAndUndo() {
         let w = 64
         let totalContent = 200
@@ -295,213 +574,6 @@ final class AirSnipCoreTests: XCTestCase {
         upCanvas.seed(frameAt(yOffset: 50))
         XCTAssertEqual(upCanvas.push(frameAt(yOffset: 36)), .appended(offset: -14, rows: 14))
         XCTAssertEqual(upCanvas.totalHeight, 10 + (40 + 14) + 10)
-    }
-
-    func testLongshotKeepsLastAcceptedFrameWhenNextSegmentExceedsLimit() throws {
-        let page = longshotRecoveryPage()
-        let canvas = LongshotCanvas(width: page.width, frameHeight: 120, maxHeight: 185)
-        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 40)), .appended(offset: 40, rows: 40))
-        let accepted = try XCTUnwrap(canvas.exportBuffer())
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 80)), .limitReached)
-        XCTAssertTrue(canvas.exportBuffer() == accepted)
-
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 60)), .appended(offset: 20, rows: 20))
-        XCTAssertTrue(canvas.exportBuffer() == page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 180)))
-    }
-
-    func testLongshotRevisitingCapturedRowsDoesNotDuplicateThem() throws {
-        let page = longshotRecoveryPage()
-        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
-        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 40)), .appended(offset: 40, rows: 40))
-        let accepted = try XCTUnwrap(canvas.exportBuffer())
-
-        _ = canvas.push(try longshotRecoveryFrame(on: page, y: 20))
-        XCTAssertTrue(canvas.exportBuffer() == accepted)
-        XCTAssertEqual(canvas.segmentCount, 1)
-
-        _ = canvas.push(try longshotRecoveryFrame(on: page, y: 50))
-        XCTAssertEqual(canvas.segmentCount, 2)
-        XCTAssertTrue(canvas.exportBuffer() == page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 170)))
-    }
-
-    func testLongshotRejoinsTheRemainingCanvasAfterUndoingSeveralSegments() throws {
-        let page = longshotRecoveryPage()
-        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
-        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
-        for top in stride(from: 40, through: 200, by: 40) {
-            XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: top)), .appended(offset: 40, rows: 40))
-        }
-        for _ in 0..<3 {
-            XCTAssertTrue(canvas.undoLast())
-        }
-        XCTAssertEqual(canvas.totalHeight, 200)
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 200)), .failed)
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 100)), .appended(offset: 20, rows: 20))
-        XCTAssertTrue(canvas.exportBuffer() == page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 220)))
-    }
-
-    func testLongshotRejectsCompetingSeamsInRepeatingContent() throws {
-        let source = longshotRecoveryPage()
-        let pattern = try XCTUnwrap(source.cropped(to: PixelRect(x: 0, y: 0, width: source.width, height: 50)))
-        let page = PixelBufferRGBA(width: source.width, height: 200, rgba: pattern.rgba + pattern.rgba + pattern.rgba + pattern.rgba)
-        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
-        canvas.seed(try longshotRecoveryFrame(on: page, y: 0))
-
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: page, y: 69), mode: .automatic), .failed)
-        XCTAssertEqual(canvas.totalHeight, 120)
-    }
-
-    func testLongshotDoesNotConfirmAnIdenticalFrameWhenThePageCanHaveMoved() throws {
-        let page = longshotRecoveryPage()
-        let prefix = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: 0, width: page.width, height: 69)))
-        let section = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: 69, width: page.width, height: 93)))
-        let repeatedPage = PixelBufferRGBA(
-            width: page.width, height: 348, rgba: prefix.rgba + section.rgba + section.rgba + section.rgba
-        )
-        let canvas = LongshotCanvas(width: page.width, frameHeight: 120)
-        canvas.seed(try longshotRecoveryFrame(on: repeatedPage, y: 0))
-        XCTAssertEqual(canvas.push(try longshotRecoveryFrame(on: repeatedPage, y: 69), mode: .automatic),
-                       .appended(offset: 69, rows: 69))
-        let identicalFrameAfterScroll = try longshotRecoveryFrame(on: repeatedPage, y: 162)
-        XCTAssertEqual(canvas.push(identicalFrameAfterScroll, mode: .automatic), .failed)
-        XCTAssertEqual(canvas.push(identicalFrameAfterScroll, mode: .reconnecting), .failed)
-        XCTAssertEqual(canvas.totalHeight, 189)
-    }
-
-    func testLongshotCanStitchAShortViewportWithAFixedHeader() throws {
-        let page = longshotRecoveryPage()
-        let header = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: 200, width: page.width, height: 8)))
-        func frame(at top: Int) throws -> PixelBufferRGBA {
-            let body = try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: top, width: page.width, height: 16)))
-            return PixelBufferRGBA(width: page.width, height: 24, rgba: header.rgba + body.rgba)
-        }
-
-        let canvas = LongshotCanvas(width: page.width, frameHeight: 24)
-        canvas.seed(try frame(at: 0))
-
-        XCTAssertEqual(canvas.push(try frame(at: 5), mode: .automatic), .appended(offset: 5, rows: 5))
-        XCTAssertEqual(canvas.totalHeight, 29)
-    }
-
-    func testLongshotUsesVisibleBodyToAlignARepeatedSelectionWithoutSkippingRows() throws {
-        var page = longshotRecoveryPage()
-        let selectionX = 21
-        let selectionWidth = 8
-        let referenceInset = 40
-        let bodyRows = 10..<34
-        let header = [UInt8](repeating: 30, count: selectionWidth * 4 * bodyRows.lowerBound)
-        let footer = [UInt8](repeating: 210, count: selectionWidth * 4 * 5)
-        for y in 0..<page.height {
-            for x in selectionX..<(selectionX + selectionWidth) {
-                let i = (y * page.width + x) * 4
-                let shade = UInt8(80 + (y % 3) * 30)
-                page.rgba[i] = shade
-                page.rgba[i + 1] = shade
-                page.rgba[i + 2] = shade
-            }
-        }
-
-        func selection(top: Int, height: Int) throws -> PixelBufferRGBA {
-            try XCTUnwrap(page.cropped(to: PixelRect(x: selectionX, y: top, width: selectionWidth, height: height)))
-        }
-
-        func observation(at scroll: Int, seamTint: UInt8 = 0) throws -> (frame: PixelBufferRGBA, reference: LongshotReference) {
-            var sample = try longshotRecoveryFrame(on: page, y: scroll)
-            sample.rgba[(referenceInset * sample.width + selectionX) * 4] += seamTint
-            let body = try XCTUnwrap(sample.cropped(to: PixelRect(
-                x: selectionX, y: referenceInset, width: selectionWidth, height: bodyRows.count
-            )))
-            let frame = PixelBufferRGBA(width: selectionWidth, height: 39, rgba: header + body.rgba + footer)
-            return (frame, LongshotReference(
-                image: sample, bodyRows: bodyRows, selectionTopInReference: referenceInset - bodyRows.lowerBound
-            ))
-        }
-
-        let first = try observation(at: 0)
-        let canvas = LongshotCanvas(width: first.frame.width, frameHeight: first.frame.height)
-        canvas.seed(first.frame, reference: first.reference)
-        XCTAssertEqual(canvas.scrollingBodyHeight, 24)
-
-        let pastGap = try observation(at: 30)
-        XCTAssertEqual(canvas.confirmPreview(with: pastGap.frame, reference: pastGap.reference), .failed)
-        XCTAssertEqual(canvas.push(pastGap.frame, mode: .automatic, reference: pastGap.reference), .failed)
-
-        let mismatching = try observation(at: 9, seamTint: 16)
-        XCTAssertEqual(canvas.push(mismatching.frame, mode: .automatic, reference: mismatching.reference), .failed)
-        XCTAssertTrue(canvas.exportBuffer() == first.frame)
-
-        let overlapping = try observation(at: 9, seamTint: 4)
-        XCTAssertEqual(canvas.push(overlapping.frame, mode: .automatic, reference: overlapping.reference),
-                       .appended(offset: 9, rows: 9))
-        let expectedBody = try selection(top: referenceInset, height: 33)
-        XCTAssertTrue(canvas.exportBuffer()?.rgba == header + expectedBody.rgba + footer)
-
-        for scroll in [18, 27, 36, 45, 54] {
-            let next = try observation(at: scroll)
-            XCTAssertEqual(canvas.push(next.frame, mode: .automatic, reference: next.reference),
-                           .appended(offset: 9, rows: 9))
-        }
-        for _ in 0..<5 {
-            XCTAssertTrue(canvas.undoLast())
-        }
-        let afterUndo = try observation(at: 18)
-        XCTAssertEqual(canvas.push(afterUndo.frame, mode: .reconnecting, reference: afterUndo.reference),
-                       .appended(offset: 9, rows: 9))
-        let rejoinedBody = try selection(top: referenceInset, height: 42)
-        XCTAssertTrue(canvas.exportBuffer()?.rgba == header + rejoinedBody.rgba + footer)
-    }
-
-    func testLongshotKeepsFixedBarsFoundInsideTheLargerReferenceOnce() throws {
-        let page = longshotRecoveryPage()
-        func pageRows(_ y: Int, _ height: Int) throws -> PixelBufferRGBA {
-            try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: y, width: page.width, height: height)))
-        }
-        let header = try pageRows(180, 40).rgba
-        let footer = try pageRows(240, 8).rgba
-        let output = PixelRect(x: 8, y: 2, width: 48, height: 68)
-        func observation(at scroll: Int) throws -> (frame: PixelBufferRGBA, reference: LongshotReference) {
-            let body = try pageRows(scroll, 24)
-            let image = PixelBufferRGBA(width: page.width, height: 72, rgba: header + body.rgba + footer)
-            let frame = try XCTUnwrap(image.cropped(to: output))
-            return (frame, LongshotReference(image: image, bodyRows: 0..<frame.height, selectionTopInReference: output.y))
-        }
-
-        let first = try observation(at: 0)
-        let canvas = LongshotCanvas(width: output.width, frameHeight: output.height)
-        canvas.seed(first.frame, reference: first.reference)
-        let second = try observation(at: 9)
-        XCTAssertEqual(canvas.push(second.frame, mode: .automatic, reference: second.reference),
-                       .appended(offset: 9, rows: 9))
-        let third = try observation(at: 18)
-        XCTAssertEqual(canvas.push(third.frame, mode: .automatic, reference: third.reference),
-                       .appended(offset: 9, rows: 9))
-
-        let expectedBody = try pageRows(0, 42).rgba
-        let expected = PixelBufferRGBA(width: page.width, height: 90, rgba: header + expectedBody + footer)
-        let expectedCrop = expected.cropped(to: PixelRect(x: output.x, y: output.y, width: output.width, height: 86))
-        XCTAssertEqual(canvas.scrollingBodyHeight, 24)
-        XCTAssertTrue(canvas.exportBuffer() == expectedCrop)
-    }
-
-    private func longshotRecoveryPage() -> PixelBufferRGBA {
-        let width = 64
-        let height = 360
-        var document = [UInt8](repeating: 255, count: width * height * 4)
-        for y in 0..<height {
-            for x in 0..<width {
-                let index = (y * width + x) * 4
-                document[index] = UInt8((y * 19 + x * 3) & 255)
-                document[index + 1] = UInt8((y * 37 + x) & 255)
-                document[index + 2] = UInt8((y * 13 + x * 7) & 255)
-            }
-        }
-        return PixelBufferRGBA(width: width, height: height, rgba: document)
-    }
-
-    private func longshotRecoveryFrame(on page: PixelBufferRGBA, y: Int) throws -> PixelBufferRGBA {
-        try XCTUnwrap(page.cropped(to: PixelRect(x: 0, y: y, width: page.width, height: 120)))
     }
 
     func testOCRLinesJoinerCJKAndOutOfOrderSorting() {
@@ -1048,12 +1120,6 @@ final class AirSnipCoreTests: XCTestCase {
             maxHeight: 30000
         )
 
-        // A transient repaint over the seam must not advance automatic scrolling.
-        let unpainted = sliceFrame(scrollY: 30, skeletonBottomRows: 34)
-        canvas.seed(sliceFrame(scrollY: 0))
-        XCTAssertEqual(canvas.push(unpainted, mode: .automatic), .failed)
-        XCTAssertEqual(canvas.totalHeight, frameH)
-
         // 1. Seed initial viewport (`scrollY = 0`), then scroll to `scrollY = 30` where bottom 34 rows still show a loading skeleton!
         canvas.seed(sliceFrame(scrollY: 0))
         let r1 = canvas.push(sliceFrame(scrollY: 30, skeletonBottomRows: 34))
@@ -1078,6 +1144,19 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(refreshedPx.r, doc[expectedDocOffset])
         XCTAssertEqual(refreshedPx.g, doc[expectedDocOffset + 1])
         XCTAssertEqual(refreshedPx.b, doc[expectedDocOffset + 2])
+
+        let selected = PixelRect(x: 0, y: 0, width: width, height: frameH)
+        let visibleCanvas = LongshotCanvas(width: width, frameHeight: frameH,
+                                           params: LongshotParams(minRatio: 0.84, minFixedRows: 8))
+        let visibleFirst = sliceFrame(scrollY: 0)
+        visibleCanvas.seed(visibleFirst, context: .init(image: visibleFirst, selection: selected))
+        let loading = sliceFrame(scrollY: 30, skeletonBottomRows: 7)
+        XCTAssertEqual(visibleCanvas.push(loading, context: .init(image: loading, selection: selected), downwardOnly: true),
+                       .appended(offset: 30, rows: 30))
+        let settled = sliceFrame(scrollY: 30)
+        XCTAssertEqual(visibleCanvas.push(settled, context: .init(image: settled, selection: selected), downwardOnly: true),
+                       .still)
+        XCTAssertTrue(try XCTUnwrap(visibleCanvas.exportBuffer()).rgba.elementsEqual(doc.prefix(150 * width * 4)))
 
         // 4. Full-page stepping (`~80%-85%` of scrollable screen per jump with fixed top browser bar & bottom bar)
         XCTAssertGreaterThanOrEqual(LongshotScrollSpeed.normal.viewportStepFraction, 0.75)
