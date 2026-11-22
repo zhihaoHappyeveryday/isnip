@@ -1,5 +1,14 @@
 # Changelog
 
+## macOS v1.0.7
+
+本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
+
+- **页面长截图**　从菜单栏或截图工具栏框选后，自动滚动并拼图。改善小选区、固定栏和重复内容容易造成的漏拼与中断。
+- **暂停与继续**　按空格暂停，可复制或保存已经拼好的部分。点「继续」时会尝试从已截位置接上。画面无法接上时，保留已经截好的结果。
+- **已知问题**　翻译专项自检在等待 OCR 结果时出现超时，`v1.0.6` 也能复现。
+- **下载**　Apple 芯片 Mac 请选择 arm64，Intel Mac 请选择 amd64。两种架构均提供 DMG、ZIP 和 SHA-256 校验文件。
+
 ## macOS v1.0.6
 
 本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
