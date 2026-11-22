@@ -30,6 +30,8 @@ final class LongshotCaptureSource {
     private var scrollPointIndex = 0
     private var scrollAnchor: ScrollAnchor?
     private var confirmedViewport: Range<Int>?
+    private var sawScrollbarMove = false
+    private var usesNestedViewport = false
 
     init(
         screen: NSScreen, viewport: ASRect, initialCrop: PixelBufferRGBA,
@@ -148,8 +150,15 @@ final class LongshotCaptureSource {
     func tryAnotherScrollPoint() -> Bool {
         guard scrollPointIndex + 1 < scrollPoints.count else { return false }
         scrollPointIndex += 1
-        confirmedViewport = nil
+        resetScrollAnchor()
         return true
+    }
+
+    func resetScrollAnchor() {
+        scrollAnchor = nil
+        confirmedViewport = nil
+        sawScrollbarMove = false
+        usesNestedViewport = false
     }
 
     var hasInnerViewportAnchor: Bool {
@@ -157,9 +166,12 @@ final class LongshotCaptureSource {
         return scrollAnchor?.ancestors.contains { $0.frame.height < scrollArea.bounds.height } == true
     }
 
-    func confirmViewport(from frame: Frame) {
+    func confirmViewport(from frame: Frame, previousPosition: Double?) {
         if let rows = frame.measurement?.viewportRows {
             confirmedViewport = rows
+        }
+        if let previousPosition, let position = frame.position, position != previousPosition {
+            sawScrollbarMove = true
         }
     }
 
@@ -188,7 +200,11 @@ final class LongshotCaptureSource {
               image.width == selection.width, image.height == selection.height else {
             throw Failure.frameUnavailable
         }
-        let measurement = before.movement == after.movement ? after.movement.flatMap(pixelMeasurement) : nil
+        let movement = before.movement == after.movement ? after.movement : nil
+        if let viewport = movement?.viewport, let scrollArea, viewport.height + 1 < scrollArea.bounds.height {
+            usesNestedViewport = true
+        }
+        let measurement = movement.flatMap(pixelMeasurement)
         return Frame(image: image, context: LongshotContext(image: pixels, selection: selection, scrollRegion: region),
                      position: after.position, measurement: measurement)
     }
@@ -216,13 +232,21 @@ final class LongshotCaptureSource {
     }
 
     func restorePosition(_ position: Double) async -> Bool {
-        guard canScroll, let scrollArea else { return false }
+        guard canScroll, positionTracksViewport, let scrollArea else { return false }
         let operation = Task.detached { scrollArea.restore(position) }
         return await withTaskCancellationHandler {
             await operation.value
         } onCancel: {
             operation.cancel()
         }
+    }
+
+    var positionTracksViewport: Bool {
+        sawScrollbarMove && !usesNestedViewport
+    }
+
+    func isAtEnd(_ position: Double?) -> Bool {
+        positionTracksViewport && position == 1
     }
 
     private var canScroll: Bool {

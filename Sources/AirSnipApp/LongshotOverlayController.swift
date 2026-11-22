@@ -19,6 +19,14 @@ private final class FullScreenBorderPanel: NSPanel {
 
 @MainActor
 public final class LongshotSessionController: ObservableObject {
+    private typealias ScrollObservation = (result: LongshotStepResult, position: Double?, offset: Int?)
+
+    private struct TailRecovery {
+        let endOffset: Int?
+        let lastJoinedOffset: Int
+        let lastJoinedPosition: Double?
+    }
+
     @Published public private(set) var pixelWidth: Int = 0
     @Published public private(set) var pixelHeight: Int = 0
     @Published public private(set) var segmentCount: Int = 0
@@ -52,8 +60,11 @@ public final class LongshotSessionController: ObservableObject {
     private var hasLiveFrame = false
     private var manualScrollUntil: TimeInterval = 0
     private var confirmedPosition: Double?
+    private var originalPosition: Double?
+    private var triedRestart = false
     private var pendingScroll: Int?
     private var recoveredAtHeight: Int?
+    private var tailRecovery: TailRecovery?
     private var scrollGain = 1.0
     private var stepScale = 1.0
 
@@ -411,6 +422,7 @@ public final class LongshotSessionController: ObservableObject {
                     try Task.checkCancellation()
                     self.canvas?.seed(frame.image, context: frame.context)
                     self.confirmedPosition = frame.position
+                    self.originalPosition = frame.position
                     self.hasLiveFrame = true
                     self.refreshPreview()
                     if self.pixelHeight >= self.config.longshotMaxHeight {
@@ -448,10 +460,13 @@ public final class LongshotSessionController: ObservableObject {
         return source
     }
 
-    private func readInitialFrame(from source: LongshotCaptureSource) async throws -> LongshotCaptureSource.Frame {
-        for delay: UInt64 in [0, 90, 180, 320] {
+    private func readInitialFrame(
+        from source: LongshotCaptureSource, delays: [UInt64] = [0, 90, 180, 320],
+        matching: (LongshotCaptureSource.Frame) -> Bool = { _ in true }
+    ) async throws -> LongshotCaptureSource.Frame {
+        for delay in delays {
             try await Task.sleep(nanoseconds: delay * 1_000_000)
-            if let frame = try await captureLiveFrame(from: source) { return frame }
+            if let frame = try await captureLiveFrame(from: source), matching(frame) { return frame }
         }
         throw LongshotCaptureSource.Failure.frameUnavailable
     }
@@ -475,7 +490,6 @@ public final class LongshotSessionController: ObservableObject {
     private func runAutomaticScroll(_ source: LongshotCaptureSource) async throws {
         var stationarySince: TimeInterval?
         var stationaryCount = 0
-        var lastAdvanceWasShort = false
         while isAutoScrolling && !Task.isCancelled {
             if controlWindow?.frame.contains(NSEvent.mouseLocation) == true {
                 try await Task.sleep(nanoseconds: 90_000_000)
@@ -497,64 +511,79 @@ public final class LongshotSessionController: ObservableObject {
                 if observation.result == .limitReached { stopAtHeightLimit() }
                 return
             }
+            let measuredEnd = source.isAtEnd(observation.position)
             switch observation.result {
             case .appended(let offset, _), .revisited(let offset):
                 pendingScroll = nil
-                recoveredAtHeight = nil
                 stationarySince = nil
                 stationaryCount = 0
-                let expectedOffset = Double(points) * backingScale * scrollGain
-                lastAdvanceWasShort = segmentCount > 1
-                    && Double(offset) < expectedOffset - max(2, expectedOffset * 0.08)
                 if (observation.position ?? 0) < 0.9999 {
                     let gain = Double(offset) / backingScale / Double(points)
                     scrollGain = max(0.5, min(4, gain))
                 }
             case .still:
                 pendingScroll = nil
+                if measuredEnd {
+                    stopWhenStill(atEnd: true)
+                    return
+                }
                 let now = ProcessInfo.processInfo.systemUptime
                 stationarySince = stationarySince ?? now
                 stationaryCount += 1
                 guard stationaryCount >= 3, now - (stationarySince ?? now) >= 1.1 else { continue }
-                // With no scrollbar value, a short last advance is evidence that the scroll hit a boundary.
-                let measuredEnd = observation.position.map { $0 >= 0.9999 }
-                let atEnd = measuredEnd ?? lastAdvanceWasShort
-                if !atEnd && segmentCount == 0 && source.tryAnotherScrollPoint() {
+                if tailRecovery != nil {
+                    stopWithIncompleteTail()
+                    return
+                }
+                if segmentCount == 0 && source.tryAnotherScrollPoint() {
                     source.positionCursor()
                     stationarySince = nil
                     stationaryCount = 0
                     continue
                 }
-                stopWhenStill(atEnd: atEnd, positionAtRegionEnd: measuredEnd == true)
+                stopWhenStill(atEnd: false)
                 return
             case .limitReached:
                 stopAtHeightLimit()
                 return
             case .failed:
-                let movedDown = hasMovedDown(to: observation.position) || (canvas?.unstitchedOffset ?? 0) > 0
-                if (movedDown || hasChangedPosition(observation.position)) && recoveredAtHeight != pixelHeight {
-                    recoveredAtHeight = pixelHeight
-                    let recovered = try await recoverLastPosition(source, reverseScroll: movedDown ? -points : nil)
-                    guard isAutoScrolling else {
-                        pendingScroll = nil
-                        captureLoopTask = nil
+                pendingScroll = nil
+                if measuredEnd {
+                    if source.isAtEnd(confirmedPosition), canvas?.isAtCapturedEnd == true, observation.offset == 0 {
+                        stopWhenStill(atEnd: true)
                         return
                     }
+                    rememberIncompleteTail(observation)
+                }
+                var recovered = false
+                if recoveredAtHeight != pixelHeight {
+                    recoveredAtHeight = pixelHeight
+                    let reverse = observation.offset.flatMap { $0 != 0 ? wheelPoints(for: -$0) : nil } ?? -points
+                    recovered = try await recoverLastPosition(source, reverseScroll: reverse, preferWheel: tailRecovery != nil)
                     if recovered {
-                        pendingScroll = nil
                         stepScale = max(0.12, stepScale * 0.5)
-                        stationarySince = nil
-                        stationaryCount = 0
-                        lastAdvanceWasShort = false
-                        continue
                     }
-                    if pixelHeight >= config.longshotMaxHeight {
-                        stopAtHeightLimit()
+                }
+                guard isAutoScrolling else {
+                    captureLoopTask = nil
+                    return
+                }
+                if pixelHeight >= config.longshotMaxHeight {
+                    stopAtHeightLimit()
+                    return
+                }
+                if !recovered {
+                    if tailRecovery != nil {
+                        stopWithIncompleteTail()
+                        return
+                    }
+                    guard try await restartFromStart(source) else {
+                        stopAfterInterruption()
                         return
                     }
                 }
-                stopAfterInterruption()
-                return
+                stationarySince = nil
+                stationaryCount = 0
             }
         }
     }
@@ -566,13 +595,14 @@ public final class LongshotSessionController: ObservableObject {
         if canvas.segmentCount == 0 {
             return max(1, Int(min(16, points * 0.20) * stepScale))
         }
-        return max(1, min(220, Int(points * scrollSpeed.viewportStepFraction * 0.75 * stepScale / max(1, scrollGain))))
+        let step = min(220, points * scrollSpeed.viewportStepFraction * 0.75 / max(1, scrollGain))
+        return max(1, Int(step * stepScale))
     }
 
     private func observeScroll(
-        _ source: LongshotCaptureSource, delays: [UInt64]
-    ) async throws -> (result: LongshotStepResult, position: Double?) {
-        var observation: (LongshotStepResult, Double?) = (.failed, nil)
+        _ source: LongshotCaptureSource, delays: [UInt64], reconnectEarlier: Bool = false
+    ) async throws -> ScrollObservation {
+        var observation: ScrollObservation = (.failed, nil, nil)
         for (attempt, delay) in delays.enumerated() {
             try await Task.sleep(nanoseconds: delay * 1_000_000)
             guard let frame = try await captureLiveFrame(from: source, measuringOffset: true) else { continue }
@@ -580,23 +610,53 @@ public final class LongshotSessionController: ObservableObject {
             if segmentCount == 0, source.hasInnerViewportAnchor, frame.measurement?.viewportRows == nil, !finalAttempt {
                 continue
             }
-            let result = processFrame(frame, automatic: true, verifyStationary: finalAttempt)
+            let previousPosition = confirmedPosition
+            var result = processFrame(frame, automatic: true, verifyStationary: finalAttempt)
+            if result == .failed, reconnectEarlier, finalAttempt, let step = reconnect(frame) {
+                result = step
+            }
+            let movement = canvas?.unstitchedOffset ?? frame.measurement?.offset
             switch result {
             case .appended, .revisited, .limitReached:
-                source.confirmViewport(from: frame)
-                return (result, frame.position)
+                source.confirmViewport(from: frame, previousPosition: previousPosition)
+                updateTailRecovery(position: frame.position, source: source)
+                return (result, frame.position, movement)
             case .still:
-                observation = (hasChangedPosition(frame.position) ? .failed : .still, frame.position)
+                if frame.measurement?.offset == 0, updateTailRecovery(position: frame.position, source: source) {
+                    confirmedPosition = frame.position
+                } else if hasChangedPosition(frame.position) || (source.isAtEnd(frame.position) && canvas?.isAtCapturedEnd != true) {
+                    result = .failed
+                }
+                observation = (result, frame.position, movement)
             case .failed:
-                observation = (.failed, frame.position)
+                observation = (.failed, frame.position, movement)
             }
         }
         return observation
     }
 
-    private func hasMovedDown(to position: Double?) -> Bool {
-        guard let confirmedPosition, let position else { return false }
-        return position - confirmedPosition > 0.000_001
+    private func rememberIncompleteTail(_ observation: ScrollObservation) {
+        guard tailRecovery == nil, let canvas else { return }
+        let endOffset = observation.offset.flatMap { $0 > 0 ? canvas.viewportOffset + $0 : nil }
+        tailRecovery = TailRecovery(endOffset: endOffset, lastJoinedOffset: canvas.viewportOffset,
+                                    lastJoinedPosition: confirmedPosition)
+    }
+
+    @discardableResult
+    private func updateTailRecovery(position: Double?, source: LongshotCaptureSource) -> Bool {
+        guard let tailRecovery, let canvas, let position, source.positionTracksViewport else { return false }
+        let movedPastEnd = tailRecovery.endOffset.map { canvas.viewportOffset >= $0 && position < 1 } ?? false
+        let extentGrew = tailRecovery.lastJoinedPosition.map { lastPosition in
+            guard canvas.viewportOffset >= tailRecovery.lastJoinedOffset else { return false }
+            if let originalPosition, originalPosition < lastPosition {
+                return Double(canvas.viewportOffset - 1) * (lastPosition - originalPosition)
+                    > Double(tailRecovery.lastJoinedOffset) * (position - originalPosition)
+            }
+            return position < lastPosition
+        } ?? false
+        guard movedPastEnd || extentGrew else { return false }
+        self.tailRecovery = nil
+        return true
     }
 
     private func hasChangedPosition(_ position: Double?) -> Bool {
@@ -609,52 +669,111 @@ public final class LongshotSessionController: ObservableObject {
         return position == confirmedPosition
     }
 
-    private func recoverLastPosition(_ source: LongshotCaptureSource, reverseScroll: Int?) async throws -> Bool {
+    private func wheelPoints(for pixelOffset: Int) -> Int {
+        Int((Double(pixelOffset) / (backingScale * scrollGain)).rounded(.awayFromZero))
+    }
+
+    private func recoverLastPosition(_ source: LongshotCaptureSource, reverseScroll: Int, preferWheel: Bool) async throws -> Bool {
         var restored = false
-        if let confirmedPosition {
+        if !preferWheel, let confirmedPosition {
             restored = await source.restorePosition(confirmedPosition)
             try Task.checkCancellation()
         }
         guard isAutoScrolling else { return false }
-        if !restored {
-            guard let reverseScroll, source.postScroll(reverseScroll) else { return false }
-        }
-        let observation = try await observeScroll(source, delays: [100, 140, 260])
+        if !restored, !source.postScroll(reverseScroll) { return false }
+        let observation = try await observeScroll(source, delays: [100, 140, 260], reconnectEarlier: true)
         switch observation.result {
         case .still:
             return true
         case .appended, .revisited:
             return true
-        case .limitReached, .failed:
+        case .limitReached:
+            return false
+        case .failed:
+            if source.isAtEnd(observation.position) {
+                rememberIncompleteTail(observation)
+            }
             return false
         }
     }
 
+    private func restartFromStart(_ source: LongshotCaptureSource) async throws -> Bool {
+        guard !triedRestart, let canvas else { return false }
+        triedRestart = true
+        let offset = canvas.viewportOffset + (canvas.unstitchedOffset ?? 0)
+        if offset != 0, !source.postScroll(wheelPoints(for: -offset)) { return false }
+        var firstFrame = try await readRestartFrame(from: source, checking: canvas)
+        if firstFrame == nil, let originalPosition, await source.restorePosition(originalPosition) {
+            try Task.checkCancellation()
+            source.positionCursor()
+            firstFrame = try await readRestartFrame(from: source, checking: canvas)
+        }
+        if firstFrame == nil, let nearbyFrame = try await captureLiveFrame(from: source) {
+            if matchesStart(nearbyFrame, in: source, checking: canvas) {
+                firstFrame = nearbyFrame
+            } else if let remainingOffset = canvas.offsetFromStart(in: nearbyFrame.context), remainingOffset != 0 {
+                guard isAutoScrolling, source.postScroll(wheelPoints(for: -remainingOffset)) else { return false }
+                firstFrame = try await readRestartFrame(from: source, checking: canvas)
+            }
+        }
+        guard let frame = firstFrame else { return false }
+
+        try Task.checkCancellation()
+        let newCanvas = LongshotCanvas(width: canvas.width, frameHeight: canvas.frameHeight,
+                                       params: canvas.params, maxHeight: canvas.maxHeight)
+        newCanvas.seed(frame.image, context: frame.context)
+        self.canvas = newCanvas
+        confirmedPosition = frame.position
+        recoveredAtHeight = nil
+        stepScale = min(stepScale, 0.5)
+        source.resetScrollAnchor()
+        statusHint = L10n.tr("正在从头重截", "Restarting from the original selection", in: config.language)
+        refreshPreview()
+        return true
+    }
+
+    private func readRestartFrame(from source: LongshotCaptureSource, checking canvas: LongshotCanvas) async throws -> LongshotCaptureSource.Frame? {
+        do {
+            return try await readInitialFrame(from: source, delays: [scrollSpeed.settleMilliseconds, 90, 180, 320]) { frame in
+                matchesStart(frame, in: source, checking: canvas)
+            }
+        } catch LongshotCaptureSource.Failure.frameUnavailable {
+            return nil
+        }
+    }
+
+    private func matchesStart(
+        _ frame: LongshotCaptureSource.Frame, in source: LongshotCaptureSource, checking canvas: LongshotCanvas
+    ) -> Bool {
+        let positionMatches = source.positionTracksViewport && originalPosition != nil && originalPosition == frame.position
+        return canvas.isAtStart(frame.image, context: frame.context, positionMatches: positionMatches)
+    }
+
     private func resumeAtVerifiedPosition(_ source: LongshotCaptureSource) async throws -> Bool {
         let current = try await readInitialFrame(from: source)
-        if reconnect(current) { return isAutoScrolling }
+        if reconnect(current) != nil { return isAutoScrolling }
 
         if let confirmedPosition, await source.restorePosition(confirmedPosition) {
             for delay: UInt64 in [130, 200, 300] {
                 try await Task.sleep(nanoseconds: delay * 1_000_000)
-                if let frame = try await captureLiveFrame(from: source), reconnect(frame) {
+                if let frame = try await captureLiveFrame(from: source), reconnect(frame) != nil {
                     return isAutoScrolling
                 }
             }
         }
         try Task.checkCancellation()
-        stopAfterInterruption()
+        pauseAutoScrolling(customHint: L10n.tr("无法确认当前位置，请重新框选", "Could not confirm this position. Select again.", in: config.language))
         return false
     }
 
-    private func reconnect(_ frame: LongshotCaptureSource.Frame) -> Bool {
-        guard let canvas else { return false }
+    private func reconnect(_ frame: LongshotCaptureSource.Frame) -> LongshotStepResult? {
+        guard let canvas else { return nil }
         let step = canvas.reconnect(frame.image, context: frame.context, positionIsUnchanged: isConfirmedPosition(frame.position))
-        guard step != .failed, step != .still || !hasChangedPosition(frame.position) else { return false }
+        guard step != .failed, step != .still || !hasChangedPosition(frame.position) else { return nil }
         accept(step, position: frame.position)
         if step == .limitReached { stopAtHeightLimit() }
         pendingScroll = nil
-        return true
+        return step
     }
 
     private func followManualScroll(_ source: LongshotCaptureSource) async throws {
@@ -694,9 +813,11 @@ public final class LongshotSessionController: ObservableObject {
         let measurement = frame.measurement.flatMap {
             $0.offset != 0 || (verifyStationary && frame.position == nil) ? $0 : nil
         } ?? (isConfirmedPosition(frame.position) ? LongshotScrollMeasurement(offset: 0) : nil)
+        let preservingEnd = automatic && frameSource?.isAtEnd(confirmedPosition) == true
+            && frameSource?.isAtEnd(frame.position) == true
         let step = canvas.push(frame.image, context: frame.context, downwardOnly: automatic,
                                refreshStationaryFrame: !hasChangedPosition(frame.position),
-                               measurement: measurement)
+                               measurement: measurement, preserveVerifiedEnd: preservingEnd)
         accept(step, position: frame.position)
         return step
     }
@@ -726,14 +847,12 @@ public final class LongshotSessionController: ObservableObject {
         pauseAutoScrolling(customHint: L10n.tr("已达高度上限", "Height limit reached", in: config.language))
     }
 
-    private func stopWhenStill(atEnd: Bool, positionAtRegionEnd: Bool) {
-        if atEnd {
-            canvas?.includeVisibleTail(positionAtRegionEnd: positionAtRegionEnd)
-            refreshPreview()
-            if pixelHeight >= config.longshotMaxHeight {
-                stopAtHeightLimit()
-                return
-            }
+    private func stopWhenStill(atEnd: Bool) {
+        canvas?.includeVisibleTail(positionAtRegionEnd: atEnd)
+        refreshPreview()
+        if pixelHeight >= config.longshotMaxHeight {
+            stopAtHeightLimit()
+            return
         }
         reachedBottom = atEnd
         pauseAutoScrolling(customHint: atEnd
@@ -742,8 +861,15 @@ public final class LongshotSessionController: ObservableObject {
     }
 
     private func stopAfterInterruption() {
+        pendingScroll = nil
         pauseAutoScrolling(customHint: L10n.tr(
-            "拼接中断，已保留结果，可重新框选", "Stitching stopped. Result kept. Select again to restart.", in: config.language
+            "长截图未完成，已保留结果", "Long screenshot incomplete. Captured result kept.", in: config.language
+        ))
+    }
+
+    private func stopWithIncompleteTail() {
+        pauseAutoScrolling(customHint: L10n.tr(
+            "末尾未接上，已保留结果", "Could not capture the end. Captured result kept.", in: config.language
         ))
     }
 
