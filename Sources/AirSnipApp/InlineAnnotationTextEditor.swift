@@ -12,7 +12,7 @@ final class InlineAnnotationTextEditor: NSView, NSTextViewDelegate {
     init(origin: NSPoint, clip: NSRect, layout: AnnotationTextLayout, text: String, font: NSFont, color: NSColor) {
         self.layout = layout
         let lineHeight = layout.defaultLineHeight(for: font)
-        textView = NSTextView(
+        textView = AnnotationTextView(
             frame: NSRect(x: origin.x - clip.minX, y: origin.y - clip.minY, width: 1, height: lineHeight),
             textContainer: layout.container
         )
@@ -47,5 +47,13 @@ final class InlineAnnotationTextEditor: NSView, NSTextViewDelegate {
         guard commandSelector == #selector(cancelOperation(_:)), !textView.hasMarkedText() else { return false }
         onCancel?()
         return true
+    }
+}
+
+private final class AnnotationTextView: NSTextView {
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        let height = min(font?.pointSize ?? rect.height, rect.height)
+        let caret = rect.insetBy(dx: 0, dy: (rect.height - height) / 2)
+        super.drawInsertionPoint(in: caret, color: color, turnedOn: flag)
     }
 }
