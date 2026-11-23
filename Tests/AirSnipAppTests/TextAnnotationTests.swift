@@ -6,6 +6,28 @@ import AirSnipCore
 
 final class TextAnnotationTests: XCTestCase {
     @MainActor
+    func testClickCentersTheFirstCaretAtBothFontSizes() throws {
+        for size in [16.0, 32.0] {
+            var config = AirSnipConfig()
+            config.defaultFontFamily = "PingFang SC"
+            config.defaultFontSize = size
+            let screenshot = try AnnotationWindow(config: config)
+            defer { screenshot.session.cancelSession() }
+            try screenshot.clickToolbar(.tool(.text))
+
+            let point = NSPoint(x: 180, y: 220)
+            try screenshot.click(at: point)
+            let editor = try screenshot.textView()
+            let caret = screenshot.caretRect(in: editor)
+            XCTAssertEqual(caret.minX, point.x, accuracy: 1 / screenshot.scale)
+            XCTAssertEqual(caret.midY, point.y, accuracy: 1 / screenshot.scale, "\(size) pt")
+
+            editor.insertText("中 H", replacementRange: editor.selectedRange())
+            XCTAssertEqual(screenshot.caretRect(in: editor).midY, point.y, accuracy: 1 / screenshot.scale)
+        }
+    }
+
+    @MainActor
     func testClickToTypeWrapsAtTheSelectionEdgeAndCopiesTheSameLayout() throws {
         let screenshot = try AnnotationWindow()
         defer { screenshot.session.cancelSession() }
@@ -16,7 +38,7 @@ final class TextAnnotationTests: XCTestCase {
         XCTAssertEqual(NSCursor.current, NSCursor.iBeam)
         try screenshot.click(at: start)
         let text = try screenshot.textView()
-        XCTAssertEqual(text.convert(text.textContainerOrigin, to: screenshot.canvas), start)
+        XCTAssertEqual(screenshot.caretRect(in: text).midY, start.y, accuracy: 1 / screenshot.scale)
         XCTAssertFalse(text.drawsBackground)
         text.insertText("测试文字测试文字", replacementRange: text.selectedRange())
         try screenshot.pressKey(kVK_Return, characters: "\r")
@@ -32,13 +54,7 @@ final class TextAnnotationTests: XCTestCase {
         screenshot.session.onCompleteCopy = { image, _ in copied = image }
         try screenshot.clickToolbar(.copy)
         let exported = try screenshot.textRows(in: XCTUnwrap(copied))
-        XCTAssertEqual(exported.count, live.count)
-        for (before, after) in zip(live, exported) {
-            XCTAssertEqual(before.minX, after.minX, accuracy: 1)
-            XCTAssertEqual(before.minY, after.minY, accuracy: 1)
-            XCTAssertEqual(before.width, after.width, accuracy: 1)
-            XCTAssertEqual(before.height, after.height, accuracy: 1)
-        }
+        assertSameTextRows(live, exported)
     }
 
     @MainActor
@@ -61,6 +77,31 @@ final class TextAnnotationTests: XCTestCase {
     }
 
     @MainActor
+    func testChangingFontSizeKeepsTheTextOriginWhenReopened() throws {
+        var config = AirSnipConfig()
+        config.defaultFontSize = 16
+        let screenshot = try AnnotationWindow(config: config)
+        defer { screenshot.session.cancelSession() }
+        try screenshot.clickToolbar(.tool(.text))
+
+        let start = NSPoint(x: 180, y: 220)
+        try screenshot.click(at: start)
+        let text = try screenshot.textView()
+        let originalTop = screenshot.caretRect(in: text).minY
+        text.insertText("H", replacementRange: text.selectedRange())
+        try screenshot.click(at: NSPoint(x: 260, y: 270))
+        try screenshot.pressKey(kVK_Escape, characters: "\u{1b}")
+
+        let hit = NSPoint(x: start.x + 4, y: start.y)
+        try screenshot.click(at: hit)
+        for _ in 0..<8 { try screenshot.clickToolbar(id: "text.size.up") }
+        try screenshot.click(at: hit, count: 2)
+        let resized = try screenshot.textView()
+        XCTAssertEqual(resized.font?.pointSize, 32)
+        XCTAssertEqual(screenshot.caretRect(in: resized).minY, originalTop, accuracy: 1 / screenshot.scale)
+    }
+
+    @MainActor
     func testTwoClicksPlaceTwoDraftsAndDoubleClickEditsTheMovedTextInPlace() throws {
         let screenshot = try AnnotationWindow()
         defer { screenshot.session.cancelSession() }
@@ -70,12 +111,13 @@ final class TextAnnotationTests: XCTestCase {
         let content = "测试文字测试文字"
         try screenshot.click(at: start)
         let first = try screenshot.textView()
+        let firstLineTop = screenshot.caretRect(in: first).minY
         first.insertText(content, replacementRange: first.selectedRange())
         let nextStart = NSPoint(x: start.x - 2, y: start.y + 5)
         try screenshot.click(at: nextStart)
         let next = try screenshot.textView()
         XCTAssertFalse(first === next)
-        XCTAssertEqual(next.convert(next.textContainerOrigin, to: screenshot.canvas), nextStart)
+        XCTAssertEqual(screenshot.caretRect(in: next).midY, nextStart.y, accuracy: 1 / screenshot.scale)
         XCTAssertTrue(next.string.isEmpty)
         next.insertText("取消", replacementRange: next.selectedRange())
         try screenshot.pressKey(kVK_Escape, characters: "\u{1b}")
@@ -84,19 +126,20 @@ final class TextAnnotationTests: XCTestCase {
         let initial = try screenshot.textRows(in: screenshot.preview())
         XCTAssertEqual(initial.count, 2)
 
-        try screenshot.click(at: NSPoint(x: start.x + 10, y: start.y + 20))
+        try screenshot.click(at: NSPoint(x: start.x + 10, y: firstLineTop + 20))
         XCTAssertFalse(screenshot.window.firstResponder is NSTextView)
         // Move toward the left edge, then move back. The two wrapped lines keep their spacing.
-        try screenshot.drag(from: NSPoint(x: start.x + 10, y: start.y), to: NSPoint(x: 100, y: start.y + 8))
-        try screenshot.drag(from: NSPoint(x: 110, y: start.y + 8), to: NSPoint(x: 190, y: start.y + 8))
+        let movedLineTop = firstLineTop + 8
+        try screenshot.drag(from: NSPoint(x: start.x + 10, y: firstLineTop), to: NSPoint(x: 100, y: movedLineTop))
+        try screenshot.drag(from: NSPoint(x: 110, y: movedLineTop), to: NSPoint(x: 190, y: movedLineTop))
         let moved = try screenshot.textRows(in: screenshot.preview())
         XCTAssertEqual(moved, initial.map { $0.offsetBy(dx: -110 * screenshot.scale, dy: 8 * screenshot.scale) })
 
-        let hit = NSPoint(x: 171, y: 172)
+        let hit = NSPoint(x: 171, y: movedLineTop + 1)
         try screenshot.click(at: hit, count: 2)
         let editing = try screenshot.textView()
         XCTAssertEqual(editing.string, content)
-        XCTAssertEqual(editing.convert(editing.textContainerOrigin, to: screenshot.canvas), NSPoint(x: 170, y: 171))
+        XCTAssertEqual(screenshot.caretRect(in: editing).minY, movedLineTop, accuracy: 1 / screenshot.scale)
         editing.string = "改"
         XCTAssertEqual(try screenshot.textRows(in: screenshot.preview()).count, 1)
         try screenshot.pressKey(kVK_Escape, characters: "\u{1b}")
@@ -110,33 +153,59 @@ final class TextAnnotationTests: XCTestCase {
         try screenshot.clickToolbar(.undo)
         XCTAssertEqual(try screenshot.textRows(in: screenshot.preview()), moved)
 
-        try screenshot.click(at: NSPoint(x: 182, y: 190))
-        let corner = NSPoint(x: 170 + first.bounds.width, y: 171 + first.bounds.height)
+        try screenshot.click(at: NSPoint(x: 182, y: movedLineTop + 19))
+        let corner = NSPoint(x: 170 + first.bounds.width, y: movedLineTop + first.bounds.height)
         try screenshot.drag(from: corner, to: NSPoint(x: corner.x + 30, y: corner.y + 22))
         let resized = try screenshot.textRows(in: screenshot.preview())
         XCTAssertGreaterThan(try XCTUnwrap(resized.first).height, try XCTUnwrap(moved.first).height)
     }
 
     @MainActor
-    func testTypingAtTheBottomRightKeepsTheClickOriginEvenWhenAMarkIsClipped() throws {
+    func testTypingAtTheTopKeepsTheClickHeightAndClipsTheOutput() throws {
         let screenshot = try AnnotationWindow()
         defer { screenshot.session.cancelSession() }
         try screenshot.clickToolbar(.tool(.text))
+        let halfHeight = try screenshot.unclippedCaretHeight() / 2
+
+        let edge = NSPoint(x: 180, y: screenshot.selection.minY + 2)
+        try screenshot.click(at: edge)
+        let editor = try screenshot.textView()
+        let caret = screenshot.caretRect(in: editor)
+        XCTAssertEqual(caret.minY, screenshot.selection.minY, accuracy: 1 / screenshot.scale)
+        XCTAssertEqual(caret.maxY, edge.y + halfHeight, accuracy: 1 / screenshot.scale)
+
+        editor.insertText("H", replacementRange: editor.selectedRange())
+        let visible = try screenshot.textRows(in: screenshot.preview())
+        XCTAssertEqual(try XCTUnwrap(visible.first).minY, 0)
+        var copied: CGImage?
+        screenshot.session.onCompleteCopy = { image, _ in copied = image }
+        try screenshot.clickToolbar(.copy)
+        assertSameTextRows(visible, try screenshot.textRows(in: XCTUnwrap(copied)))
+    }
+
+    @MainActor
+    func testTypingAtTheBottomRightKeepsTheClickHeightEvenWhenAMarkIsClipped() throws {
+        let screenshot = try AnnotationWindow()
+        defer { screenshot.session.cancelSession() }
+        try screenshot.clickToolbar(.tool(.text))
+        let halfHeight = try screenshot.unclippedCaretHeight() / 2
 
         let edge = NSPoint(x: screenshot.selection.maxX - 2, y: screenshot.selection.maxY - 12)
         try screenshot.click(at: edge)
         let editor = try screenshot.textView()
-        XCTAssertEqual(editor.convert(editor.textContainerOrigin, to: screenshot.canvas), edge)
+        let caret = screenshot.caretRect(in: editor)
+        XCTAssertEqual(caret.minX, edge.x, accuracy: 1 / screenshot.scale)
+        XCTAssertEqual(caret.minY, edge.y - halfHeight, accuracy: 1 / screenshot.scale)
+        XCTAssertEqual(caret.maxY, screenshot.selection.maxY, accuracy: 1 / screenshot.scale)
         editor.insertText("T", replacementRange: editor.selectedRange())
         let visible = try screenshot.textRows(in: screenshot.preview())
         let first = try XCTUnwrap(visible.first)
         XCTAssertLessThanOrEqual(first.width, 2 * screenshot.scale)
-        XCTAssertGreaterThanOrEqual(first.minY, (edge.y - screenshot.selection.minY) * screenshot.scale)
 
         var copied: CGImage?
         screenshot.session.onCompleteCopy = { image, _ in copied = image }
         try screenshot.clickToolbar(.copy)
-        XCTAssertEqual(try screenshot.textRows(in: XCTUnwrap(copied)), visible)
+        assertSameTextRows(visible, try screenshot.textRows(in: XCTUnwrap(copied)))
     }
 
     @MainActor
@@ -154,6 +223,7 @@ final class TextAnnotationTests: XCTestCase {
         let center = NSPoint(x: window.canvas.bounds.midX, y: window.canvas.bounds.midY)
         try window.click(at: center)
         let text = try window.textView()
+        XCTAssertEqual(window.caretRect(in: text).midY, center.y, accuracy: 1 / window.window.backingScaleFactor)
         text.insertText("长图", replacementRange: text.selectedRange())
         var saved: CGImage?
         session.onSaveImage = { image, _, _, _ in saved = image; return true }
@@ -164,8 +234,7 @@ final class TextAnnotationTests: XCTestCase {
         XCTAssertEqual(output.height, image.height)
         let line = try XCTUnwrap(window.textRows(in: output).first)
         XCTAssertEqual(line.minX, CGFloat(image.width) / 2, accuracy: 10)
-        XCTAssertGreaterThan(line.minY, CGFloat(image.height) / 2)
-        XCTAssertLessThan(line.minY, CGFloat(image.height) / 2 + 60)
+        XCTAssertEqual(line.midY, CGFloat(image.height) / 2, accuracy: 15)
     }
 
     @MainActor
@@ -190,12 +259,16 @@ final class TextAnnotationTests: XCTestCase {
             pin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: size.width / 2, y: size.height))
         }
         XCTAssertEqual(pin.zoomScale, 1)
+        let size = pin.window.frame.size
+        pin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: size.width / 2, y: size.height))
+        XCTAssertGreaterThan(pin.zoomScale, 1)
         let scroll = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                           wheel1: -Int32(image.height), wheel2: 0, wheel3: 0))
         scroll.flags = .maskShift
         pin.window.contentView?.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: scroll)))
         let frame = pin.window.frame
-        XCTAssertEqual(pin.projectedImageFrame.minY, frame.minY, accuracy: 1)
+        let imageFrame = pin.projectedImageFrame
+        XCTAssertEqual(imageFrame.minY, frame.minY, accuracy: 1)
 
         let session = CaptureSessionCoordinator(config: config, mode: .pinAnnotation(pin))
         defer { session.cancelSession() }
@@ -205,22 +278,53 @@ final class TextAnnotationTests: XCTestCase {
         try window.clickToolbar(.tool(.text))
 
         let location = NSRect(x: frame.minX + 30, y: frame.maxY - 95, width: 1, height: 1)
-        let click = window.window.convertFromScreen(location).origin
-        try window.click(at: window.canvas.convert(click, from: nil))
+        let click = window.canvas.convert(window.window.convertFromScreen(location).origin, from: nil)
+        try window.click(at: click)
         let text = try window.textView()
-        text.insertText("贴图", replacementRange: text.selectedRange())
+        XCTAssertEqual(window.caretRect(in: text).midY, click.y, accuracy: 1 / window.window.backingScaleFactor)
+        text.insertText("H中\nH图", replacementRange: text.selectedRange())
+
+        let sample = NSRect(x: click.x - 4, y: click.y - 25, width: 150, height: 90)
+        let preview = try window.preview(in: sample)
+        let liveRows = try window.textRows(in: preview)
+        XCTAssertEqual(liveRows.count, 2)
+
+        let sampleInWindow = window.canvas.convert(sample.origin, to: nil)
+        let sampleOnScreen = window.window.convertToScreen(NSRect(origin: sampleInWindow, size: .zero)).origin
+        let previewScale = CGFloat(preview.width) / sample.width
+        let sourceScaleX = CGFloat(image.width) / imageFrame.width
+        let sourceScaleY = CGFloat(image.height) / imageFrame.height
+        let projectedRows = liveRows.map { row in
+            CGRect(
+                x: (sampleOnScreen.x - imageFrame.minX + row.minX / previewScale) * sourceScaleX,
+                y: (imageFrame.maxY - sampleOnScreen.y + row.minY / previewScale) * sourceScaleY,
+                width: row.width / previewScale * sourceScaleX,
+                height: row.height / previewScale * sourceScaleY
+            )
+        }
         try window.clickToolbar(.copy)
 
         XCTAssertEqual(pin.cgImage.width, image.width)
         XCTAssertEqual(pin.cgImage.height, image.height)
-        let line = try XCTUnwrap(window.textRows(in: pin.cgImage).first)
-        XCTAssertEqual(line.minX, 60, accuracy: 8)
-        XCTAssertEqual(line.minY, CGFloat(image.height) - frame.height * 2 + 190, accuracy: 28)
+        let exportedRows = try window.textRows(in: pin.cgImage)
+        assertSameTextRows(projectedRows, exportedRows, accuracy: max(sourceScaleX, sourceScaleY))
     }
 
     private static func whiteImage(width: Int, height: Int) throws -> CGImage {
         let pixels = PixelBufferRGBA(width: width, height: height, rgba: [UInt8](repeating: 255, count: width * height * 4))
         return try XCTUnwrap(pixels.makeCGImage())
+    }
+
+    private func assertSameTextRows(
+        _ preview: [CGRect], _ output: [CGRect], accuracy: CGFloat = 1, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertEqual(preview.count, output.count, file: file, line: line)
+        for (before, after) in zip(preview, output) {
+            XCTAssertEqual(before.minX, after.minX, accuracy: accuracy, file: file, line: line)
+            XCTAssertEqual(before.minY, after.minY, accuracy: accuracy, file: file, line: line)
+            XCTAssertEqual(before.width, after.width, accuracy: accuracy, file: file, line: line)
+            XCTAssertEqual(before.height, after.height, accuracy: accuracy, file: file, line: line)
+        }
     }
 
     @MainActor
@@ -231,7 +335,7 @@ final class TextAnnotationTests: XCTestCase {
         let selection: NSRect
         let scale: Double
 
-        convenience init() throws {
+        convenience init(config: AirSnipConfig = AirSnipConfig()) throws {
             _ = NSApplication.shared
             let screen = try XCTUnwrap(NSScreen.main)
             let scale = screen.backingScaleFactor
@@ -245,7 +349,7 @@ final class TextAnnotationTests: XCTestCase {
                 cgImage: try XCTUnwrap(pixels.makeCGImage()), rawBuffer: pixels, backingScale: scale,
                 windowsLocalTopDown: []
             )
-            let session = CaptureSessionCoordinator(config: AirSnipConfig())
+            let session = CaptureSessionCoordinator(config: config)
             session.startWithSnapshots([snapshot])
             let selection = NSRect(x: 96, y: 130, width: 294, height: 235)
             try self.init(session: session, selection: selection, scale: scale)
@@ -265,9 +369,25 @@ final class TextAnnotationTests: XCTestCase {
             try XCTUnwrap(window.firstResponder as? NSTextView)
         }
 
+        func caretRect(in editor: NSTextView) -> NSRect {
+            let screen = editor.firstRect(forCharacterRange: editor.selectedRange(), actualRange: nil)
+            return canvas.convert(window.convertFromScreen(screen), from: nil)
+        }
+
+        func unclippedCaretHeight() throws -> CGFloat {
+            try click(at: NSPoint(x: selection.midX, y: selection.midY))
+            let height = caretRect(in: try textView()).height
+            try pressKey(kVK_Escape, characters: "\u{1b}")
+            return height
+        }
+
         func clickToolbar(_ slot: ToolbarSlot) throws {
+            try clickToolbar(id: slot.key)
+        }
+
+        func clickToolbar(id: String) throws {
             canvas.display()
-            let rect = try XCTUnwrap(canvas.toolbarItemRect(id: slot.key), "Missing toolbar button \(slot.key)")
+            let rect = try XCTUnwrap(canvas.toolbarItemRect(id: id), "Missing toolbar button \(id)")
             try click(at: NSPoint(x: rect.midX, y: rect.midY))
         }
 
@@ -305,9 +425,10 @@ final class TextAnnotationTests: XCTestCase {
             window.sendEvent(event)
         }
 
-        func preview() throws -> CGImage {
-            let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: selection))
-            canvas.cacheDisplay(in: selection, to: bitmap)
+        func preview(in rect: NSRect? = nil) throws -> CGImage {
+            let captureRect = rect ?? selection
+            let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: captureRect))
+            canvas.cacheDisplay(in: captureRect, to: bitmap)
             return try XCTUnwrap(bitmap.cgImage)
         }
 

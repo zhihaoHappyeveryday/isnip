@@ -9,9 +9,9 @@ final class InlineAnnotationTextEditor: NSView, NSTextViewDelegate {
     var onCancel: (() -> Void)?
     private let layout: AnnotationTextLayout
 
-    init(origin: NSPoint, clip: NSRect, wrappingWidth: Double?, text: String, font: NSFont, color: NSColor) {
-        layout = AnnotationTextLayout(wrappingWidth: wrappingWidth)
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+    init(origin: NSPoint, clip: NSRect, layout: AnnotationTextLayout, text: String, font: NSFont, color: NSColor) {
+        self.layout = layout
+        let lineHeight = layout.defaultLineHeight(for: font)
         textView = NSTextView(
             frame: NSRect(x: origin.x - clip.minX, y: origin.y - clip.minY, width: 1, height: lineHeight),
             textContainer: layout.container

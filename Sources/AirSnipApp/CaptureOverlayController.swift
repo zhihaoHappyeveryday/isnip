@@ -4047,7 +4047,7 @@ final class OverlayCanvasView: NSView {
 
     private func beginInlineTextEdit(existingObject: AnnotationObject?, at point: ASPoint) {
         guard let selection else { return }
-        let object = existingObject ?? AnnotationObject(
+        var object = existingObject ?? AnnotationObject(
             style: AnnotationStyle(color: currentSwatchColor, lineWidth: currentLineWidth),
             kind: .text(pos: point, text: "", fontSize: currentFontSize, fontFamily: currentFontFamily,
                         bold: textBold, italic: textItalic, measuredWidth: 0, measuredHeight: 0,
@@ -4056,13 +4056,20 @@ final class OverlayCanvasView: NSView {
         guard case .text(let origin, let text, let size, let family, let bold, let italic, _, _, let wrap) = object.kind else {
             return
         }
+        let font = AnnotationRenderer.resolveNSFont(family: family, size: size, bold: bold, italic: italic)
+        let layout = AnnotationTextLayout(wrappingWidth: wrap)
+        let isNew = existingObject == nil
+        let caretOffsetY = isNew ? -Double(layout.defaultLineHeight(for: font)) / 2 : 0
+        if isNew {
+            object.translate(dx: 0, dy: caretOffsetY)
+        }
+        let textOrigin = origin.offset(dx: 0, dy: caretOffsetY)
         let editor = InlineAnnotationTextEditor(
-            origin: origin.cgPoint, clip: selection.cgRect, wrappingWidth: wrap, text: text,
-            font: AnnotationRenderer.resolveNSFont(family: family, size: size, bold: bold, italic: italic),
-            color: object.style.color.nsColor
+            origin: textOrigin.cgPoint, clip: selection.cgRect, layout: layout, text: text,
+            font: font, color: object.style.color.nsColor
         )
         editor.onCancel = { [weak self] in self?.cancelInlineEditors() }
-        textEdit = TextEdit(editor: editor, object: object, isNew: existingObject == nil)
+        textEdit = TextEdit(editor: editor, object: object, isNew: isNew)
         document.selectedID = existingObject?.id
         addSubview(editor)
         NSApp.activate(ignoringOtherApps: true)

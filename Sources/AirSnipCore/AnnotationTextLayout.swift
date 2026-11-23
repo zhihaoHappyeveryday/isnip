@@ -23,6 +23,10 @@ public final class AnnotationTextLayout {
         layoutManager.addTextContainer(container)
     }
 
+    public func defaultLineHeight(for font: NSFont) -> CGFloat {
+        layoutManager.defaultLineHeight(for: font)
+    }
+
     func setText(_ text: String, font: NSFont, color: NSColor) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .left
