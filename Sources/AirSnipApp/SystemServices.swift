@@ -50,9 +50,9 @@ public enum ScreenCaptureService {
         pid="$1"; app="$2"; shift 2
         while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
         if [ "$#" -gt 0 ]; then
-          open "$app" --args "$@"
+          exec /usr/bin/open -n "$app" --args "$@"
         else
-          open "$app"
+          exec /usr/bin/open -n "$app"
         fi
         """
         let proc = Process()

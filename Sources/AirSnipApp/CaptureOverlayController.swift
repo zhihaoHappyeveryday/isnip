@@ -4194,6 +4194,10 @@ final class OverlayCanvasView: NSView {
 
     private func captureAndPresentIsolatedWindow(candidate: WindowSnapCandidate, includeShadow: Bool) {
         guard !isCapturingIsolatedWindow, let snapshot = screenSnapshot else { return }
+        guard ScreenCaptureService.hasScreenCapturePermission() else {
+            coordinator?.cancelSession()
+            return
+        }
         isCapturingIsolatedWindow = true
         let fallbackScale = snapshot.backingScale
         let screenW = Double(bounds.width)
@@ -4204,6 +4208,10 @@ final class OverlayCanvasView: NSView {
             defer { self.isCapturingIsolatedWindow = false }
 
             guard let capturedCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) else {
+                guard ScreenCaptureService.hasScreenCapturePermission() else {
+                    self.coordinator?.cancelSession()
+                    return
+                }
                 ToastHUD.show(
                     L10n.tr("窗口捕获失败", "Window capture failed"),
                     kind: .warning,

@@ -412,6 +412,10 @@ public final class LongshotSessionController: ObservableObject {
             guard let self else { return }
             do {
                 try await Task.sleep(nanoseconds: initialDelayMs * 1_000_000)
+                guard ScreenCaptureService.hasScreenCapturePermission() else {
+                    self.cancel()
+                    return
+                }
                 let source = try await self.prepareFrameSource()
                 if automatically {
                     source.positionCursor()
@@ -444,6 +448,10 @@ public final class LongshotSessionController: ObservableObject {
                 self.pauseAutoScrolling(customHint: L10n.tr("目标窗口已变化，请重新框选", "Window changed. Select it again.", in: self.config.language))
             } catch {
                 guard !Task.isCancelled else { return }
+                guard ScreenCaptureService.hasScreenCapturePermission() else {
+                    self.cancel()
+                    return
+                }
                 self.pauseAutoScrolling(customHint: L10n.tr("暂时无法读取画面", "Could not read the selected area", in: self.config.language))
             }
         }
@@ -482,7 +490,10 @@ public final class LongshotSessionController: ObservableObject {
             throw CancellationError()
         } catch LongshotCaptureSource.Failure.targetChanged {
             throw LongshotCaptureSource.Failure.targetChanged
+        } catch LongshotCaptureSource.Failure.frameUnavailable {
+            return nil
         } catch {
+            guard ScreenCaptureService.hasScreenCapturePermission() else { throw error }
             return nil
         }
     }

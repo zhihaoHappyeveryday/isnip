@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Darwin
 import SwiftUI
 import AirSnipCore
 
@@ -170,7 +171,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         guard let bundleID = Bundle.main.bundleIdentifier else { return }
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != currentPID && !$0.isTerminated }
+            .filter { app in
+                let pid = app.processIdentifier
+                guard pid > 0, pid != currentPID, !app.isTerminated else { return false }
+                // LaunchServices can still report the previous process just after it exits.
+                return kill(pid, 0) == 0 || errno != ESRCH
+            }
         if !others.isEmpty {
             DistributedNotificationCenter.default().postNotificationName(
                 singleInstanceActivateNotification,
@@ -565,9 +571,16 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         isCapturingSnapshots = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isCapturingSnapshots = false }
+            defer {
+                // Ignore hotkey callbacks queued while the permission alert was modal.
+                DispatchQueue.main.async { self.isCapturingSnapshots = false }
+            }
             if fromMenu {
                 try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+            guard ScreenCaptureService.hasScreenCapturePermission() else {
+                ScreenCaptureService.showPermissionGuidanceAlert()
+                return
             }
             do {
                 let snapshots = try await ScreenCaptureService.captureAllDisplays()
