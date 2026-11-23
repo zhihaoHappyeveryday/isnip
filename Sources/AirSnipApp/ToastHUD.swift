@@ -33,6 +33,8 @@ enum ToastHUD {
     private static var active: (content: Content, dark: Bool, panel: NSPanel, presentation: Presentation)?
     private static var dismissTask: Task<Void, Never>?
 
+    static var isShowing: Bool { active != nil }
+
     @discardableResult
     static func show(
         _ title: String,

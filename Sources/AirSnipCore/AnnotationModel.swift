@@ -316,7 +316,8 @@ public struct AnnotationStyle: Equatable, Codable, Sendable {
 public enum AnnotationKind: Equatable, Codable, Sendable {
     case rect(a: ASPoint, b: ASPoint, cornerRadius: Double, filled: Bool)
     case arrow(from: ASPoint, c1: ASPoint, c2: ASPoint, to: ASPoint)
-    case text(pos: ASPoint, text: String, fontSize: Double, fontFamily: String, bold: Bool, italic: Bool, measuredWidth: Double, measuredHeight: Double)
+    case text(pos: ASPoint, text: String, fontSize: Double, fontFamily: String, bold: Bool, italic: Bool,
+              measuredWidth: Double, measuredHeight: Double, wrappingWidth: Double? = nil)
     case highlight(a: ASPoint, b: ASPoint, cornerRadius: Double)
     case blur(a: ASPoint, b: ASPoint, blurRadius: Double, cornerRadius: Double)
     case glow(a: ASPoint, b: ASPoint, cornerRadius: Double)
@@ -324,6 +325,17 @@ public enum AnnotationKind: Equatable, Codable, Sendable {
     case line(from: ASPoint, to: ASPoint)
     case ellipse(a: ASPoint, b: ASPoint, filled: Bool)
     case freehand(points: [ASPoint])
+
+    public static func text(
+        pos: ASPoint, text: String, fontSize: Double, fontFamily: String, bold: Bool, italic: Bool,
+        wrappingWidth: Double?
+    ) -> AnnotationKind {
+        let size = AnnotationRenderer.measureText(
+            text, fontFamily: fontFamily, fontSize: fontSize, bold: bold, italic: italic, wrappingWidth: wrappingWidth
+        )
+        return .text(pos: pos, text: text, fontSize: fontSize, fontFamily: fontFamily, bold: bold, italic: italic,
+                     measuredWidth: size.width, measuredHeight: size.height, wrappingWidth: wrappingWidth)
+    }
 
     public static func straightArrow(from: ASPoint, to: ASPoint) -> AnnotationKind {
         .arrow(
@@ -374,10 +386,8 @@ public struct AnnotationObject: Equatable, Identifiable, Codable, Sendable {
                 return ASRect.between(from, to)
             }
             return ASRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-        case .text(let pos, _, let fontSize, _, _, _, let mw, let mh):
-            let w = max(mw, fontSize * 0.8)
-            let h = max(mh, fontSize * 1.3)
-            return ASRect(x: pos.x, y: pos.y, width: w + 8, height: h + 6)
+        case .text(let pos, _, _, _, _, _, let width, let height, _):
+            return ASRect(x: pos.x, y: pos.y, width: width, height: height)
         case .number(let center, let tip, let n, let fontSize):
             let r = AnnotationKind.badgeRadius(fontSize: fontSize, number: n)
             let x0 = min(center.x - r, tip.x)
@@ -402,6 +412,11 @@ public struct AnnotationObject: Equatable, Identifiable, Codable, Sendable {
         default:
             return false
         }
+    }
+
+    public var resizeHandles: [ResizeHandle] {
+        if case .text = kind { return [.topLeft, .topRight, .bottomLeft, .bottomRight] }
+        return ResizeHandle.allCases
     }
 
     public var cornerRadius: Double {
@@ -482,8 +497,9 @@ public struct AnnotationObject: Equatable, Identifiable, Codable, Sendable {
                 c2: c2.offset(dx: dx, dy: dy),
                 to: to.offset(dx: dx, dy: dy)
             )
-        case .text(let pos, let text, let fs, let ff, let bold, let italic, let mw, let mh):
-            kind = .text(pos: pos.offset(dx: dx, dy: dy), text: text, fontSize: fs, fontFamily: ff, bold: bold, italic: italic, measuredWidth: mw, measuredHeight: mh)
+        case .text(let pos, let text, let fs, let ff, let bold, let italic, let mw, let mh, let wrap):
+            kind = .text(pos: pos.offset(dx: dx, dy: dy), text: text, fontSize: fs, fontFamily: ff, bold: bold, italic: italic,
+                         measuredWidth: mw, measuredHeight: mh, wrappingWidth: wrap)
         case .highlight(let a, let b, let r):
             kind = .highlight(a: a.offset(dx: dx, dy: dy), b: b.offset(dx: dx, dy: dy), cornerRadius: r)
         case .blur(let a, let b, let br, let cr):
@@ -514,10 +530,11 @@ public struct AnnotationObject: Equatable, Identifiable, Codable, Sendable {
             kind = .rect(a: mapPt(a), b: mapPt(b), cornerRadius: r, filled: filled)
         case .arrow(let from, let c1, let c2, let to):
             kind = .arrow(from: mapPt(from), c1: mapPt(c1), c2: mapPt(c2), to: mapPt(to))
-        case .text(_, let text, let fs, let ff, let bold, let italic, let mw, let mh):
+        case .text(_, let text, let fs, let ff, let bold, let italic, _, _, let wrap):
             let ratio = max(0.3, newBox.height / oh)
             let newFS = max(10.0, min(96.0, fs * ratio))
-            kind = .text(pos: ASPoint(newBox.minX, newBox.minY), text: text, fontSize: newFS, fontFamily: ff, bold: bold, italic: italic, measuredWidth: mw * (newFS / fs), measuredHeight: mh * (newFS / fs))
+            kind = .text(pos: ASPoint(newBox.minX, newBox.minY), text: text, fontSize: newFS, fontFamily: ff, bold: bold, italic: italic,
+                         wrappingWidth: wrap.map { $0 * (newFS / fs) })
         case .highlight(let a, let b, let r):
             kind = .highlight(a: mapPt(a), b: mapPt(b), cornerRadius: r)
         case .blur(let a, let b, let br, let cr):
@@ -689,9 +706,9 @@ public final class AnnotationDocument {
     }
 
     /// Topmost object hitting `point` (back-to-front in z-order).
-    public func hitTopmostObject(at point: ASPoint) -> AnnotationObject? {
+    public func hitTopmostObject(at point: ASPoint, excluding excludedID: UUID? = nil) -> AnnotationObject? {
         for obj in objects.reversed() {
-            if obj.hitTestBody(point) {
+            if obj.id != excludedID, obj.hitTestBody(point) {
                 return obj
             }
         }

@@ -121,6 +121,58 @@ final class PinDisplayTests: XCTestCase {
     }
 
     @MainActor
+    func testBrowsingHintWaitsForTheCurrentToastAndDismissesAfterTheImageMoves() throws {
+        _ = NSApplication.shared
+        let screen = try XCTUnwrap(NSScreen.main)
+        var config = AirSnipConfig()
+        config.pinHistoryLimit = 0
+        let manager = PinManager(pasteboard: .withUniqueName(), historyConfigURL: nil, historyLimit: 0) { _ in
+            FileManager.default.temporaryDirectory
+        }
+        defer {
+            manager.closeAll()
+            manager.pasteboard.releaseGlobally()
+        }
+        let image = try makeImage(width: 320, height: Int(screen.visibleFrame.height * 2))
+        XCTAssertTrue(manager.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: config))
+        let pin = try XCTUnwrap(manager.windows.last)
+        func zoomInAtTop() {
+            let size = pin.window.frame.size
+            pin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: size.width / 2, y: size.height))
+        }
+        func visibleToast() -> NSWindow? {
+            NSApp.windows.first { $0.identifier?.rawValue == "iSnip.toast" && $0.isVisible }
+        }
+
+        let status = ToastHUD.show("Recognizing Text", kind: .information, duration: .infinity)
+        defer { ToastHUD.dismiss(status) }
+        let statusWindow = try XCTUnwrap(visibleToast())
+        zoomInAtTop()
+        XCTAssertTrue(visibleToast() === statusWindow)
+
+        ToastHUD.dismiss(status)
+        zoomInAtTop()
+        let hint = try XCTUnwrap(visibleToast())
+        XCTAssertEqual(hint.frame.maxY, screen.visibleFrame.maxY - 22, accuracy: 1)
+        let labels = hint.contentView?.subviews.compactMap { ($0 as? NSTextField)?.stringValue }
+        XCTAssertTrue(labels?.contains(L10n.tr("按住 ⇧ Shift 并滚动滚轮", "Hold ⇧ Shift and scroll")) == true)
+
+        try scrollPin(pin, by: 24, modifiers: .maskShift)
+        XCTAssertTrue(visibleToast() === hint)
+        let origin = pin.projectedImageFrame.origin
+        try scrollPin(pin, by: -24, modifiers: [.maskShift, .maskCommand])
+        XCTAssertLessThan(pin.opacity, 1)
+        XCTAssertEqual(pin.projectedImageFrame.origin, origin)
+        XCTAssertTrue(visibleToast() === hint)
+
+        try scrollPin(pin, by: -24, modifiers: .maskShift)
+        XCTAssertGreaterThan(pin.projectedImageFrame.minY, origin.y)
+        XCTAssertNil(visibleToast())
+        zoomInAtTop()
+        XCTAssertNil(visibleToast())
+    }
+
+    @MainActor
     func testAnnotatingTheBottomOfAZoomedPinEditsThatPartOfTheFullImage() throws {
         _ = NSApplication.shared
         let visible = try XCTUnwrap(NSScreen.main?.visibleFrame)
@@ -142,7 +194,11 @@ final class PinDisplayTests: XCTestCase {
             pin.adjustZoom(delta: 1, anchorInWindow: NSPoint(x: frame.width / 2, y: frame.height / 2))
         }
         XCTAssertEqual(pin.zoomScale, 1)
-        try dragPinImage(pin, dx: 0, dy: CGFloat(image.height))
+        let frame = pin.window.frame
+        try scrollPin(pin, by: -Int32(image.height), modifiers: .maskShift)
+        XCTAssertEqual(pin.window.frame, frame)
+        XCTAssertEqual(pin.zoomScale, 1)
+        XCTAssertEqual(pin.projectedImageFrame.minY, frame.minY)
 
         for coversDesktop in [true, false] {
             config.pinAnnotationCoversDesktop = coversDesktop
@@ -159,6 +215,31 @@ final class PinDisplayTests: XCTestCase {
             XCTAssertGreaterThan(mark.r, 240)
             XCTAssertLessThan(mark.g, 15)
         }
+    }
+
+    @MainActor
+    func testATallOriginalUsesWindowDraggingEvenWhenOnlyItsWidthIsClipped() throws {
+        _ = NSApplication.shared
+        let visible = try XCTUnwrap(NSScreen.main?.visibleFrame)
+        var config = AirSnipConfig()
+        config.pinHistoryLimit = 0
+        let manager = PinManager(pasteboard: .withUniqueName(), historyConfigURL: nil, historyLimit: 0) { _ in
+            FileManager.default.temporaryDirectory
+        }
+        defer {
+            manager.closeAll()
+            manager.pasteboard.releaseGlobally()
+        }
+
+        let image = try makeImage(width: Int(visible.width * 2), height: Int(visible.height * 1.2))
+        XCTAssertTrue(manager.createPin(cgImage: image, backingScale: 1, preferredScreenOriginAppKit: nil, config: config))
+        let pin = try XCTUnwrap(manager.windows.last)
+        pin.adjustZoom(delta: 1, anchorInWindow: .zero)
+        XCTAssertGreaterThan(pin.projectedImageFrame.width, pin.window.frame.width)
+        XCTAssertEqual(pin.projectedImageFrame.height, pin.window.frame.height)
+        let imageOffsetX = pin.projectedImageFrame.minX - pin.window.frame.minX
+        try dragPinImage(pin, dx: -CGFloat(image.width), dy: 0)
+        XCTAssertEqual(pin.projectedImageFrame.minX - pin.window.frame.minX, imageOffsetX)
     }
 
     @MainActor
@@ -224,6 +305,15 @@ final class PinDisplayTests: XCTestCase {
             pin.adjustZoom(delta: -1, anchorInWindow: .zero)
         }
         XCTAssertEqual(pin.zoomScale, 0.2)
+    }
+
+    @MainActor
+    private func scrollPin(_ pin: PinWindowController, by points: Int32, modifiers: CGEventFlags) throws {
+        let view = try XCTUnwrap(pin.window.contentView)
+        let event = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                         wheel1: points, wheel2: 0, wheel3: 0))
+        event.flags = modifiers
+        view.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: event)))
     }
 
     @MainActor

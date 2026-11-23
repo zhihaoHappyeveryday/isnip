@@ -103,7 +103,7 @@ public final class PinManager: ObservableObject {
     public func remove(_ pin: PinWindowController) {
         guard let index = windows.firstIndex(where: { $0 === pin }) else { return }
         let closedAt = historyCloseTime()
-        pin.window.orderOut(nil)
+        pin.hide()
         rememberClosedPins([windows.remove(at: index)], closedAt: closedAt)
     }
 
@@ -180,7 +180,7 @@ public final class PinManager: ObservableObject {
             return true
         }, completion: { [weak self] restored, skippedUnreadable in
             if let self, !restored, let pin = openedPin {
-                pin.window.orderOut(nil)
+                pin.hide()
                 self.windows.removeAll { $0 === pin }
             }
             if skippedUnreadable {
@@ -233,7 +233,7 @@ public final class PinManager: ObservableObject {
         let closedAt = historyCloseTime()
         let pins = windows
         for pin in pins {
-            pin.window.orderOut(nil)
+            pin.hide()
         }
         windows.removeAll()
         rememberClosedPins(pins, closedAt: closedAt)
@@ -300,6 +300,7 @@ private struct PinViewport {
     }
 
     var isClipped: Bool { imageRect.size != size }
+    var isClippedVertically: Bool { imageRect.height > size.height }
 
     mutating func pan(to origin: NSPoint) {
         imageRect.origin = NSPoint(
@@ -357,10 +358,15 @@ public final class PinWindowController: NSObject, NSWindowDelegate {
     private var historyID: UUID?
     private var visibleFrame: NSRect
     private var isFitToWindow: Bool
+    private var browsingHint: ToastHUD.Presentation?
     fileprivate private(set) var viewport: PinViewport
 
     var projectedImageFrame: NSRect {
         viewport.imageRect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
+    }
+
+    fileprivate var canDragImageHorizontally: Bool {
+        baseSize.height <= visibleFrame.height && viewport.isClipped && !viewport.isClippedVertically
     }
 
     public convenience init(
@@ -501,7 +507,7 @@ public final class PinWindowController: NSObject, NSWindowDelegate {
             x: anchorOnScreen.x - next.size.width * anchor.x / viewport.size.width,
             y: anchorOnScreen.y - next.size.height * anchor.y / viewport.size.height
         )
-        // Keep the move grip reachable when dragging the body pans the image.
+        // Keep the clipped image reachable while zooming.
         let keepOnScreen = fitted || movingToScreen || viewport.isClipped || next.isClipped
         let frame = keepOnScreen
             ? Self.frameInside(visibleFrame, size: next.size, origin: origin)
@@ -521,8 +527,18 @@ public final class PinWindowController: NSObject, NSWindowDelegate {
     }
 
     fileprivate func panImage(to origin: NSPoint) {
+        let previousOrigin = viewport.imageRect.origin
         viewport.pan(to: origin)
-        contentView.needsDisplay = true
+        if viewport.imageRect.origin != previousOrigin { contentView.needsDisplay = true }
+    }
+
+    fileprivate func browseVertically(by distance: CGFloat) {
+        guard viewport.isClippedVertically else { return }
+        let origin = viewport.imageRect.origin
+        panImage(to: NSPoint(x: origin.x, y: origin.y - distance))
+        if origin.y != viewport.imageRect.minY, let browsingHint {
+            ToastHUD.dismiss(browsingHint)
+        }
     }
 
     public func windowDidChangeScreen(_ notification: Notification) {
@@ -542,6 +558,11 @@ public final class PinWindowController: NSObject, NSWindowDelegate {
     public func show() {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(contentView)
+    }
+
+    func hide() {
+        if let browsingHint { ToastHUD.dismiss(browsingHint) }
+        window.orderOut(nil)
     }
 
     fileprivate func snapshot() -> PinSnapshot {
@@ -627,6 +648,15 @@ public final class PinWindowController: NSObject, NSWindowDelegate {
 
         applyZoom(newScale, fitted: false, anchor: anchorInWindow)
         contentView.showBadgeTemporarily("\(returnsToOriginalSize ? 100 : boundedPercent)%")
+        if delta > 0, viewport.isClippedVertically, browsingHint == nil, !ToastHUD.isShowing {
+            browsingHint = ToastHUD.show(
+                L10n.tr("上下浏览长图", "Scroll Through the Image"),
+                kind: .information,
+                detail: L10n.tr("按住 ⇧ Shift 并滚动滚轮", "Hold ⇧ Shift and scroll"),
+                duration: 15,
+                above: window
+            )
+        }
     }
 
     public func adjustOpacity(delta: CGFloat) {
@@ -746,7 +776,7 @@ private final class PinCanvasView: NSView {
         ctx.clip()
         ctx.interpolationQuality = .high
         owner.cgImage.drawVisibleRegion(in: ctx, projectedTo: owner.viewport.imageRect, clippedTo: bounds)
-        if owner.viewport.isClipped {
+        if owner.canDragImageHorizontally {
             let grip = moveGrip.insetBy(dx: min(4, moveGrip.width / 4), dy: min(4, moveGrip.height / 4))
             ctx.setFillColor(CGColor(gray: 0.1, alpha: 0.7))
             ctx.addPath(CGPath(roundedRect: grip, cornerWidth: 5, cornerHeight: 5, transform: nil))
@@ -810,7 +840,7 @@ private final class PinCanvasView: NSView {
             return
         }
         let mouse = convert(event.locationInWindow, from: nil)
-        if owner.viewport.isClipped, !moveGrip.contains(mouse) {
+        if owner.canDragImageHorizontally, !moveGrip.contains(mouse) {
             drag = .image(mouse: mouse, origin: owner.viewport.imageRect.origin)
         } else {
             drag = .window(mouse: NSEvent.mouseLocation, origin: window.frame.origin)
@@ -839,11 +869,16 @@ private final class PinCanvasView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         guard let owner else { return }
-        let delta = abs(event.scrollingDeltaY) > 0.01 ? event.scrollingDeltaY : event.deltaY
-        guard abs(delta) > 0.01 else { return }
         let flags = event.modifierFlags
+        let vertical = abs(event.scrollingDeltaY) > 0.01 ? event.scrollingDeltaY : event.deltaY
+        // Some mice report Shift-wheel as horizontal scrolling.
+        let delta = flags.contains(.shift) && abs(vertical) <= 0.01 ? event.scrollingDeltaX : vertical
+        guard abs(delta) > 0.01 else { return }
         if flags.contains(.control) || flags.contains(.command) {
             owner.adjustOpacity(delta: delta)
+        } else if flags.contains(.shift) {
+            let distance = event.hasPreciseScrollingDeltas ? delta : delta * 36
+            owner.browseVertically(by: distance)
         } else {
             let loc = convert(event.locationInWindow, from: nil)
             owner.adjustZoom(delta: delta, anchorInWindow: loc)

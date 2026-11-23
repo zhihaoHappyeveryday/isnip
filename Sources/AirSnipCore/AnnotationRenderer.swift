@@ -9,20 +9,14 @@ public enum AnnotationRenderer {
         fontFamily: String,
         fontSize: Double,
         bold: Bool,
-        italic: Bool
+        italic: Bool,
+        wrappingWidth: Double? = nil
     ) -> (width: Double, height: Double) {
-        let display = text.isEmpty ? " " : text
         let font = resolveNSFont(family: fontFamily, size: CGFloat(fontSize), bold: bold, italic: italic)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let lines = display.components(separatedBy: "\n")
-        var maxW: CGFloat = 0
-        let lineH = max(CGFloat(fontSize * 1.28), ceil(font.ascender - font.descender + font.leading))
-        for line in lines {
-            let s = (line.isEmpty ? " " : line) as NSString
-            let sz = s.size(withAttributes: attrs)
-            maxW = max(maxW, ceil(sz.width))
-        }
-        return (Double(max(12, maxW)), Double(max(lineH, lineH * CGFloat(lines.count))))
+        let layout = AnnotationTextLayout(wrappingWidth: wrappingWidth)
+        layout.setText(text.isEmpty ? " " : text, font: font, color: .black)
+        let size = layout.size
+        return (size.width, size.height)
     }
 
     public static func resolveNSFont(family: String, size: CGFloat, bold: Bool, italic: Bool) -> NSFont {
@@ -421,16 +415,12 @@ public enum AnnotationRenderer {
             )
             ctx.restoreGState()
 
-        case .text(let pos, let text, let fontSize, let fontFamily, let bold, let italic, _, _):
+        case .text(let pos, let text, let fontSize, let fontFamily, let bold, let italic, _, _, let wrap):
             guard !text.isEmpty else { break }
             let font = resolveNSFont(family: fontFamily, size: CGFloat(fontSize), bold: bold, italic: italic)
-            let nsColor = NSColor(
-                srgbRed: CGFloat(color.r) / 255.0,
-                green: CGFloat(color.g) / 255.0,
-                blue: CGFloat(color.b) / 255.0,
-                alpha: CGFloat(color.a) / 255.0
-            )
-            drawMultilineText(in: ctx, text: text, font: font, color: nsColor, topLeft: ASPoint(pos.x + 4, pos.y + 3))
+            let layout = AnnotationTextLayout(wrappingWidth: wrap)
+            layout.setText(text, font: font, color: color.nsColor)
+            layout.draw(in: ctx, at: pos)
         }
     }
 
@@ -507,54 +497,23 @@ public enum AnnotationRenderer {
         ctx.restoreGState()
     }
 
-    private static func drawMultilineText(
-        in ctx: CGContext,
-        text: String,
-        font: NSFont,
-        color: NSColor,
-        topLeft: ASPoint
-    ) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color
-        ]
-        let lines = text.components(separatedBy: "\n")
-        let lineHeight = max(font.pointSize * 1.28, ceil(font.ascender - font.descender + font.leading))
-
-        ctx.saveGState()
-        for (idx, rawLine) in lines.enumerated() {
-            guard !rawLine.isEmpty else { continue }
-            let attrStr = NSAttributedString(string: rawLine, attributes: attrs)
-            let ctLine = CTLineCreateWithAttributedString(attrStr)
-            let baselineY = CGFloat(topLeft.y) + CGFloat(idx) * lineHeight + font.ascender
-
-            ctx.saveGState()
-            ctx.translateBy(x: CGFloat(topLeft.x), y: baselineY)
-            ctx.scaleBy(x: 1, y: -1)
-            ctx.textMatrix = .identity
-            ctx.textPosition = .zero
-            CTLineDraw(ctLine, ctx)
-            ctx.restoreGState()
-        }
-        ctx.restoreGState()
-    }
-
     /// Screen-only selection adornments (bounding frame, 8 resize handles, corner-radius handle, Bezier curve handles).
     public static func drawSelectionGizmos(in ctx: CGContext, for object: AnnotationObject) {
         let accent = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1.0)
         let box = object.boundingBox
 
         ctx.saveGState()
-        // Crisp dashed bounding frame
+        let isText = if case .text = object.kind { true } else { false }
+        let handles = object.resizeHandles
         ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.85))
         ctx.setLineWidth(1.0)
-        ctx.setLineDash(phase: 0, lengths: [4, 3])
+        if !isText { ctx.setLineDash(phase: 0, lengths: [4, 3]) }
         ctx.stroke(box.cgRect)
         ctx.setLineDash(phase: 0, lengths: [])
 
-        // 8 precision circular resize handles with soft shadow
-        let handleDiameter: CGFloat = 6.8
-        for h in ResizeHandle.allCases {
+        // Keep small corner handles on the text frame for resizing.
+        let handleDiameter: CGFloat = isText ? 5 : 6.8
+        for h in handles {
             if (h == .top || h == .bottom) && box.width < 36 { continue }
             if (h == .left || h == .right) && box.height < 36 { continue }
             let p = h.position(in: box)

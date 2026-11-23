@@ -281,7 +281,7 @@ public final class CaptureSessionCoordinator {
             coordinator: self
         )
 
-        pin.window.orderOut(nil)
+        pin.hide()
         screenControllers.append(ctrl)
         ctrl.focusWindow()
     }
@@ -686,11 +686,12 @@ final class OverlayCanvasView: NSView {
     }
     private var colorPicker: ColorPickerState?
 
-    // Inline native IME text editor & badge number editor
-    private var activeTextScrollView: NSScrollView?
-    private var activeTextEditor: NSTextView?
-    private var editingTextObjectID: UUID?
-    private var editingTextOrigin: ASPoint = ASPoint(0, 0)
+    private struct TextEdit {
+        let editor: InlineAnnotationTextEditor
+        let object: AnnotationObject
+        let isNew: Bool
+    }
+    private var textEdit: TextEdit?
 
     private var activeNumberField: NSTextField?
     private var editingNumberObjectID: UUID?
@@ -788,6 +789,15 @@ final class OverlayCanvasView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         isWindowedPinAnnotation || super.acceptsFirstMouse(for: event)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if let textEdit, hit === textEdit.editor.textView {
+            let local = convert(point, from: superview)
+            if toolbarHitItems.contains(where: { $0.rect.contains(local) }) { return self }
+        }
+        return hit
     }
 
     func resetSelectionState() {
@@ -1143,6 +1153,11 @@ final class OverlayCanvasView: NSView {
         }
 
         if let sel = selection, sel.width >= 1 && sel.height >= 1 {
+            let visibleObjects = if let textEdit, !textEdit.isNew {
+                document.objects.filter { $0.id != textEdit.object.id }
+            } else {
+                document.objects
+            }
             if let image = annotationImage {
                 let projected = image.projectedRect ?? sel
                 let r = projected.cgRect
@@ -1178,7 +1193,7 @@ final class OverlayCanvasView: NSView {
 
                 AnnotationRenderer.drawAnnotations(
                     in: ctx,
-                    objects: document.objects,
+                    objects: visibleObjects,
                     rawBuffer: image.rawBuffer,
                     rawOrigin: ASPoint(projected.minX, projected.minY),
                     pixelsPerPoint: image.pixelsPerPoint,
@@ -1186,9 +1201,7 @@ final class OverlayCanvasView: NSView {
                 )
 
                 drawSelectionFrameAndHandles(in: ctx, selection: sel)
-                if let selObj = document.selectedObject {
-                    AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
-                }
+                drawSelectedAnnotationFrame(in: ctx, selection: sel)
 
                 if !isWindowedPinAnnotation {
                     let shadowTag = image.window?.includeShadow == false ? L10n.tr(" · 无阴影", " · No Shadow") : ""
@@ -1212,7 +1225,7 @@ final class OverlayCanvasView: NSView {
                 // 3. Draw annotations clipped inside selection
                 AnnotationRenderer.drawAnnotations(
                     in: ctx,
-                    objects: document.objects,
+                    objects: visibleObjects,
                     rawBuffer: snapshot.rawBuffer,
                     rawOrigin: ASPoint(0, 0),
                     pixelScale: snapshot.backingScale,
@@ -1223,9 +1236,7 @@ final class OverlayCanvasView: NSView {
                 drawSelectionFrameAndHandles(in: ctx, selection: sel)
 
                 // 5. Selected annotation gizmos
-                if let selObj = document.selectedObject {
-                    AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
-                }
+                drawSelectedAnnotationFrame(in: ctx, selection: sel)
 
                 // 6. Frosted pixel dimension pill at top-left of selection
                 let pxW = max(1, Int((sel.width * snapshot.backingScale).rounded()))
@@ -1339,6 +1350,14 @@ final class OverlayCanvasView: NSView {
             if (h == .left || h == .right) && sel.height < 52 { return false }
             return true
         }
+    }
+
+    private func drawSelectedAnnotationFrame(in ctx: CGContext, selection: ASRect) {
+        guard textEdit == nil, let selected = document.selectedObject else { return }
+        ctx.saveGState()
+        if case .text = selected.kind { ctx.clip(to: selection.cgRect) }
+        AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selected)
+        ctx.restoreGState()
     }
 
     private func drawSelectionFrameAndHandles(in ctx: CGContext, selection sel: ASRect) {
@@ -2935,7 +2954,12 @@ final class OverlayCanvasView: NSView {
 
     // MARK: - Mouse Events & Direct Manipulation
 
+    private func canPlaceText(at point: ASPoint, in selection: ASRect) -> Bool {
+        activeTool == .text && selection.contains(point)
+    }
+
     private func hitSelectionResizeHandle(at pt: ASPoint, in sel: ASRect) -> ResizeHandle? {
+        if canPlaceText(at: pt, in: sel) { return nil }
         let corners: [ResizeHandle] = [.topLeft, .topRight, .bottomRight, .bottomLeft]
         for h in corners where pt.distance(to: h.position(in: sel)) <= 9.0 {
             return h
@@ -3027,7 +3051,7 @@ final class OverlayCanvasView: NSView {
             }
 
             let nextKnot: ResizeHandle? = {
-                guard !selectionLocked else { return nil }
+                guard !selectionLocked, !canPlaceText(at: pt, in: sel) else { return nil }
                 for h in visibleSelectionHandles(for: sel) where pt.distance(to: h.position(in: sel)) <= 8.5 {
                     return h
                 }
@@ -3062,6 +3086,10 @@ final class OverlayCanvasView: NSView {
         )
     }
 
+    override func cursorUpdate(with event: NSEvent) {
+        updateCursor(at: ASPoint(convert(event.locationInWindow, from: nil)), flags: event.modifierFlags)
+    }
+
     private func updateCursor(at pt: ASPoint, flags: NSEvent.ModifierFlags) {
         if toolbarHitItems.contains(where: { $0.rect.contains(pt.cgPoint) }) {
             NSCursor.pointingHand.set()
@@ -3087,8 +3115,8 @@ final class OverlayCanvasView: NSView {
             NSCursor.openHand.set()
             return
         }
-        if let selObj = document.selectedObject {
-            for h in ResizeHandle.allCases where pt.distance(to: h.position(in: selObj.boundingBox)) <= 8.0 {
+        if textEdit == nil, let selObj = document.selectedObject {
+            for h in selObj.resizeHandles where pt.distance(to: h.position(in: selObj.boundingBox)) <= 8.0 {
                 DirectionalResizeCursor.cursor(for: h).set()
                 return
             }
@@ -3120,21 +3148,26 @@ final class OverlayCanvasView: NSView {
                 return
             }
         }
-        NSCursor.crosshair.set()
+        if canPlaceText(at: pt, in: sel) {
+            NSCursor.iBeam.set()
+        } else {
+            NSCursor.crosshair.set()
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
-        ownerController?.focusWindow()
         tooltipTask?.cancel()
         activeTooltip = nil
 
         let pt = ASPoint(convert(event.locationInWindow, from: nil))
+        let editedTextID = textEdit?.object.id
 
         // Commit inline text/number editor if user clicks outside it
-        if activeTextScrollView != nil || activeNumberField != nil {
+        if textEdit != nil || activeNumberField != nil {
             commitInlineEditorsIfNeeded()
             needsDisplay = true
         }
+        ownerController?.focusWindow()
 
         // 1. Color picker popover interaction
         if let picker = colorPicker {
@@ -3197,8 +3230,16 @@ final class OverlayCanvasView: NSView {
             return
         }
 
+        let placingText = canPlaceText(at: pt, in: sel)
+        let hitCandidate = document.hitTopmostObject(at: pt, excluding: placingText ? editedTextID : nil)
+        if event.clickCount == 2, sel.contains(pt), let hitCandidate, case .text = hitCandidate.kind {
+            beginInlineTextEdit(existingObject: hitCandidate, at: pt)
+            return
+        }
+
         // 4. Selected object handles & double-click actions (EDT-11 priority order)
-        if let selObj = document.selectedObject {
+        let visibleSelection = editedTextID == nil ? document.selectedObject : nil
+        if let selObj = visibleSelection {
             // 4a. Double-click curve control handle -> reset straight arrow (EDT-3)
             if let curve = selObj.curveControlPoints {
                 if pt.distance(to: curve.c1) <= 8.5 {
@@ -3226,7 +3267,7 @@ final class OverlayCanvasView: NSView {
                 return
             }
             // 4c. 8 object resize handles
-            for h in ResizeHandle.allCases where pt.distance(to: h.position(in: selObj.boundingBox)) <= 8.0 {
+            for h in selObj.resizeHandles where pt.distance(to: h.position(in: selObj.boundingBox)) <= 8.0 {
                 DirectionalResizeCursor.cursor(for: h).set()
                 dragOp = .resizingObject(
                     id: selObj.id,
@@ -3254,22 +3295,14 @@ final class OverlayCanvasView: NSView {
             return
         }
 
-        // 7. Double-click on Text or Number object -> re-edit; double-click blank inside selection -> Copy & Finish!
+        // 7. Double-click a number to edit it or double-click a blank selection to copy.
         if event.clickCount == 2, sel.contains(pt) {
-            if let hitObj = document.hitTopmostObject(at: pt) {
-                switch hitObj.kind {
-                case .text:
-                    document.selectedID = hitObj.id
-                    beginInlineTextEdit(existingObject: hitObj, at: pt)
-                    return
-                case .number:
-                    document.selectedID = hitObj.id
-                    beginInlineNumberEdit(for: hitObj)
-                    return
-                default:
-                    break
-                }
-            } else {
+            if let hitCandidate, case .number = hitCandidate.kind {
+                document.selectedID = hitCandidate.id
+                beginInlineNumberEdit(for: hitCandidate)
+                return
+            }
+            if hitCandidate == nil, !placingText || editedTextID == nil {
                 finishPrimaryAction()
                 return
             }
@@ -3277,8 +3310,7 @@ final class OverlayCanvasView: NSView {
 
         // 8. Ctrl / Cmd + drag object body -> move object (EDT-11 channel 1)
         let flags = event.modifierFlags
-        if flags.contains(.control) || flags.contains(.command),
-           let hitObj = document.hitTopmostObject(at: pt) {
+        if flags.contains(.control) || flags.contains(.command), let hitObj = hitCandidate {
             document.selectedID = hitObj.id
             dragOp = .movingObject(id: hitObj.id, lastPoint: pt, undoRecorded: false)
             needsDisplay = true
@@ -3286,14 +3318,13 @@ final class OverlayCanvasView: NSView {
         }
 
         // 9. Selected object's 6pt frame border -> move object (EDT-11 channel 2)
-        if let selObj = document.selectedObject, selObj.hitTestFrameBorder(pt) {
+        if let selObj = visibleSelection, selObj.hitTestFrameBorder(pt) {
             dragOp = .movingObject(id: selObj.id, lastPoint: pt, undoRecorded: false)
             return
         }
 
         // 10. Inside selection: move selection / select object when no tool active; Drawing-first when tool active!
         if sel.contains(pt) {
-            let hitCandidate = document.hitTopmostObject(at: pt)
             guard let tool = activeTool else {
                 if let hitObj = hitCandidate {
                     document.selectedID = hitObj.id
@@ -3573,7 +3604,7 @@ final class OverlayCanvasView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        if activeTextScrollView != nil || activeNumberField != nil {
+        if textEdit != nil || activeNumberField != nil {
             // Right-click during text input = finish & keep text (OUT-3)
             commitInlineEditorsIfNeeded()
             needsDisplay = true
@@ -3588,7 +3619,7 @@ final class OverlayCanvasView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard selection != nil else { return }
+        guard selection != nil, textEdit == nil else { return }
         let delta = abs(event.scrollingDeltaY) > 0.01 ? event.scrollingDeltaY : event.deltaY
         guard abs(delta) > 0.01 else { return }
         let step = delta > 0 ? 1.0 : -1.0
@@ -3602,12 +3633,12 @@ final class OverlayCanvasView: NSView {
                     currentBlurRadius = nextR
                     coordinator?.mutateConfig { $0.defaultBlurRadius = nextR }
                     obj.kind = .blur(a: a, b: b, blurRadius: nextR, cornerRadius: cr)
-                case .text(let pos, let txt, let fs, let ff, let bold, let italic, _, _):
+                case .text(let pos, let txt, let fs, let ff, let bold, let italic, _, _, let wrap):
                     let nextFS = max(10.0, min(96.0, fs + step * 2.0))
                     currentFontSize = nextFS
                     coordinator?.mutateConfig { $0.defaultFontSize = nextFS }
-                    let m = AnnotationRenderer.measureText(txt, fontFamily: ff, fontSize: nextFS, bold: bold, italic: italic)
-                    obj.kind = .text(pos: pos, text: txt, fontSize: nextFS, fontFamily: ff, bold: bold, italic: italic, measuredWidth: m.width, measuredHeight: m.height)
+                    obj.kind = .text(pos: pos, text: txt, fontSize: nextFS, fontFamily: ff, bold: bold, italic: italic,
+                                     wrappingWidth: wrap)
                 case .number(let center, let tip, let n, let fs):
                     let nextFS = max(12.0, min(64.0, fs + step * 2.0))
                     currentNumberFontSize = nextFS
@@ -3653,8 +3684,8 @@ final class OverlayCanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if activeTextScrollView != nil || activeNumberField != nil {
-            if Int(event.keyCode) == kVK_Escape {
+        if textEdit != nil || activeNumberField != nil {
+            if Int(event.keyCode) == kVK_Escape, textEdit?.editor.textView.hasMarkedText() != true {
                 cancelInlineEditors()
                 needsDisplay = true
             }
@@ -3941,9 +3972,11 @@ final class OverlayCanvasView: NSView {
     }
 
     // Text styling helpers
-    private var currentEffectiveTextAttributes: (family: String, bold: Bool, italic: Bool, size: Double) {
+    private typealias TextTypography = (family: String, bold: Bool, italic: Bool, size: Double)
+
+    private var currentEffectiveTextAttributes: TextTypography {
         if let selObj = document.selectedObject,
-           case .text(_, _, let fs, let ff, let b, let i, _, _) = selObj.kind {
+           case .text(_, _, let fs, let ff, let b, let i, _, _, _) = selObj.kind {
             return (ff, b, i, fs)
         }
         return (currentFontFamily, textBold, textItalic, currentFontSize)
@@ -3971,7 +4004,7 @@ final class OverlayCanvasView: NSView {
         guard let fam = sender.representedObject as? String else { return }
         currentFontFamily = fam
         coordinator?.mutateConfig { $0.defaultFontFamily = fam }
-        updateSelectedTextObject { _, txt, fs, _, b, i in (txt, fs, fam, b, i) }
+        updateSelectedTextTypography { $0.family = fam }
         needsDisplay = true
     }
 
@@ -3979,7 +4012,7 @@ final class OverlayCanvasView: NSView {
         let nextBold = !currentEffectiveTextAttributes.bold
         textBold = nextBold
         coordinator?.mutateConfig { $0.defaultFontBold = nextBold }
-        updateSelectedTextObject { _, txt, fs, ff, _, i in (txt, fs, ff, nextBold, i) }
+        updateSelectedTextTypography { $0.bold = nextBold }
         needsDisplay = true
     }
 
@@ -3987,7 +4020,7 @@ final class OverlayCanvasView: NSView {
         let nextItalic = !currentEffectiveTextAttributes.italic
         textItalic = nextItalic
         coordinator?.mutateConfig { $0.defaultFontItalic = nextItalic }
-        updateSelectedTextObject { _, txt, fs, ff, b, _ in (txt, fs, ff, b, nextItalic) }
+        updateSelectedTextTypography { $0.italic = nextItalic }
         needsDisplay = true
     }
 
@@ -3996,76 +4029,50 @@ final class OverlayCanvasView: NSView {
         let next = max(10.0, min(96.0, cur + delta))
         currentFontSize = next
         coordinator?.mutateConfig { $0.defaultFontSize = next }
-        updateSelectedTextObject { _, txt, _, ff, b, i in (txt, next, ff, b, i) }
+        updateSelectedTextTypography { $0.size = next }
         needsDisplay = true
     }
 
-    private func updateSelectedTextObject(
-        transform: (ASPoint, String, Double, String, Bool, Bool) -> (String, Double, String, Bool, Bool)
-    ) {
+    private func updateSelectedTextTypography(_ update: (inout TextTypography) -> Void) {
         guard let selID = document.selectedID else { return }
         document.updateObject(id: selID, recordUndo: true) { obj in
-            if case .text(let pos, let txt, let fs, let ff, let b, let i, _, _) = obj.kind {
-                let (nt, nfs, nff, nb, ni) = transform(pos, txt, fs, ff, b, i)
-                let m = AnnotationRenderer.measureText(nt, fontFamily: nff, fontSize: nfs, bold: nb, italic: ni)
-                obj.kind = .text(pos: pos, text: nt, fontSize: nfs, fontFamily: nff, bold: nb, italic: ni, measuredWidth: m.width, measuredHeight: m.height)
+            if case .text(let pos, let txt, let fs, let ff, let b, let i, _, _, let wrap) = obj.kind {
+                var typography: TextTypography = (family: ff, bold: b, italic: i, size: fs)
+                update(&typography)
+                obj.kind = .text(pos: pos, text: txt, fontSize: typography.size, fontFamily: typography.family,
+                                 bold: typography.bold, italic: typography.italic, wrappingWidth: wrap)
             }
         }
     }
 
-    // Inline native IME NSTextView
     private func beginInlineTextEdit(existingObject: AnnotationObject?, at point: ASPoint) {
-        commitInlineEditorsIfNeeded()
-
-        var initialString = ""
-        var pos = point
-        var fs = currentFontSize
-        var ff = currentFontFamily
-        var bold = textBold
-        var italic = textItalic
-        var col = currentSwatchColor
-
-        if let existing = existingObject,
-           case .text(let ePos, let eText, let eFS, let eFF, let eB, let eI, _, _) = existing.kind {
-            editingTextObjectID = existing.id
-            initialString = eText
-            pos = ePos
-            fs = eFS
-            ff = eFF
-            bold = eB
-            italic = eI
-            col = existing.style.color
-        } else {
-            editingTextObjectID = nil
+        guard let selection else { return }
+        let object = existingObject ?? AnnotationObject(
+            style: AnnotationStyle(color: currentSwatchColor, lineWidth: currentLineWidth),
+            kind: .text(pos: point, text: "", fontSize: currentFontSize, fontFamily: currentFontFamily,
+                        bold: textBold, italic: textItalic, measuredWidth: 0, measuredHeight: 0,
+                        wrappingWidth: selection.maxX - point.x)
+        )
+        guard case .text(let origin, let text, let size, let family, let bold, let italic, _, _, let wrap) = object.kind else {
+            return
         }
-        editingTextOrigin = pos
-
-        let maxW = max(160.0, (selection?.maxX ?? Double(bounds.width)) - pos.x - 8)
-        let boxH = max(44.0, fs * 2.4)
-        let frameRect = NSRect(x: pos.x, y: pos.y, width: min(360.0, maxW), height: boxH)
-
-        let scroll = NSScrollView(frame: frameRect)
-        scroll.drawsBackground = true
-        scroll.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.55)
-        scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 5
-        scroll.layer?.borderWidth = 1.2
-        scroll.layer?.borderColor = NSColor.controlAccentColor.cgColor
-
-        let tv = NSTextView(frame: NSRect(origin: .zero, size: frameRect.size))
-        tv.isRichText = false
-        tv.drawsBackground = false
-        tv.font = AnnotationRenderer.resolveNSFont(family: ff, size: CGFloat(fs), bold: bold, italic: italic)
-        tv.textColor = NSColor(srgbRed: CGFloat(col.r) / 255.0, green: CGFloat(col.g) / 255.0, blue: CGFloat(col.b) / 255.0, alpha: 1.0)
-        tv.insertionPointColor = .white
-        tv.string = initialString
-        scroll.documentView = tv
-
-        addSubview(scroll)
+        let editor = InlineAnnotationTextEditor(
+            origin: origin.cgPoint, clip: selection.cgRect, wrappingWidth: wrap, text: text,
+            font: AnnotationRenderer.resolveNSFont(family: family, size: size, bold: bold, italic: italic),
+            color: object.style.color.nsColor
+        )
+        editor.onCancel = { [weak self] in self?.cancelInlineEditors() }
+        textEdit = TextEdit(editor: editor, object: object, isNew: existingObject == nil)
+        document.selectedID = existingObject?.id
+        addSubview(editor)
         NSApp.activate(ignoringOtherApps: true)
-        window?.makeFirstResponder(tv)
-        activeTextScrollView = scroll
-        activeTextEditor = tv
+        window?.makeFirstResponder(editor.textView)
+        if existingObject != nil {
+            let local = editor.textView.convert(point.cgPoint, from: self)
+            let index = editor.textView.characterIndexForInsertion(at: local)
+            editor.textView.setSelectedRange(NSRange(location: index, length: 0))
+        }
+        needsDisplay = true
     }
 
     private func beginInlineNumberEdit(for object: AnnotationObject) {
@@ -4091,48 +4098,9 @@ final class OverlayCanvasView: NSView {
     }
 
     private func commitInlineEditorsIfNeeded() {
-        if let tv = activeTextEditor, let scroll = activeTextScrollView {
-            let content = tv.string.trimmingCharacters(in: .newlines)
-            let editID = editingTextObjectID
-            let origin = editingTextOrigin
-            scroll.removeFromSuperview()
-            activeTextScrollView = nil
-            activeTextEditor = nil
-            editingTextObjectID = nil
-            window?.makeFirstResponder(self)
-
-            if !content.isEmpty {
-                let m = AnnotationRenderer.measureText(
-                    content,
-                    fontFamily: currentFontFamily,
-                    fontSize: currentFontSize,
-                    bold: textBold,
-                    italic: textItalic
-                )
-                if let id = editID {
-                    document.updateObject(id: id, recordUndo: true) { obj in
-                        if case .text(let p, _, let fs, let ff, let b, let i, _, _) = obj.kind {
-                            let em = AnnotationRenderer.measureText(content, fontFamily: ff, fontSize: fs, bold: b, italic: i)
-                            obj.kind = .text(pos: p, text: content, fontSize: fs, fontFamily: ff, bold: b, italic: i, measuredWidth: em.width, measuredHeight: em.height)
-                        }
-                    }
-                } else {
-                    let obj = AnnotationObject(
-                        style: AnnotationStyle(color: currentSwatchColor, lineWidth: currentLineWidth),
-                        kind: .text(
-                            pos: origin,
-                            text: content,
-                            fontSize: currentFontSize,
-                            fontFamily: currentFontFamily,
-                            bold: textBold,
-                            italic: textItalic,
-                            measuredWidth: m.width,
-                            measuredHeight: m.height
-                        )
-                    )
-                    document.add(obj, select: true)
-                }
-            }
+        if let edit = textEdit {
+            closeTextEditor()
+            commitTextEdit(edit)
         }
 
         if let nf = activeNumberField {
@@ -4152,12 +4120,34 @@ final class OverlayCanvasView: NSView {
         }
     }
 
-    private func cancelInlineEditors() {
-        activeTextScrollView?.removeFromSuperview()
-        activeTextScrollView = nil
-        activeTextEditor = nil
-        editingTextObjectID = nil
+    private func commitTextEdit(_ edit: TextEdit) {
+        let content = edit.editor.textView.string
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !edit.isNew { document.deleteSelected() }
+            return
+        }
+        var object = edit.object
+        guard case .text(let origin, let previous, let size, let family, let bold, let italic, _, _, let wrap) = object.kind,
+              content != previous else { return }
+        object.kind = .text(pos: origin, text: content, fontSize: size, fontFamily: family, bold: bold, italic: italic,
+                            wrappingWidth: wrap)
+        if edit.isNew {
+            document.add(object)
+        } else {
+            document.updateObject(id: object.id, recordUndo: true) { $0 = object }
+        }
+    }
 
+    private func closeTextEditor() {
+        guard let edit = textEdit else { return }
+        window?.makeFirstResponder(self)
+        edit.editor.removeFromSuperview()
+        textEdit = nil
+        needsDisplay = true
+    }
+
+    private func cancelInlineEditors() {
+        closeTextEditor()
         activeNumberField?.removeFromSuperview()
         activeNumberField = nil
         editingNumberObjectID = nil
