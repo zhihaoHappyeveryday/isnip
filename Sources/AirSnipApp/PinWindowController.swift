@@ -69,11 +69,13 @@ public final class PinManager: ObservableObject {
         let pointH = max(32.0, Double(cgImage.height) / max(1.0, backingScale))
         let size = NSSize(width: pointW, height: pointH)
 
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let preferredOrigin = config.pinPosition == .original ? preferredScreenOriginAppKit : nil
+        let screen = preferredOrigin.flatMap { point in NSScreen.screens.first { $0.frame.contains(point) } }
+            ?? NSScreen.main ?? NSScreen.screens.first
+        let vis = screen?.visibleFrame ?? PinWindowController.defaultVisibleFrame
 
         let origin: NSPoint
-        if config.pinPosition == .original, let pref = preferredScreenOriginAppKit {
+        if let pref = preferredOrigin {
             origin = pref
         } else {
             let cascade = CGFloat(windows.count % 6) * 18.0
@@ -90,7 +92,8 @@ public final class PinManager: ObservableObject {
             origin: origin,
             showBorder: config.pinBorder,
             manager: self,
-            originalText: originalText
+            originalText: originalText,
+            visibleFrame: vis
         )
         windows.append(controller)
         controller.show()
@@ -282,8 +285,63 @@ private final class PinPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private struct PinViewport {
+    let size: NSSize
+    private(set) var imageRect: NSRect
+
+    init(baseSize: NSSize, zoom: CGFloat, fitted: Bool, limit: NSSize) {
+        var imageSize = NSSize(width: baseSize.width * zoom, height: baseSize.height * zoom)
+        if !fitted, zoom != 1 {
+            imageSize = NSSize(width: round(imageSize.width), height: round(imageSize.height))
+        }
+        size = NSSize(width: min(imageSize.width, limit.width), height: min(imageSize.height, limit.height))
+        if fitted { imageSize = size }
+        imageRect = NSRect(x: 0, y: size.height - imageSize.height, width: imageSize.width, height: imageSize.height)
+    }
+
+    var isClipped: Bool { imageRect.size != size }
+
+    mutating func pan(to origin: NSPoint) {
+        imageRect.origin = NSPoint(
+            x: min(0, max(size.width - imageRect.width, origin.x)),
+            y: min(0, max(size.height - imageRect.height, origin.y))
+        )
+    }
+}
+
+extension CGImage {
+    func drawVisibleRegion(in context: CGContext, projectedTo imageRect: NSRect, clippedTo viewport: NSRect) {
+        let visible = viewport.intersection(imageRect)
+        guard !visible.isEmpty else { return }
+        guard visible != imageRect else {
+            context.draw(self, in: imageRect)
+            return
+        }
+        // Core Graphics crops in top-down pixels. The drawing rectangles use bottom-up points.
+        let scaleX = CGFloat(width) / imageRect.width
+        let scaleY = CGFloat(height) / imageRect.height
+        let source = NSRect(
+            x: (visible.minX - imageRect.minX) * scaleX,
+            y: (imageRect.maxY - visible.maxY) * scaleY,
+            width: visible.width * scaleX,
+            height: visible.height * scaleY
+        ).integral.intersection(NSRect(x: 0, y: 0, width: width, height: height))
+        guard let crop = cropping(to: source) else { return }
+        let destination = NSRect(
+            x: imageRect.minX + source.minX / scaleX,
+            y: imageRect.maxY - source.maxY / scaleY,
+            width: source.width / scaleX,
+            height: source.height / scaleY
+        )
+        context.draw(crop, in: destination)
+    }
+}
+
 @MainActor
-public final class PinWindowController: NSObject {
+public final class PinWindowController: NSObject, NSWindowDelegate {
+    fileprivate static let defaultVisibleFrame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+    private static let minimumZoom: CGFloat = 0.2
+
     public let window: NSPanel
     public private(set) var cgImage: CGImage
     public private(set) var baseSize: NSSize
@@ -297,8 +355,15 @@ public final class PinWindowController: NSObject {
     private weak var manager: PinManager?
     private let contentView: PinCanvasView
     private var historyID: UUID?
+    private var visibleFrame: NSRect
+    private var isFitToWindow: Bool
+    fileprivate private(set) var viewport: PinViewport
 
-    public init(
+    var projectedImageFrame: NSRect {
+        viewport.imageRect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
+    }
+
+    public convenience init(
         cgImage: CGImage,
         baseSize: NSSize,
         backingScale: Double,
@@ -307,14 +372,52 @@ public final class PinWindowController: NSObject {
         manager: PinManager,
         originalText: String? = nil
     ) {
-        self.cgImage = cgImage
-        self.baseSize = baseSize
-        self.backingScale = backingScale
-        self.originalText = originalText
-        self.showBorder = showBorder
-        self.manager = manager
+        let screen = Self.screen(containing: NSRect(origin: origin, size: baseSize))
+        self.init(cgImage: cgImage, baseSize: baseSize, backingScale: backingScale, origin: origin,
+                  showBorder: showBorder, manager: manager, originalText: originalText,
+                  visibleFrame: screen?.visibleFrame ?? Self.defaultVisibleFrame)
+    }
 
-        let rect = NSRect(origin: origin, size: baseSize)
+    fileprivate convenience init(
+        cgImage: CGImage, baseSize: NSSize, backingScale: Double, origin: NSPoint, showBorder: Bool,
+        manager: PinManager, originalText: String?, visibleFrame: NSRect
+    ) {
+        let frame = NSRect(origin: origin, size: baseSize)
+        let display = PinDisplayState(
+            frame: frame, baseSize: baseSize, backingScale: backingScale, zoomScale: 1,
+            preferredOpacity: 1, effectiveWindowOpacity: 1, showBorder: showBorder, isClickThrough: false
+        )
+        self.init(cgImage: cgImage, display: display, manager: manager, originalText: originalText, visibleFrame: visibleFrame)
+    }
+
+    private init(
+        cgImage: CGImage, display: PinDisplayState, manager: PinManager,
+        originalText: String?, visibleFrame: NSRect
+    ) {
+        let fit = Self.fitScale(for: display.baseSize, in: visibleFrame)
+        let fitted = fit < 1
+        let zoom = fitted ? fit : max(Self.minimumZoom, display.zoomScale)
+        var viewport = PinViewport(baseSize: display.baseSize, zoom: zoom, fitted: fitted, limit: visibleFrame.size)
+        if !fitted, let origin = display.imageOrigin {
+            viewport.pan(to: origin)
+        }
+        let rect = Self.openingFrame(
+            display.frame, size: viewport.size, in: visibleFrame,
+            keepPosition: !fitted
+        )
+        self.cgImage = cgImage
+        self.baseSize = display.baseSize
+        self.backingScale = display.backingScale
+        self.originalText = originalText
+        self.zoomScale = zoom
+        self.opacity = display.preferredOpacity
+        self.showBorder = display.showBorder
+        self.isClickThrough = display.isClickThrough
+        self.manager = manager
+        self.visibleFrame = visibleFrame
+        self.isFitToWindow = fitted
+        self.viewport = viewport
+
         let panel = PinPanel(
             contentRect: rect,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -329,36 +432,111 @@ public final class PinWindowController: NSObject {
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = false
+        panel.ignoresMouseEvents = display.isClickThrough
+        panel.alphaValue = display.effectiveWindowOpacity
 
-        self.contentView = PinCanvasView(frame: NSRect(origin: .zero, size: baseSize))
+        self.contentView = PinCanvasView(frame: NSRect(origin: .zero, size: rect.size))
         self.window = panel
         super.init()
 
         contentView.owner = self
         panel.contentView = contentView
         // NSPanel rounds the initial content rect outward. Reapply the size at its current origin.
-        setPinFrame(NSRect(origin: panel.frame.origin, size: baseSize), display: false)
-        contentView.needsDisplay = true
+        setPinFrame(NSRect(origin: panel.frame.origin, size: rect.size))
+        panel.delegate = self
     }
 
     fileprivate convenience init(restoring snapshot: PinSnapshot, manager: PinManager) {
         let display = snapshot.displayState
         self.init(
-            cgImage: snapshot.image, baseSize: display.baseSize, backingScale: display.backingScale,
-            origin: display.frame.origin, showBorder: display.showBorder, manager: manager, originalText: snapshot.originalText
+            cgImage: snapshot.image, display: display, manager: manager, originalText: snapshot.originalText,
+            visibleFrame: Self.screen(containing: display.frame)?.visibleFrame ?? Self.defaultVisibleFrame
         )
         historyID = snapshot.historyID
-        zoomScale = display.zoomScale
-        opacity = display.preferredOpacity
-        isClickThrough = display.isClickThrough
-        window.ignoresMouseEvents = display.isClickThrough
-        window.alphaValue = display.effectiveWindowOpacity
-        setPinFrame(display.frame, display: false)
     }
 
-    private func setPinFrame(_ frame: NSRect, display: Bool) {
-        window.setFrame(frame, display: display)
+    private static func screen(containing frame: NSRect) -> NSScreen? {
+        let screens = NSScreen.screens
+        func overlap(_ screen: NSScreen) -> CGFloat {
+            let intersection = frame.intersection(screen.frame)
+            return intersection.isNull ? 0 : intersection.width * intersection.height
+        }
+        if let screen = screens.max(by: { overlap($0) < overlap($1) }), overlap(screen) > 0 {
+            return screen
+        }
+        return screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? screens.first
+    }
+
+    private static func fitScale(for size: NSSize, in visible: NSRect) -> CGFloat {
+        min(1, visible.width / size.width, visible.height / size.height)
+    }
+
+    private static func openingFrame(_ frame: NSRect, size: NSSize, in visible: NSRect, keepPosition: Bool) -> NSRect {
+        let isOnScreen = frame.intersects(visible)
+        if keepPosition, size == frame.size, isOnScreen { return frame }
+        let center = isOnScreen ? NSPoint(x: frame.midX, y: frame.midY) : NSPoint(x: visible.midX, y: visible.midY)
+        return frameInside(visible, size: size, origin: NSPoint(x: center.x - size.width / 2, y: center.y - size.height / 2))
+    }
+
+    private static func frameInside(_ visible: NSRect, size: NSSize, origin: NSPoint) -> NSRect {
+        NSRect(
+            x: min(max(visible.minX, origin.x), visible.maxX - size.width),
+            y: min(max(visible.minY, origin.y), visible.maxY - size.height),
+            width: size.width, height: size.height
+        )
+    }
+
+    private func setPinFrame(_ frame: NSRect) {
+        window.setFrame(frame, display: false)
         contentView.frame = NSRect(origin: .zero, size: frame.size)
+        contentView.needsDisplay = true
+    }
+
+    private func applyZoom(_ scale: CGFloat, fitted: Bool, anchor: NSPoint, movingToScreen: Bool = false) {
+        let oldFrame = window.frame
+        let oldImage = viewport.imageRect
+        let anchorOnScreen = NSPoint(x: oldFrame.minX + anchor.x, y: oldFrame.minY + anchor.y)
+        var next = PinViewport(baseSize: baseSize, zoom: scale, fitted: fitted, limit: visibleFrame.size)
+        let origin = NSPoint(
+            x: anchorOnScreen.x - next.size.width * anchor.x / viewport.size.width,
+            y: anchorOnScreen.y - next.size.height * anchor.y / viewport.size.height
+        )
+        // Keep the move grip reachable when dragging the body pans the image.
+        let keepOnScreen = fitted || movingToScreen || viewport.isClipped || next.isClipped
+        let frame = keepOnScreen
+            ? Self.frameInside(visibleFrame, size: next.size, origin: origin)
+            : NSRect(origin: origin, size: next.size)
+        let nextAnchor = movingToScreen
+            ? NSPoint(x: next.size.width / 2, y: next.size.height / 2)
+            : NSPoint(x: anchorOnScreen.x - frame.minX, y: anchorOnScreen.y - frame.minY)
+        // Keep the same source point under the pointer as the window stops growing.
+        next.pan(to: NSPoint(
+            x: nextAnchor.x - next.imageRect.width * (anchor.x - oldImage.minX) / oldImage.width,
+            y: nextAnchor.y - next.imageRect.height * (anchor.y - oldImage.minY) / oldImage.height
+        ))
+        zoomScale = scale
+        isFitToWindow = fitted
+        viewport = next
+        setPinFrame(frame)
+    }
+
+    fileprivate func panImage(to origin: NSPoint) {
+        viewport.pan(to: origin)
+        contentView.needsDisplay = true
+    }
+
+    public func windowDidChangeScreen(_ notification: Notification) {
+        if !contentView.isMovingWindow { refreshDisplayBounds() }
+    }
+
+    fileprivate func refreshDisplayBounds(dropPoint: NSPoint? = nil) {
+        let dropScreen = dropPoint.flatMap { point in NSScreen.screens.first { $0.frame.contains(point) } }
+        let screen = dropScreen ?? Self.screen(containing: window.frame)
+        guard let visible = screen?.visibleFrame, visible != visibleFrame else { return }
+        visibleFrame = visible
+        let scale = isFitToWindow ? Self.fitScale(for: baseSize, in: visible) : zoomScale
+        applyZoom(scale, fitted: isFitToWindow,
+                  anchor: NSPoint(x: viewport.size.width / 2, y: viewport.size.height / 2), movingToScreen: true)
     }
 
     public func show() {
@@ -372,7 +550,8 @@ public final class PinWindowController: NSObject {
             displayState: PinDisplayState(
                 frame: window.frame, baseSize: baseSize, backingScale: backingScale, zoomScale: zoomScale,
                 preferredOpacity: opacity, effectiveWindowOpacity: window.alphaValue,
-                showBorder: showBorder, isClickThrough: isClickThrough
+                showBorder: showBorder, isClickThrough: isClickThrough,
+                imageOrigin: viewport.isClipped ? viewport.imageRect.origin : nil
             ),
             historyID: historyID
         )
@@ -401,12 +580,7 @@ public final class PinWindowController: NSObject {
             width: max(32.0, Double(newImage.width) / max(1.0, backingScale)),
             height: max(32.0, Double(newImage.height) / max(1.0, backingScale))
         )
-        self.zoomScale = 1.0
-        var frame = window.frame
-        let center = NSPoint(x: frame.midX, y: frame.midY)
-        frame.size = baseSize
-        frame.origin = NSPoint(x: center.x - baseSize.width * 0.5, y: center.y - baseSize.height * 0.5)
-        setPinFrame(frame, display: true)
+        showWholeImage(anchor: NSPoint(x: viewport.size.width / 2, y: viewport.size.height / 2))
     }
 
     public func setShowBorder(_ on: Bool) {
@@ -429,9 +603,21 @@ public final class PinWindowController: NSObject {
     }
 
     public func adjustZoom(delta: CGFloat, anchorInWindow: NSPoint) {
+        let fit = Self.fitScale(for: baseSize, in: visibleFrame)
+        let minimum = Self.minimumZoom
+        if fit < minimum, delta < 0, zoomScale <= minimum {
+            guard zoomScale != fit else { return }
+            applyZoom(fit, fitted: true, anchor: anchorInWindow)
+            contentView.showBadgeTemporarily(L10n.tr("适合窗口", "Fit to Window"))
+            return
+        }
         let step: CGFloat = 1.08
-        let proposedScale = delta > 0 ? zoomScale * step : zoomScale / step
-        let boundedScale = max(0.2, min(4.0, proposedScale))
+        let proposedScale = if zoomScale < minimum {
+            minimum
+        } else {
+            delta > 0 ? zoomScale * step : zoomScale / step
+        }
+        let boundedScale = max(minimum, min(4.0, proposedScale))
         let boundedPercent = Int((boundedScale * 100).rounded())
         let crossesOriginalSize = (zoomScale < 1.0 && boundedScale > 1.0)
             || (zoomScale > 1.0 && boundedScale < 1.0)
@@ -439,21 +625,8 @@ public final class PinWindowController: NSObject {
         let newScale = returnsToOriginalSize ? 1.0 : boundedScale
         guard newScale != zoomScale else { return }
 
-        let oldFrame = window.frame
-        let relX = anchorInWindow.x / max(1, oldFrame.width)
-        let relY = anchorInWindow.y / max(1, oldFrame.height)
-
-        zoomScale = newScale
-        let newSize = returnsToOriginalSize ? baseSize : NSSize(
-            width: round(baseSize.width * newScale), height: round(baseSize.height * newScale)
-        )
-        let screenAnchorX = oldFrame.minX + anchorInWindow.x
-        let screenAnchorY = oldFrame.minY + anchorInWindow.y
-        let newOrigin = NSPoint(x: screenAnchorX - newSize.width * relX, y: screenAnchorY - newSize.height * relY)
-
-        setPinFrame(NSRect(origin: newOrigin, size: newSize), display: true)
+        applyZoom(newScale, fitted: false, anchor: anchorInWindow)
         contentView.showBadgeTemporarily("\(returnsToOriginalSize ? 100 : boundedPercent)%")
-        contentView.needsDisplay = true
     }
 
     public func adjustOpacity(delta: CGFloat) {
@@ -465,13 +638,14 @@ public final class PinWindowController: NSObject {
     }
 
     public func resetTransform() {
-        zoomScale = 1.0
         opacity = 1.0
         window.alphaValue = 1.0
-        var f = window.frame
-        f.size = baseSize
-        setPinFrame(f, display: true)
-        contentView.needsDisplay = true
+        showWholeImage(anchor: .zero)
+    }
+
+    private func showWholeImage(anchor: NSPoint) {
+        let scale = Self.fitScale(for: baseSize, in: visibleFrame)
+        applyZoom(scale, fitted: scale < 1, anchor: anchor)
     }
 
     public func requestAnnotation() {
@@ -524,11 +698,26 @@ public final class PinWindowController: NSObject {
 
 @MainActor
 private final class PinCanvasView: NSView {
+    private enum Drag {
+        case window(mouse: NSPoint, origin: NSPoint)
+        case image(mouse: NSPoint, origin: NSPoint)
+    }
+
     weak var owner: PinWindowController?
-    private var dragStartMouseScreen: NSPoint?
-    private var dragStartWindowOrigin: NSPoint?
+    private var drag: Drag?
     private var badgeText: String?
     private var badgeClearTask: Task<Void, Never>?
+
+    var isMovingWindow: Bool {
+        if case .window = drag { return true }
+        return false
+    }
+
+    private var moveGrip: NSRect {
+        let width = min(48, bounds.width)
+        return NSRect(x: bounds.midX - width / 2, y: max(0, bounds.height - 20),
+                      width: width, height: min(20, bounds.height))
+    }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -556,7 +745,16 @@ private final class PinCanvasView: NSView {
         ctx.addPath(clipPath)
         ctx.clip()
         ctx.interpolationQuality = .high
-        ctx.draw(owner.cgImage, in: bounds)
+        owner.cgImage.drawVisibleRegion(in: ctx, projectedTo: owner.viewport.imageRect, clippedTo: bounds)
+        if owner.viewport.isClipped {
+            let grip = moveGrip.insetBy(dx: min(4, moveGrip.width / 4), dy: min(4, moveGrip.height / 4))
+            ctx.setFillColor(CGColor(gray: 0.1, alpha: 0.7))
+            ctx.addPath(CGPath(roundedRect: grip, cornerWidth: 5, cornerHeight: 5, transform: nil))
+            ctx.fillPath()
+            let mark = NSRect(x: grip.midX - grip.width / 4, y: grip.midY - 1, width: grip.width / 2, height: 2)
+            ctx.setFillColor(CGColor(gray: 1, alpha: 0.9))
+            ctx.fill(mark)
+        }
         ctx.restoreGState()
 
         if owner.showBorder {
@@ -592,6 +790,7 @@ private final class PinCanvasView: NSView {
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
             let sz = (badge as NSString).size(withAttributes: attrs)
             let pill = NSRect(x: 9, y: bounds.height - sz.height - 15, width: sz.width + 16, height: sz.height + 7)
+            guard bounds.contains(pill) else { return }
             let path = NSBezierPath(roundedRect: pill, xRadius: 6.0, yRadius: 6.0)
             (isDark ? NSColor(srgbRed: 0.11, green: 0.11, blue: 0.125, alpha: 0.96) : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.96)).setFill()
             path.fill()
@@ -603,30 +802,39 @@ private final class PinCanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        window?.makeKey()
-        window?.makeFirstResponder(self)
+        guard let owner, let window else { return }
+        window.makeKey()
+        window.makeFirstResponder(self)
         if event.clickCount == 2 {
-            owner?.closeSelf()
+            owner.closeSelf()
             return
         }
-        dragStartMouseScreen = NSEvent.mouseLocation
-        dragStartWindowOrigin = window?.frame.origin
+        let mouse = convert(event.locationInWindow, from: nil)
+        if owner.viewport.isClipped, !moveGrip.contains(mouse) {
+            drag = .image(mouse: mouse, origin: owner.viewport.imageRect.origin)
+        } else {
+            drag = .window(mouse: NSEvent.mouseLocation, origin: window.frame.origin)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let startMouse = dragStartMouseScreen,
-              let startOrigin = dragStartWindowOrigin,
-              let win = window else { return }
-        let cur = NSEvent.mouseLocation
-        win.setFrameOrigin(NSPoint(
-            x: startOrigin.x + (cur.x - startMouse.x),
-            y: startOrigin.y + (cur.y - startMouse.y)
-        ))
+        guard let drag else { return }
+        switch drag {
+        case .window(let mouse, let origin):
+            let point = NSEvent.mouseLocation
+            window?.setFrameOrigin(NSPoint(x: origin.x + point.x - mouse.x, y: origin.y + point.y - mouse.y))
+        case .image(let mouse, let origin):
+            let point = convert(event.locationInWindow, from: nil)
+            owner?.panImage(to: NSPoint(x: origin.x + point.x - mouse.x, y: origin.y + point.y - mouse.y))
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
-        dragStartMouseScreen = nil
-        dragStartWindowOrigin = nil
+        let endedDrag = drag
+        drag = nil
+        if case .window(_, let origin) = endedDrag, let window, window.frame.origin != origin {
+            owner?.refreshDisplayBounds(dropPoint: NSEvent.mouseLocation)
+        }
     }
 
     override func scrollWheel(with event: NSEvent) {

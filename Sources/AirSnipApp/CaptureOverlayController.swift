@@ -99,6 +99,7 @@ fileprivate struct AnnotationImage {
     let pixelsPerPoint: CGSize
     let outputScale: Double
     let window: (ownerName: String, includeShadow: Bool)?
+    var projectedRect: ASRect? = nil
 }
 
 fileprivate enum OverlayCanvasSource {
@@ -250,82 +251,42 @@ public final class CaptureSessionCoordinator {
             onSessionEnded?()
             return
         }
-        if case .windowedPin(_, _, let toolbarScale) = presentation {
-            startWindowedPinAnnotation(pin: pin, screen: screen, rawBuffer: rawBuf, toolbarScale: toolbarScale)
-            return
-        }
-
-        // Build a synthetic full-screen snapshot with the pin's image placed at its current window position
-        let sFrame = screen.frame
-        let scale = pin.backingScale
-        let fullW = max(1, Int((sFrame.width * CGFloat(scale)).rounded()))
-        let fullH = max(1, Int((sFrame.height * CGFloat(scale)).rounded()))
-
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(
-            data: nil,
-            width: fullW,
-            height: fullH,
-            bitsPerComponent: 8,
-            bytesPerRow: fullW * 4,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            onSessionEnded?()
-            return
-        }
-
-        ctx.setFillColor(CGColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 1.0))
-        ctx.fill(CGRect(x: 0, y: 0, width: fullW, height: fullH))
-
         let pinFrame = pin.window.frame
-        let drawW = CGFloat(rawBuf.width)
-        let drawH = CGFloat(rawBuf.height)
-        let localLeftPt = pinFrame.minX - sFrame.minX
-        let localBottomPt = pinFrame.minY - sFrame.minY
-        let cgDrawRect = CGRect(
-            x: localLeftPt * CGFloat(scale),
-            y: localBottomPt * CGFloat(scale),
-            width: drawW,
-            height: drawH
-        )
-        ctx.draw(pin.cgImage, in: cgDrawRect)
-
-        guard let fullCG = ctx.makeImage(),
-              let fullBuf = PixelBufferRGBA(cgImage: fullCG) else {
-            onSessionEnded?()
-            return
+        let frame: CGRect
+        if case .windowedPin(_, _, let toolbarScale) = presentation {
+            frame = windowedPinAnnotationFrame(pinFrame, visible: screen.visibleFrame, toolbarScale: toolbarScale)
+        } else {
+            frame = screen.frame
         }
 
-        let selTopDown = ASRect(
-            x: Double(localLeftPt),
-            y: Double(sFrame.height - (localBottomPt + drawH / CGFloat(scale))),
-            width: Double(drawW) / scale,
-            height: Double(drawH) / scale
+        func topDown(_ rect: CGRect) -> ASRect {
+            ASRect(x: rect.minX - frame.minX, y: frame.maxY - rect.maxY, width: rect.width, height: rect.height)
+        }
+        let projected = topDown(pin.projectedImageFrame)
+        let image = AnnotationImage(
+            cgImage: pin.cgImage,
+            rawBuffer: rawBuf,
+            pixelsPerPoint: CGSize(
+                width: CGFloat(rawBuf.width) / projected.width,
+                height: CGFloat(rawBuf.height) / projected.height
+            ),
+            outputScale: pin.backingScale,
+            window: nil,
+            projectedRect: projected
         )
-
-        let snap = CapturedScreenSnapshot(
+        let ctrl = OverlayScreenController(
             screen: screen,
-            frameInGlobalAppKit: sFrame,
-            frameTopDown: ASRect(x: 0, y: 0, width: Double(sFrame.width), height: Double(sFrame.height)),
-            cgImage: fullCG,
-            rawBuffer: fullBuf,
-            backingScale: scale,
-            windowsLocalTopDown: []
+            frameInGlobalAppKit: frame,
+            source: .fixedImage(image, displayRect: topDown(pinFrame.intersection(frame))),
+            coordinator: self
         )
 
         pin.window.orderOut(nil)
-        let ctrl = OverlayScreenController(snapshot: snap, coordinator: self, lockedInitialSelection: selTopDown)
         screenControllers.append(ctrl)
-        ctrl.show()
         ctrl.focusWindow()
     }
 
-    private func startWindowedPinAnnotation(
-        pin: PinWindowController, screen: NSScreen, rawBuffer: PixelBufferRGBA, toolbarScale: CGFloat
-    ) {
-        let pinFrame = pin.window.frame
-        let visible = screen.visibleFrame
+    private func windowedPinAnnotationFrame(_ pinFrame: CGRect, visible: CGRect, toolbarScale: CGFloat) -> CGRect {
         // Reserve room for the toolbar, its style row and the color picker.
         let width = min(visible.width, 520 * toolbarScale)
         let height = 110 * toolbarScale + 224
@@ -340,32 +301,7 @@ public final class CaptureSessionCoordinator {
             width: width,
             height: pinFrame.height + extra
         )
-        let frame = pinFrame.union(chrome)
-        let selection = ASRect(
-            x: pinFrame.minX - frame.minX,
-            y: frame.maxY - pinFrame.maxY,
-            width: pinFrame.width,
-            height: pinFrame.height
-        )
-        let image = AnnotationImage(
-            cgImage: pin.cgImage,
-            rawBuffer: rawBuffer,
-            pixelsPerPoint: CGSize(
-                width: CGFloat(rawBuffer.width) / pinFrame.width,
-                height: CGFloat(rawBuffer.height) / pinFrame.height
-            ),
-            outputScale: pin.backingScale,
-            window: nil
-        )
-        let ctrl = OverlayScreenController(
-            screen: screen,
-            frameInGlobalAppKit: frame,
-            source: .fixedImage(image, displayRect: selection),
-            coordinator: self
-        )
-        pin.window.orderOut(nil)
-        screenControllers.append(ctrl)
-        ctrl.focusWindow()
+        return pinFrame.union(chrome)
     }
 
     public func startStandaloneImageEdit(cgImage: CGImage, backingScale: Double, screen: NSScreen) {
@@ -1208,16 +1144,21 @@ final class OverlayCanvasView: NSView {
 
         if let sel = selection, sel.width >= 1 && sel.height >= 1 {
             if let image = annotationImage {
-                let r = sel.cgRect
+                let projected = image.projectedRect ?? sel
+                let r = projected.cgRect
                 if isWindowedPinAnnotation {
                     // Transparent parts of the pin still need to receive drawing gestures.
                     ctx.setFillColor(CGColor(gray: 0, alpha: 0.02))
-                    ctx.fill(r)
+                    ctx.fill(sel.cgRect)
+                } else if screenSnapshot == nil {
+                    ctx.setFillColor(CGColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 1))
+                    ctx.fill(bounds)
                 } else {
                     ctx.setFillColor(CGColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 0.62))
                     ctx.fill(bounds)
                 }
                 ctx.saveGState()
+                if projected != sel { ctx.clip(to: sel.cgRect) }
                 if image.window?.includeShadow == true {
                     ctx.setShadow(
                         offset: CGSize(width: 0, height: 10.0),
@@ -1228,14 +1169,18 @@ final class OverlayCanvasView: NSView {
                 ctx.translateBy(x: r.minX, y: r.maxY)
                 ctx.scaleBy(x: 1, y: -1)
                 ctx.interpolationQuality = .high
-                ctx.draw(image.cgImage, in: CGRect(x: 0, y: 0, width: r.width, height: r.height))
+                image.cgImage.drawVisibleRegion(
+                    in: ctx,
+                    projectedTo: CGRect(origin: .zero, size: r.size),
+                    clippedTo: CGRect(x: sel.minX - r.minX, y: r.maxY - sel.maxY, width: sel.width, height: sel.height)
+                )
                 ctx.restoreGState()
 
                 AnnotationRenderer.drawAnnotations(
                     in: ctx,
                     objects: document.objects,
                     rawBuffer: image.rawBuffer,
-                    rawOrigin: ASPoint(sel.minX, sel.minY),
+                    rawOrigin: ASPoint(projected.minX, projected.minY),
                     pixelsPerPoint: image.pixelsPerPoint,
                     clipBounds: sel
                 )
@@ -3757,7 +3702,7 @@ final class OverlayCanvasView: NSView {
             let pressedMods = HotkeyModifiers.fromNSEventFlags(flags)
             let candidateBinding = HotkeyBinding(keyCode: kc, modifiers: pressedMods)
 
-            if screenSnapshot != nil && !cfg.hotkeys.recapture.isUnbound && candidateBinding == cfg.hotkeys.recapture {
+            if !isWindowedPinAnnotation && !cfg.hotkeys.recapture.isUnbound && candidateBinding == cfg.hotkeys.recapture {
                 triggerRecaptureSelfUI()
                 return
             }
@@ -4222,7 +4167,6 @@ final class OverlayCanvasView: NSView {
     // MARK: - Recapture Self UI (Shift+F1, CAP-8 / ADR 0031)
 
     private func triggerRecaptureSelfUI() {
-        guard let snapshot = screenSnapshot else { return }
         commitInlineEditorsIfNeeded()
         guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else { return }
         cacheDisplay(in: bounds, to: bitmapRep)
@@ -4230,10 +4174,11 @@ final class OverlayCanvasView: NSView {
               let newBuf = PixelBufferRGBA(cgImage: cg) else {
             return
         }
+        let frame = frameInGlobalAppKit
         source = .screen(CapturedScreenSnapshot(
-            screen: snapshot.screen,
-            frameInGlobalAppKit: snapshot.frameInGlobalAppKit,
-            frameTopDown: snapshot.frameTopDown,
+            screen: screen,
+            frameInGlobalAppKit: frame,
+            frameTopDown: screenSnapshot?.frameTopDown ?? ASRect(x: 0, y: 0, width: frame.width, height: frame.height),
             cgImage: cg,
             rawBuffer: newBuf,
             backingScale: Double(cg.width) / max(1.0, Double(bounds.width)),
@@ -4355,10 +4300,11 @@ final class OverlayCanvasView: NSView {
             if document.isEmpty {
                 baked = baseCG
             } else {
+                let projected = image.projectedRect ?? sel
                 baked = AnnotationRenderer.bakeOutput(
                     rawSelection: baseCG,
                     objects: document.objects,
-                    selectionOrigin: ASPoint(sel.minX, sel.minY),
+                    selectionOrigin: ASPoint(projected.minX, projected.minY),
                     pixelsPerPoint: image.pixelsPerPoint
                 ) ?? baseCG
             }

@@ -981,23 +981,25 @@ public enum SmokeTestRunner {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return false }
         let pins = app.pinManager
 
-        func pinSize(for text: String) -> NSSize? {
+        func pin(for text: String) -> PinWindowController? {
             pasteboard.clearContents()
             guard pasteboard.setString(text, forType: .string) else { return nil }
             let count = pins.count
             triggerPinAndWait(app, from: pasteboard)
             guard pins.count == count + 1 else { return nil }
-            return pins.windows.last?.window.frame.size
+            return pins.windows.last
         }
 
         let longLine = String(repeating: "M", count: Int(screen.visibleFrame.width / 6) + 32)
-        guard let plain = pinSize(for: "iSnip"), let spaced = pinSize(for: "\t iSnip  \n"),
-              spaced.width > plain.width, spaced.height > plain.height,
-              let long = pinSize(for: longLine), long.height == plain.height, long.width > screen.visibleFrame.width else {
+        guard let plain = pin(for: "iSnip"), let spaced = pin(for: "\t iSnip  \n"),
+              spaced.baseSize.width > plain.baseSize.width, spaced.baseSize.height > plain.baseSize.height,
+              let long = pin(for: longLine), long.baseSize.height == plain.baseSize.height,
+              long.baseSize.width > screen.visibleFrame.width, long.originalText == longLine,
+              screen.visibleFrame.contains(long.window.frame), long.zoomScale < 1 else {
             fputs("FAIL: Text pins should preserve spacing and source lines at their natural size\n", stderr)
             return false
         }
-        print("[pins] PASS: 文字贴图保留留白和原行，长行按自然宽度超出屏幕")
+        print("[pins] PASS: 文字贴图保留留白和原行，超宽长行等比显示在屏幕内")
         return true
     }
 

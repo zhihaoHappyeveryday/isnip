@@ -14,6 +14,7 @@ struct PinDisplayState: Codable {
     let effectiveWindowOpacity: CGFloat
     let showBorder: Bool
     let isClickThrough: Bool
+    var imageOrigin: CGPoint? = nil
 }
 
 struct PinSnapshot {
