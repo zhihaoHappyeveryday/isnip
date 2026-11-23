@@ -1,5 +1,13 @@
 # Changelog
 
+## macOS v1.0.8
+
+本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
+
+- **长截图恢复**　拼接中断时，先原地补抓，再尝试回到最近确认的位置小步续截。仍接不上时，确认原选框起点后可自动重截一次。持续失败会保留已截内容。
+- **页尾收尾**　确认滚到底且末屏已拼全时直接完成。末屏加载较慢时，先在原地再抓一帧，再尝试回退补尾。已有长图可以复制或保存。
+- **下载**　Apple 芯片 Mac 请选择 arm64，Intel Mac 请选择 amd64。两种架构均提供 DMG、ZIP 和 SHA-256 校验文件。
+
 ## macOS v1.0.7
 
 本版本基于 `zzusec/isnip` 二次开发。 [原项目](https://github.com/zzusec/isnip)
